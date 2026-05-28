@@ -1,0 +1,46 @@
+runtime:
+  python:
+    required: true
+    version: ">=3.12"
+  git:
+    required: true
+    check:
+      command: ["git", "--version"]
+
+python_packages:
+  required:
+    - "python-docx"
+    - "openpyxl"
+    - "pypdf"
+    - "pillow"
+  optional:
+    ocr: []
+    office: []
+    pdf: []
+
+system_tools:
+  optional:
+    tesseract:
+      supported_platforms: ["windows", "macos", "linux"]
+      purpose: "Optional OCR enhancement for image-heavy sources."
+      check:
+        command: ["tesseract", "--version"]
+      fallback: "Use agent-assisted image understanding when unavailable."
+    libreoffice:
+      supported_platforms: ["windows", "macos", "linux"]
+      purpose: "Optional high-fidelity Office document conversion."
+      check:
+        command: ["libreoffice", "--version"]
+      fallback: "Use pure Python document extraction with reduced fidelity."
+    pandoc:
+      supported_platforms: ["windows", "macos", "linux"]
+      purpose: "Optional rich document conversion."
+      check:
+        command: ["pandoc", "--version"]
+      fallback: "Use format-specific Python converters."
+    pdftotext:
+      supported_platforms: ["windows", "macos", "linux"]
+      purpose: "Optional PDF text extraction enhancement."
+      check:
+        command: ["pdftotext", "-v"]
+      fallback: "Use pure Python PDF parsing."

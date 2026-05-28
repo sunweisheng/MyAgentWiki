@@ -1,0 +1,33 @@
+runtime:
+  python:
+    required: true
+    version: ">=3.12"
+  git:
+    required: true
+    check:
+      command: ["git", "--version"]
+
+workspace:
+  project_name: "${project_name}"
+  source_dir_name: "${source_dir_name}"
+  source_dir_path: "${source_dir_path}"
+
+python_packages:
+  required:
+    - "python-docx"
+    - "openpyxl"
+    - "pypdf"
+    - "pillow"
+  optional:
+    ocr: []
+    office: []
+    pdf: []
+
+system_tools:
+  optional:
+    tesseract:
+      supported_platforms: ["windows", "macos", "linux"]
+      purpose: "Optional OCR enhancement for image-heavy sources."
+      check:
+        command: ["tesseract", "--version"]
+      fallback: "Use agent-assisted image understanding when unavailable."

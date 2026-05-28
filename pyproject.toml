@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myagentwiki"
+version = "0.1.0"
+description = "A local LLM Wiki skill scaffold driven by Python scripts and coding agents."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+  { name = "sunweisheng" }
+]
+dependencies = [
+  "python-docx>=1.1.0",
+  "openpyxl>=3.1.0",
+  "pypdf>=5.0.0",
+  "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+ocr = []
+office = []
+pdf = []
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+myagentwiki = "myagentwiki.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
