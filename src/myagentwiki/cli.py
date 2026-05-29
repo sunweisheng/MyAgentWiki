@@ -14,6 +14,7 @@ import zipfile
 import struct
 import zlib
 import math
+import difflib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,6 +51,8 @@ DEFAULT_CHUNK_TARGET_TOKENS = 1000
 DEFAULT_CHUNK_MAX_TOKENS = 1600
 DEFAULT_CHUNK_MIN_TOKENS = 200
 DEFAULT_MAX_CLAIMS_PER_CHUNK = 3
+ALIAS_INDEX_REL_PATH = Path("indexes") / "aliases.json"
+PAGE_ALIAS_OVERRIDES_REL_PATH = Path("state") / "page_alias_overrides.json"
 NEGATION_MARKERS = ("不", "不是", "没有", "无法", "不能", "未", "无", "禁止", "不要", "not ", "no ", "never ", "cannot ")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
@@ -83,6 +86,7 @@ QUERY_PAGE_STATUS_WEIGHTS = {
 }
 QUERY_BM25_K1 = 1.5
 QUERY_BM25_B = 0.75
+QUERY_EXACT_MATCH_MAX_BOOST = 1.35
 QUERY_HEADING_BLACKLIST = {
     "原文概览 / source overview",
     "核心观点 / key points",
@@ -98,6 +102,52 @@ QUERY_HEADING_BLACKLIST = {
 }
 SEARCH_PAGES_INDEX_REL_PATH = Path("indexes") / "search_pages.jsonl"
 SEARCH_PAGES_INDEX_VERSION = "search_pages_v1"
+ALIAS_INDEX_VERSION = "aliases_v1"
+QUERY_INTENT_MARKERS = {
+    "definition": (
+        "是什么", "什么是", "定义", "是指", "指什么", "介绍一下", "what is", "define",
+    ),
+    "compare": (
+        "区别", "对比", "比较", "差异", "vs", "versus", "compare",
+    ),
+    "timeline": (
+        "时间线", "演变", "历史", "历程", "timeline",
+    ),
+    "how_to": (
+        "如何", "怎么", "步骤", "做法", "实践", "how to", "tutorial",
+    ),
+    "evidence": (
+        "来源", "证据", "出处", "引用", "依据", "为什么", "source", "evidence", "trace",
+    ),
+}
+QUERY_INTENT_FIELD_MULTIPLIERS = {
+    "lookup": {},
+    "definition": {
+        "title": 1.15,
+        "summary": 1.15,
+        "aliases": 1.10,
+    },
+    "compare": {
+        "claim_text": 1.15,
+        "body": 1.10,
+        "headings": 1.05,
+    },
+    "timeline": {
+        "body": 1.10,
+        "summary": 1.05,
+        "source_refs": 1.10,
+    },
+    "how_to": {
+        "headings": 1.15,
+        "body": 1.15,
+        "claim_text": 1.10,
+    },
+    "evidence": {
+        "source_refs": 1.80,
+        "claim_text": 1.20,
+        "body": 1.05,
+    },
+}
 
 
 @dataclass
@@ -317,6 +367,23 @@ def build_doctor_payload(root: Path) -> dict:
     required_python_packages_ok = all(
         item["ok"] for item in python_packages["required"].values()
     )
+    bootstrap_examples = {
+        "windows": [
+            r"py -3.12 -m venv .venv",
+            r".venv\Scripts\python -m pip install -U pip",
+            r".venv\Scripts\python -m myagentwiki bootstrap --extra dev",
+        ],
+        "macos": [
+            "python3.12 -m venv .venv",
+            ".venv/bin/python -m pip install -U pip",
+            ".venv/bin/python -m myagentwiki bootstrap --extra dev",
+        ],
+        "linux": [
+            "python3.12 -m venv .venv",
+            ".venv/bin/python -m pip install -U pip",
+            ".venv/bin/python -m myagentwiki bootstrap --extra dev",
+        ],
+    }
     return {
         "project": {
             "name": project_meta["project"]["name"],
@@ -338,6 +405,13 @@ def build_doctor_payload(root: Path) -> dict:
             ],
             "optional_missing": [name for name, item in optional_tools.items() if not item["ok"]],
         },
+        "bootstrap_guidance": {
+            "recommended_shell_examples": bootstrap_examples.get(platform_label, bootstrap_examples["linux"]),
+            "notes": [
+                "核心流程不依赖 shell 专属语法，Windows / macOS / Linux 都应可执行。",
+                "可选系统工具缺失时，优先走 Python 降级路径，再视需要交给 Agent 补强。",
+            ],
+        },
     }
 
 
@@ -350,6 +424,7 @@ def command_doctor(args: argparse.Namespace) -> CommandResult:
 
 def command_bootstrap(args: argparse.Namespace) -> CommandResult:
     # bootstrap 当前先聚焦 Python 依赖安装，不擅自处理系统级软件。
+    # 命令本身保持跨平台：直接调用当前 Python 解释器，不依赖 bash/zsh 专属语法。
     root = find_project_root()
     install_command = [sys.executable, "-m", "pip", "install", "-e"]
     if args.extras:
@@ -585,6 +660,216 @@ def load_workspace_config(target: Path) -> dict:
     # 工作区自己的配置放在 config/project.yml，后续 chunk/query 也会继续依赖它。
     config_path = target / "config" / "project.yml"
     return load_simple_yaml(config_path)
+
+
+def alias_index_path(target: Path) -> Path:
+    # alias registry 是工作区级派生索引，和 search index 一样放在 indexes/ 下。
+    return target / ALIAS_INDEX_REL_PATH
+
+
+def page_alias_overrides_path(target: Path) -> Path:
+    # 人工对页面 alias 的修订单独存一层覆盖，避免被后续自动页面重建直接抹掉。
+    return target / PAGE_ALIAS_OVERRIDES_REL_PATH
+
+
+def normalize_alias_value(text: str) -> str:
+    # alias / canonical 查询归一化尽量沿用 claim 文本清洗逻辑，
+    # 这样页面标题、别名、查询词之间更容易对齐。
+    return normalize_claim_text(text)
+
+
+def load_alias_index(target: Path) -> dict:
+    path = alias_index_path(target)
+    if not path.exists():
+        return {
+            "index_version": ALIAS_INDEX_VERSION,
+            "updated_at": None,
+            "canonical_map": {},
+            "alias_map": {},
+            "conflicts": [],
+        }
+    return load_json(path)
+
+
+def load_page_alias_overrides(target: Path) -> dict:
+    path = page_alias_overrides_path(target)
+    if not path.exists():
+        return {"page_aliases": {}}
+    return load_json(path)
+
+
+def write_page_alias_overrides(target: Path, payload: dict) -> None:
+    write_json(page_alias_overrides_path(target), payload)
+
+
+def load_live_page_aliases_by_id(target: Path) -> dict[str, list[str]]:
+    # alias 覆盖层只记录“人工最终想保留的页面 alias 集合”，
+    # 但在第一次人工处理前，覆盖层里往往还没有任何内容。
+    # 这里补一层从 pages.jsonl 读取当前 live alias 的快照，
+    # 让 assign/remove 基于“页面现状”增删，而不是误把别名列表清成只剩人工刚操作的那一项。
+    pages_path = target / "state" / "pages.jsonl"
+    if not pages_path.exists():
+        return {}
+
+    aliases_by_page_id: dict[str, list[str]] = {}
+    for record in load_jsonl(pages_path):
+        record = ensure_page_lifecycle_defaults(record)
+        if not is_live_page_record(record):
+            continue
+        aliases_by_page_id[record["page_id"]] = sorted(set(record.get("aliases", [])))
+    return aliases_by_page_id
+
+
+def remove_alias_from_overrides(
+    target: Path,
+    page_ids: list[str],
+    alias_value: str,
+) -> dict:
+    # 从指定页面的人工 alias 覆盖层里移除某个 alias。
+    overrides = load_page_alias_overrides(target)
+    page_aliases = overrides.setdefault("page_aliases", {})
+    live_aliases_by_page_id = load_live_page_aliases_by_id(target)
+    normalized_alias = normalize_alias_value(alias_value)
+
+    for page_id in page_ids:
+        page_override = page_aliases.setdefault(page_id, {})
+        aliases = sorted(set(page_override.get("aliases", live_aliases_by_page_id.get(page_id, []))))
+        aliases = [alias for alias in aliases if normalize_alias_value(alias) != normalized_alias]
+        page_override["aliases"] = aliases
+
+    write_page_alias_overrides(target, overrides)
+    return overrides
+
+
+def build_alias_index(page_records: list[dict]) -> dict:
+    # alias registry 统一记录 canonical_id、title、aliases 的双向映射关系。
+    # query、lint、Agent 约定都依赖它，避免各自维护一份别名世界观。
+    canonical_map: dict[str, dict] = {}
+    alias_map: dict[str, list[dict]] = {}
+
+    for page_record in filter_live_page_records(page_records):
+        page_id = page_record.get("page_id")
+        canonical_id = page_record.get("canonical_id") or page_id
+        title = page_record.get("title", "")
+        page_path = page_record.get("page_path", "")
+        page_type = page_record.get("type", "")
+        page_status = page_record.get("status", "")
+
+        canonical_map[canonical_id] = {
+            "canonical_id": canonical_id,
+            "page_id": page_id,
+            "title": title,
+            "page_path": page_path,
+            "type": page_type,
+            "status": page_status,
+            "aliases": sorted(set(page_record.get("aliases", []))),
+        }
+
+        candidates = [title, canonical_id, *page_record.get("aliases", [])]
+        seen_keys: set[str] = set()
+        for candidate in candidates:
+            normalized_candidate = normalize_alias_value(candidate)
+            if not normalized_candidate or normalized_candidate in seen_keys:
+                continue
+            seen_keys.add(normalized_candidate)
+            alias_map.setdefault(normalized_candidate, []).append({
+                "canonical_id": canonical_id,
+                "page_id": page_id,
+                "title": title,
+                "page_path": page_path,
+                "type": page_type,
+                "status": page_status,
+                "matched_from": candidate,
+            })
+
+    conflicts = []
+    for alias_key, matches in sorted(alias_map.items()):
+        canonical_ids = sorted({item["canonical_id"] for item in matches})
+        if len(canonical_ids) <= 1:
+            continue
+        conflicts.append({
+            "alias": alias_key,
+            "canonical_ids": canonical_ids,
+            "page_ids": sorted({item["page_id"] for item in matches}),
+        })
+
+    return {
+        "index_version": ALIAS_INDEX_VERSION,
+        "updated_at": utc_now_iso(),
+        "canonical_map": canonical_map,
+        "alias_map": alias_map,
+        "conflicts": conflicts,
+    }
+
+
+def write_alias_index(target: Path, page_records: list[dict]) -> dict:
+    alias_index = build_alias_index(page_records)
+    write_json(alias_index_path(target), alias_index)
+    return alias_index
+
+
+def apply_page_alias_overrides(target: Path, page_record: dict) -> dict:
+    # 自动页面重建前先叠加人工 alias 覆盖层。
+    overrides = load_page_alias_overrides(target)
+    page_aliases = overrides.get("page_aliases", {})
+    override = page_aliases.get(page_record.get("page_id"), {})
+    if not override:
+        return page_record
+
+    updated_record = dict(page_record)
+    if "aliases" in override:
+        updated_record["aliases"] = sorted(set(override.get("aliases", [])))
+    if "title" in override and override.get("title"):
+        updated_record["title"] = override["title"]
+    updated_record["updated"] = utc_now_iso()
+    return updated_record
+
+
+def build_alias_conflict_reviews(
+    alias_index: dict,
+    existing_reviews: dict[str, dict],
+) -> tuple[list[dict], list[str]]:
+    # alias registry 里一旦出现“一词多义”的冲突，就应进入 review 队列而不是只留在 lint 里。
+    created_reviews: list[dict] = []
+    touched_review_ids: list[str] = []
+
+    for conflict in alias_index.get("conflicts", []):
+        canonical_ids = sorted(conflict.get("canonical_ids", []))
+        page_ids = sorted(conflict.get("page_ids", []))
+        review_record = build_review_record(
+            kind="alias_conflict",
+            candidate_claim_ids=[],
+            reason="Detected alias key mapped to multiple canonical pages and requires manual disambiguation.",
+            evidence=[{
+                "alias": conflict.get("alias"),
+                "canonical_ids": canonical_ids,
+                "page_ids": page_ids,
+            }],
+            recommended_action="keep_both",
+            signature_parts=[
+                conflict.get("alias", ""),
+                *canonical_ids,
+                *page_ids,
+            ],
+        )
+        review_record["candidate_page_ids"] = page_ids
+        review_record["allowed_actions"] = ["keep_both", "edit_then_resume", "assign_alias", "remove_alias"]
+        review_record["resume_from"] = "alias_registry"
+
+        existing_review = existing_reviews.get(review_record["review_id"])
+        if existing_review is not None:
+            # 冲突仍然存在时，把 page_ids 刷新到最新集合即可。
+            existing_review["candidate_page_ids"] = page_ids
+            existing_review["evidence"] = review_record["evidence"]
+            existing_review["reason"] = review_record["reason"]
+            existing_review["recommended_action"] = review_record["recommended_action"]
+            touched_review_ids.append(existing_review["review_id"])
+            continue
+
+        created_reviews.append(review_record)
+        touched_review_ids.append(review_record["review_id"])
+
+    return created_reviews, touched_review_ids
 
 
 def replace_jsonl_record(path: Path, key_field: str, key_value: str, new_record: dict) -> None:
@@ -2141,7 +2426,7 @@ def review_lifecycle_status_for_record(review_record: dict) -> str:
         return "superseded"
     if review_record.get("archived_at"):
         return "archived"
-    if not review_record.get("candidate_claim_ids"):
+    if not review_record.get("candidate_claim_ids") and not review_record.get("candidate_page_ids"):
         return "superseded"
     return "active"
 
@@ -2211,7 +2496,7 @@ def is_live_review_record(review_record: dict) -> bool:
     # 才应继续进入概念页和后续人工处理视图。
     return (
         review_record.get("lifecycle_status") == "active"
-        and bool(review_record.get("candidate_claim_ids"))
+        and bool(review_record.get("candidate_claim_ids") or review_record.get("candidate_page_ids"))
     )
 
 
@@ -2359,9 +2644,165 @@ def normalize_claim_base_for_conflict(text: str) -> str:
 
 
 def build_similarity_bucket(text: str) -> str:
-    # 相似 claim 的第一版检测先走一个非常轻量的 bucket。
+    # 这个 bucket 现在主要服务于概念页聚合与缺页补齐。
+    # 它仍然保持“稳定、粗粒度、低成本”的特点，不承担最终相似判定责任。
     normalized = normalize_claim_text(text)
     return normalized[:24]
+
+
+def build_claim_similarity_tokens(text: str) -> list[str]:
+    # claim review 的相似检测要比概念页 bucket 更细一点：
+    # - 先去掉否定词，让“需要/不需要”这类冲突句仍能进入同一候选池
+    # - 再复用 query 的中英混合切词逻辑，保证检索和审核尽量共享一套词法直觉
+    base_text = normalize_claim_base_for_conflict(text)
+    seen: set[str] = set()
+    tokens: list[str] = []
+
+    for token in tokenize_for_search(base_text):
+        cleaned_token = token.strip()
+        if len(cleaned_token) < 2:
+            continue
+        if cleaned_token in seen:
+            continue
+        seen.add(cleaned_token)
+        tokens.append(cleaned_token)
+    return tokens
+
+
+def claim_similarity_token_weight(token: str) -> float:
+    # 更长的 token 往往语义更具体，给它更高一点的权重。
+    # 这里故意保持简单，避免引入太多难以解释的启发式参数。
+    latin_or_number = bool(re.fullmatch(r"[a-z0-9_]+", token))
+    if latin_or_number:
+        return max(1.0, min(len(token), 8) / 2.0)
+    return float(min(len(token), 4))
+
+
+def compute_weighted_token_overlap(left_tokens: list[str], right_tokens: list[str]) -> tuple[float, float, int]:
+    # overlap_ratio 看“共享语义片段占较短句子的比例”；
+    # jaccard_ratio 看“双方整体重合度”；
+    # 两者一起用，能减少“只共享开头几个泛词”导致的误报。
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    if not left_set or not right_set:
+        return 0.0, 0.0, 0
+
+    shared_tokens = left_set & right_set
+    shared_weight = sum(claim_similarity_token_weight(token) for token in shared_tokens)
+    left_weight = sum(claim_similarity_token_weight(token) for token in left_set)
+    right_weight = sum(claim_similarity_token_weight(token) for token in right_set)
+
+    overlap_ratio = shared_weight / max(1.0, min(left_weight, right_weight))
+    jaccard_ratio = shared_weight / max(1.0, left_weight + right_weight - shared_weight)
+    return overlap_ratio, jaccard_ratio, len(shared_tokens)
+
+
+def measure_claim_text_similarity(left_text: str, right_text: str) -> dict:
+    # 这里把“候选召回”和“最终是否足够相似”拆开：
+    # 候选召回尽量宽一点，最终判定则结合字符序列和 token 重合度做保守收敛。
+    left_base = normalize_claim_base_for_conflict(left_text)
+    right_base = normalize_claim_base_for_conflict(right_text)
+    left_tokens = build_claim_similarity_tokens(left_text)
+    right_tokens = build_claim_similarity_tokens(right_text)
+    overlap_ratio, jaccard_ratio, shared_token_count = compute_weighted_token_overlap(left_tokens, right_tokens)
+    if left_base and right_base:
+        matcher = difflib.SequenceMatcher(None, left_base, right_base)
+        sequence_ratio = matcher.ratio()
+        longest_common_span = max((block.size for block in matcher.get_matching_blocks()), default=0)
+    else:
+        sequence_ratio = 0.0
+        longest_common_span = 0
+    longest_common_span_ratio = longest_common_span / max(1, min(len(left_base), len(right_base)))
+
+    shorter_base, longer_base = sorted([left_base, right_base], key=len)
+    containment = bool(shorter_base) and len(shorter_base) >= 12 and shorter_base in longer_base
+
+    return {
+        "left_base": left_base,
+        "right_base": right_base,
+        "left_tokens": left_tokens,
+        "right_tokens": right_tokens,
+        "overlap_ratio": overlap_ratio,
+        "jaccard_ratio": jaccard_ratio,
+        "shared_token_count": shared_token_count,
+        "sequence_ratio": sequence_ratio,
+        "longest_common_span": longest_common_span,
+        "longest_common_span_ratio": longest_common_span_ratio,
+        "containment": containment,
+    }
+
+
+def claims_are_similar_for_review(left_text: str, right_text: str) -> bool:
+    # 这一层不追求“语义理解”，只做 V1 足够稳定的近重复/冲突前置筛选：
+    # - 完全同 base：直接视为同主题
+    # - 一方基本包含另一方：通常是“扩写版/带前缀版”
+    # - 其余情况需要同时满足字符近似 + token 重合，避免误把同领域句子都撞进 review
+    metrics = measure_claim_text_similarity(left_text, right_text)
+    left_base = metrics["left_base"]
+    right_base = metrics["right_base"]
+    if not left_base or not right_base:
+        return False
+    if left_base == right_base:
+        return True
+    if metrics["containment"]:
+        return True
+    if metrics["sequence_ratio"] >= 0.90:
+        return True
+    if (
+        metrics["longest_common_span_ratio"] >= 0.62
+        and metrics["shared_token_count"] >= 6
+    ):
+        return True
+    if (
+        metrics["sequence_ratio"] >= 0.72
+        and metrics["overlap_ratio"] >= 0.60
+        and metrics["shared_token_count"] >= 4
+    ):
+        return True
+    if (
+        metrics["overlap_ratio"] >= 0.82
+        and metrics["jaccard_ratio"] >= 0.55
+        and metrics["shared_token_count"] >= 5
+    ):
+        return True
+    return False
+
+
+def index_claim_similarity_tokens(
+    similarity_index: dict[str, set[str]],
+    claim_record: dict,
+) -> None:
+    # 这里维护一个很轻量的 token -> claim_id 倒排索引，
+    # 让“前缀不同但核心短语相同”的 claim 也能被召回进入后续精判。
+    for token in build_claim_similarity_tokens(claim_record.get("text", "")):
+        similarity_index.setdefault(token, set()).add(claim_record["claim_id"])
+
+
+def rebuild_claim_similarity_index(claim_records: list[dict]) -> dict[str, set[str]]:
+    similarity_index: dict[str, set[str]] = {}
+    for claim_record in claim_records:
+        index_claim_similarity_tokens(similarity_index, claim_record)
+    return similarity_index
+
+
+def collect_claim_review_candidate_ids(
+    claim_record: dict,
+    claims_by_similarity_bucket: dict[str, list[dict]],
+    claim_similarity_index: dict[str, set[str]],
+) -> set[str]:
+    # 候选召回分两路：
+    # 1) 老的 bucket，成本低、兼容现有概念页聚合
+    # 2) 新的 token 倒排，补足“句首不同但主体相同”的情况
+    candidate_claim_ids: set[str] = set()
+    similarity_bucket = build_similarity_bucket(claim_record["text"])
+    candidate_claim_ids.update(
+        item["claim_id"]
+        for item in claims_by_similarity_bucket.get(similarity_bucket, [])
+    )
+    for token in build_claim_similarity_tokens(claim_record.get("text", "")):
+        candidate_claim_ids.update(claim_similarity_index.get(token, set()))
+    candidate_claim_ids.discard(claim_record["claim_id"])
+    return candidate_claim_ids
 
 
 def append_unique(items: list[str], value: str) -> None:
@@ -2613,6 +3054,34 @@ def collect_missing_concept_bucket_keys(
     return missing_bucket_keys
 
 
+def regroup_concept_claims_by_canonical_topic(
+    concept_claim_groups: dict[str, list[dict]],
+) -> dict[str, list[dict]]:
+    # 第一层 bucket 主要解决“相似 claim 初步召回”。
+    # 但真实页面层还需要再做一次“主题收口”：
+    # 如果不同 bucket 最终推导出相同标题/规范键，就应该落到同一概念页，
+    # 否则会出现多个 live page 共用同一 canonical_id，进而污染 alias index 和 lint。
+    regrouped: dict[str, list[dict]] = {}
+
+    for bucket_key, grouped_claims in concept_claim_groups.items():
+        if not grouped_claims:
+            continue
+        canonical_claim = choose_canonical_claim(grouped_claims)
+        title = build_concept_title(canonical_claim)
+        canonical_key = build_concept_canonical_key(title)
+        # 这里最终只按 canonical_key 收口。
+        # 这样同一主题下的多条陈述即使来自不同 bucket，也会落到同一概念页，
+        # 避免多个 live page 共享同一 canonical_id。
+        regroup_key = canonical_key
+        regrouped.setdefault(regroup_key, []).extend(grouped_claims)
+
+    for regroup_key, grouped_claims in list(regrouped.items()):
+        deduped_by_claim_id = {claim_record["claim_id"]: claim_record for claim_record in grouped_claims}
+        regrouped[regroup_key] = list(deduped_by_claim_id.values())
+
+    return regrouped
+
+
 def remove_page_id_from_claim_records(claims_by_id: dict[str, dict], page_id: str) -> set[str]:
     dirty_claim_ids: set[str] = set()
     for claim_record in claims_by_id.values():
@@ -2808,9 +3277,23 @@ def shorten_title_text(value: str, limit: int = 32) -> str:
 
 
 def build_concept_page_id(bucket_key: str) -> str:
-    # 概念页 ID 先基于相似 bucket 生成，保证同一组 claim 可稳定落到同一页面。
+    # 概念页 ID 基于最终分组键生成。
+    # 在 V1 当前实现里，这个键已经包含“可读主题 + 规范概念键”的二次收口结果，
+    # 可以避免不同 bucket 最终生成相同 canonical_id 却 page_id 不同的问题。
     bucket_hash = hashlib.sha256(bucket_key.encode("utf-8")).hexdigest()
     return f"page_cpt_{bucket_hash[:12]}"
+
+
+def build_concept_group_key(claim_record: dict) -> str:
+    # 概念页聚合键尽量与 review 检测使用同一套“主题归一化”直觉。
+    # 这样 query、review、concept page 三者更容易围绕同一组 claim 收敛。
+    base_text = normalize_claim_base_for_conflict(claim_record.get("text", ""))
+    similarity_tokens = build_claim_similarity_tokens(claim_record.get("text", ""))
+    token_fingerprint = " ".join(similarity_tokens[:8])
+    seed = base_text or claim_record.get("normalized_text", "") or claim_record.get("text", "")
+    seed_hash = hashlib.sha256(f"{seed}|{token_fingerprint}".encode("utf-8")).hexdigest()[:12]
+    readable_prefix = build_similarity_bucket(claim_record.get("text", ""))
+    return f"{readable_prefix}|{seed_hash}"
 
 
 def concept_summary_page_path(page_id: str, title: str) -> Path:
@@ -3532,6 +4015,128 @@ def tokenize_for_search(text: str) -> list[str]:
     return tokens
 
 
+def normalize_query_text(text: str) -> str:
+    # query normalization 先保持轻量：
+    # 统一空白、大小写和常见标点，得到一个稳定查询串。
+    return normalize_claim_text(text)
+
+
+def detect_query_intent(query_text: str, normalized_query: str) -> str:
+    # V1 的意图识别先保持可解释：
+    # 只看一些高频提示词，不做复杂分类模型。
+    combined_text = f"{query_text.lower()} {normalized_query}"
+    # 某些意图比 definition 更具体，例如“如何建立来源追踪”“来源证据是什么”。
+    # 这里先把 how_to / evidence 提到前面，避免被“是什么”或“来源”误吞。
+    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["how_to"]):
+        return "how_to"
+    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["evidence"]):
+        return "evidence"
+    for intent, markers in QUERY_INTENT_MARKERS.items():
+        if intent in {"how_to", "evidence"}:
+            continue
+        if any(marker in combined_text for marker in markers):
+            return intent
+    return "lookup"
+
+
+def alias_match_boost(page_record: dict, normalized_query: str, alias_hits: list[dict]) -> tuple[float, list[str]]:
+    # alias/canonical 命中如果只回传不参与排序，用户感受会很奇怪。
+    # 这里给精确命中一个温和加权，不会压过真正强相关的正文命中。
+    boost_reasons: list[str] = []
+    title_norm = normalize_query_text(page_record.get("title", ""))
+    aliases_norm = [normalize_query_text(alias) for alias in page_record.get("aliases", [])]
+    canonical_norm = normalize_query_text(page_record.get("canonical_id", "") or "")
+
+    boost = 1.0
+    if normalized_query and title_norm == normalized_query:
+        boost = max(boost, QUERY_EXACT_MATCH_MAX_BOOST)
+        boost_reasons.append("title_exact")
+    if normalized_query and canonical_norm == normalized_query:
+        boost = max(boost, 1.30)
+        boost_reasons.append("canonical_exact")
+    if normalized_query and normalized_query in aliases_norm:
+        boost = max(boost, 1.25)
+        boost_reasons.append("alias_exact")
+
+    alias_hit_page_ids = {item.get("page_id") for item in alias_hits}
+    if page_record.get("page_id") in alias_hit_page_ids:
+        boost = max(boost, 1.20)
+        boost_reasons.append("alias_registry_hit")
+
+    return boost, boost_reasons
+
+
+def query_intent_page_type_boost(intent: str, page_record: dict) -> tuple[float, str | None]:
+    # query intent 只做一层轻微调权，用来把“看定义”和“看证据”这类问题往更合适的页型推一点。
+    page_type = page_record.get("type", "")
+    page_status = page_record.get("status", "")
+
+    if intent == "definition" and page_type == "concept-summary":
+        return 1.12, "intent_definition_prefers_concept"
+    if intent == "compare" and page_type == "concept-summary":
+        return 1.08, "intent_compare_prefers_concept"
+    if intent == "how_to" and page_type == "source-summary":
+        return 1.05, "intent_how_to_prefers_source"
+    if intent == "evidence" and page_type == "source-summary":
+        return 2.6, "intent_evidence_prefers_source"
+    if intent == "evidence" and page_type == "concept-summary":
+        return 0.35, "intent_evidence_deprioritizes_concept"
+    if intent == "timeline" and page_status == "stable":
+        return 1.05, "intent_timeline_prefers_stable"
+    return 1.0, None
+
+
+def query_intent_field_multiplier(intent: str, field_name: str) -> float:
+    # 字段乘子只做轻量调权，尽量不破坏 BM25 的主体排序逻辑。
+    return QUERY_INTENT_FIELD_MULTIPLIERS.get(intent, {}).get(field_name, 1.0)
+
+
+def expand_query_with_alias_registry(
+    query_text: str,
+    alias_index: dict,
+) -> dict:
+    # 这一步负责把用户输入变成“可检索对象”：
+    # - 原始查询
+    # - 规范化查询
+    # - alias 命中的扩展词
+    # - 如果 alias 唯一映射到某个 canonical_id，就一并记录规范目标
+    normalized_query = normalize_query_text(query_text)
+    alias_map = alias_index.get("alias_map", {})
+    canonical_map = alias_index.get("canonical_map", {})
+    matched_alias_entries = alias_map.get(normalized_query, [])
+
+    alias_expansions: list[str] = []
+    canonical_targets: list[dict] = []
+    for entry in matched_alias_entries:
+        canonical_id = entry.get("canonical_id")
+        canonical_record = canonical_map.get(canonical_id, {})
+        for candidate in [
+            entry.get("title", ""),
+            canonical_id or "",
+            *canonical_record.get("aliases", []),
+        ]:
+            normalized_candidate = normalize_query_text(candidate)
+            if normalized_candidate and normalized_candidate not in alias_expansions:
+                alias_expansions.append(normalized_candidate)
+        if canonical_record and canonical_record not in canonical_targets:
+            canonical_targets.append(canonical_record)
+
+    expanded_parts = [normalized_query, *alias_expansions]
+    expanded_query = " ".join(part for part in expanded_parts if part).strip()
+    expanded_tokens = tokenize_for_search(expanded_query)
+    detected_intent = detect_query_intent(query_text, normalized_query)
+
+    return {
+        "raw_query": query_text,
+        "normalized_query": normalized_query,
+        "expanded_query": expanded_query or normalized_query,
+        "query_tokens": expanded_tokens,
+        "alias_hits": matched_alias_entries,
+        "canonical_targets": canonical_targets,
+        "intent": detected_intent,
+    }
+
+
 def build_page_field_texts(page_record: dict, page_text: str, claim_records_by_id: dict[str, dict]) -> dict[str, str]:
     # query 读的是“页面视角”，但 claim/source 相关内容也要折叠进字段里参与排序。
     claim_texts = []
@@ -3848,6 +4453,28 @@ def build_chunk_reading_brief(chunk_record: dict) -> dict:
     }
 
 
+def build_timeline_sources(chunk_matches: list[dict]) -> list[dict]:
+    # timeline query 需要的不是“更多 chunk”，而是“按来源组织的时序证据入口”。
+    grouped: dict[str, dict] = {}
+    for chunk in chunk_matches:
+        source_id = chunk.get("source_id")
+        if not source_id:
+            continue
+        if source_id not in grouped:
+            grouped[source_id] = {
+                "source_id": source_id,
+                "source_path": chunk.get("source_path"),
+                "normalized_path": chunk.get("normalized_path"),
+                "chunk_ids": [],
+                "section_paths": [],
+            }
+        if chunk.get("chunk_id") and chunk["chunk_id"] not in grouped[source_id]["chunk_ids"]:
+            grouped[source_id]["chunk_ids"].append(chunk["chunk_id"])
+        if chunk.get("section_path") and chunk["section_path"] not in grouped[source_id]["section_paths"]:
+            grouped[source_id]["section_paths"].append(chunk["section_path"])
+    return sorted(grouped.values(), key=lambda item: item["source_id"])
+
+
 def build_result_reading_pack(
     result: dict,
     query_tokens: list[str],
@@ -3855,6 +4482,7 @@ def build_result_reading_pack(
     chunk_records_by_id: dict[str, dict],
     claim_limit: int,
     chunk_limit: int,
+    query_intent: str,
 ) -> dict:
     # 阅读包是 query V1 的关键补强：
     # 先返回“为什么命中这页”，再给最相关的 claims/chunks/sources，方便 Agent 继续读。
@@ -3878,7 +4506,15 @@ def build_result_reading_pack(
             "confidence": claim_record.get("confidence"),
             "matched_tokens": claim_hits,
             "source_refs": [build_source_brief(item) for item in claim_record.get("source_refs", [])],
-            "_score": claim_score,
+            "_score": (
+                claim_score + (len(claim_record.get("source_refs", [])) * 0.25)
+                if query_intent == "evidence"
+                else claim_score + 0.4
+                if query_intent == "compare" and claim_record.get("claim_type") in {"comparison", "evaluation", "causal"}
+                else claim_score + 0.2
+                if query_intent == "timeline" and claim_record.get("source_refs")
+                else claim_score
+            ),
         })
 
         for chunk_id in claim_record.get("chunk_ids", []):
@@ -3893,7 +4529,18 @@ def build_result_reading_pack(
             seen_chunk_ids.add(chunk_id)
             chunk_matches.append({
                 "matched_tokens": chunk_hits,
-                "_score": chunk_score,
+                "_score": (
+                    chunk_score + 0.5
+                    if query_intent == "evidence" and chunk_record.get("source_id")
+                    else chunk_score + 0.45
+                    if query_intent == "how_to" and any(
+                        marker in (chunk_record.get("text", "") + chunk_record.get("summary", ""))
+                        for marker in ("步骤", "首先", "然后", "最后", "如何", "怎么")
+                    )
+                    else chunk_score + 0.25
+                    if query_intent == "timeline" and chunk_record.get("source_id")
+                    else chunk_score
+                ),
                 **build_chunk_reading_brief(chunk_record),
             })
 
@@ -3914,9 +4561,18 @@ def build_result_reading_pack(
 
     return {
         "page_summary": result.get("summary", ""),
+        "query_intent": query_intent,
         "matched_claims": trimmed_claims,
         "matched_chunks": trimmed_chunks,
+        "timeline_sources": build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else [],
         "review_ids": result.get("review_ids", []),
+        "focus": (
+            "compare_claims" if query_intent == "compare"
+            else "timeline_evidence" if query_intent == "timeline"
+            else "procedural_chunks" if query_intent == "how_to"
+            else "source_evidence" if query_intent == "evidence"
+            else "general_lookup"
+        ),
     }
 
 
@@ -3951,9 +4607,12 @@ def build_query_payload(
     live_claim_records = filter_live_claim_records(claim_records)
     claim_records_by_id = {record["claim_id"]: record for record in live_claim_records}
     chunk_records_by_id = load_chunks_by_id(target)
+    alias_index = load_alias_index(target)
+    normalized_query_payload = expand_query_with_alias_registry(query_text, alias_index)
 
-    normalized_query = normalize_claim_text(query_text)
-    query_tokens = tokenize_for_search(query_text)
+    normalized_query = normalized_query_payload["normalized_query"]
+    query_tokens = normalized_query_payload["query_tokens"]
+    query_intent = normalized_query_payload["intent"]
     documents, document_source = ensure_query_documents(target, page_records, claim_records_by_id)
 
     field_document_frequencies = {
@@ -3989,7 +4648,8 @@ def build_query_payload(
             )
             if raw_score <= 0:
                 continue
-            weighted_score = raw_score * field_weight
+            intent_field_multiplier = query_intent_field_multiplier(query_intent, field_name)
+            weighted_score = raw_score * field_weight * intent_field_multiplier
             field_scores[field_name] = round(weighted_score, 6)
             weighted_field_sum += weighted_score
             field_hits[field_name] = select_top_matches(query_tokens, document_tokens)
@@ -3999,7 +4659,13 @@ def build_query_payload(
 
         page_type_weight = query_page_type_weight(page_record)
         page_status_weight = query_page_status_weight(page_record)
-        final_score = weighted_field_sum * page_type_weight * page_status_weight
+        exact_match_boost, exact_match_reasons = alias_match_boost(
+            page_record=page_record,
+            normalized_query=normalized_query,
+            alias_hits=normalized_query_payload["alias_hits"],
+        )
+        intent_boost, intent_boost_reason = query_intent_page_type_boost(query_intent, page_record)
+        final_score = weighted_field_sum * page_type_weight * page_status_weight * exact_match_boost * intent_boost
         result_record = {
             "page_id": page_record["page_id"],
             "title": page_record.get("title", ""),
@@ -4014,6 +4680,11 @@ def build_query_payload(
             "field_hits": field_hits,
             "page_type_weight": page_type_weight,
             "page_status_weight": page_status_weight,
+            "exact_match_boost": round(exact_match_boost, 4),
+            "exact_match_reasons": exact_match_reasons,
+            "intent": query_intent,
+            "intent_boost": round(intent_boost, 4),
+            "intent_boost_reason": intent_boost_reason,
         }
         result_record["reading_pack"] = build_result_reading_pack(
             result=result_record,
@@ -4022,6 +4693,7 @@ def build_query_payload(
             chunk_records_by_id=chunk_records_by_id,
             claim_limit=claim_limit,
             chunk_limit=chunk_limit,
+            query_intent=query_intent,
         )
         scored_results.append(result_record)
 
@@ -4030,11 +4702,17 @@ def build_query_payload(
         "workspace": str(target),
         "query": query_text,
         "normalized_query": normalized_query,
+        "expanded_query": normalized_query_payload["expanded_query"],
         "query_tokens": query_tokens,
+        "intent": query_intent,
+        "alias_hits": normalized_query_payload["alias_hits"],
+        "canonical_targets": normalized_query_payload["canonical_targets"],
         "weights": {
             "fields": QUERY_FIELD_WEIGHTS,
+            "intent_field_multipliers": QUERY_INTENT_FIELD_MULTIPLIERS,
             "page_types": QUERY_PAGE_TYPE_WEIGHTS,
             "page_status": QUERY_PAGE_STATUS_WEIGHTS,
+            "exact_match_max_boost": QUERY_EXACT_MATCH_MAX_BOOST,
         },
         "document_source": document_source,
         "results": scored_results[:limit],
@@ -4069,6 +4747,8 @@ def command_query(args: argparse.Namespace) -> CommandResult:
     lines = [
         f'Query: {payload["query"]}',
         f'Normalized: {payload["normalized_query"]}',
+        f'Expanded: {payload["expanded_query"]}',
+        f'Intent: {payload["intent"]}',
         "",
         "Top Results:",
     ]
@@ -4084,6 +4764,14 @@ def command_query(args: argparse.Namespace) -> CommandResult:
                 for field, score in sorted(result["field_scores"].items(), key=lambda item: item[1], reverse=True)
             )
             lines.append(f"   field_scores: {explanation}")
+        if result.get("exact_match_reasons"):
+            lines.append(
+                f"   exact_match_boost: {result['exact_match_boost']:.3f} ({'/'.join(result['exact_match_reasons'])})"
+            )
+        if result.get("intent_boost_reason"):
+            lines.append(
+                f"   intent_boost: {result['intent_boost']:.3f} ({result['intent_boost_reason']})"
+            )
         if result["field_hits"]:
             hit_explanation = ", ".join(
                 f"{field}:{'/'.join(tokens)}"
@@ -4274,6 +4962,7 @@ def rebuild_review_affected_pages(
             claim_records=source_claims,
             chunk_records=source_chunks,
         )
+        page_record = apply_page_alias_overrides(target, page_record)
         page_record["page_path"] = str(source_summary_page_path(source_id, page_record["title"]))
         stored_page_record, _ = upsert_wiki_page(
             target=target,
@@ -4291,8 +4980,9 @@ def rebuild_review_affected_pages(
         ]
         if not active_claim_source_ids:
             continue
-        bucket_key = build_similarity_bucket(claim_record["text"])
+        bucket_key = build_concept_group_key(claim_record)
         concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
+    concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
 
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
         if not should_generate_concept_page(grouped_claims):
@@ -4307,6 +4997,7 @@ def rebuild_review_affected_pages(
             page_records_by_id=page_records_by_id,
             review_records=live_review_records,
         )
+        page_record = apply_page_alias_overrides(target, page_record)
         page_record["page_path"] = str(page_rel_path)
         stored_page_record, _ = upsert_wiki_page(
             target=target,
@@ -4369,6 +5060,23 @@ def rebuild_review_affected_pages(
 
     write_jsonl(pages_path, list(page_records_by_id.values()))
     rebuild_wiki_index(target, list(page_records_by_id.values()))
+    alias_index = write_alias_index(target, list(page_records_by_id.values()))
+    alias_conflict_reviews, _ = build_alias_conflict_reviews(alias_index, live_reviews_by_id)
+    if alias_conflict_reviews:
+        for review_record in alias_conflict_reviews:
+            live_reviews_by_id[review_record["review_id"]] = review_record
+            review_record["review_file_path"] = write_review_file(target, review_record)
+        write_jsonl(
+            target / "state" / "reviews.jsonl",
+            build_ordered_review_state_records(
+                live_reviews_by_id=live_reviews_by_id,
+                historical_reviews_by_id={
+                    record["review_id"]: record
+                    for record in load_jsonl(target / "state" / "reviews.jsonl")
+                    if not is_live_review_record(ensure_review_lifecycle_defaults(record))
+                },
+            ),
+        )
     previous_search_index_records = load_search_pages_index(target)
     write_search_pages_index(
         target=target,
@@ -4584,6 +5292,8 @@ def apply_review_action(
     action: str,
     primary_claim_id: str | None,
     secondary_claim_id: str | None,
+    primary_page_id: str | None,
+    alias_value: str | None,
     live_claims_by_id: dict[str, dict],
     historical_claims_by_id: dict[str, dict],
     live_reviews_by_id: dict[str, dict],
@@ -4594,6 +5304,49 @@ def apply_review_action(
         raise ValueError(f"Action `{action}` is not allowed for review `{review_display_id(review_record)}`.")
 
     candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
+    candidate_page_ids = list(review_record.get("candidate_page_ids", []))
+
+    if review_record.get("kind") == "alias_conflict" and action in {"assign_alias", "remove_alias"}:
+        if not primary_page_id:
+            raise ValueError(f"{action} requires --primary-page-id.")
+        if primary_page_id not in candidate_page_ids:
+            raise ValueError("primary page must belong to candidate_page_ids.")
+
+        evidence = review_record.get("evidence", [])
+        alias_from_review = evidence[0].get("alias") if evidence else None
+        alias_to_assign = alias_value or alias_from_review
+        if not alias_to_assign:
+            raise ValueError(f"{action} requires alias value from review evidence or --alias-value.")
+
+        if action == "assign_alias":
+            overrides = load_page_alias_overrides(target)
+            page_aliases = overrides.setdefault("page_aliases", {})
+            live_aliases_by_page_id = load_live_page_aliases_by_id(target)
+            normalized_alias = normalize_alias_value(alias_to_assign)
+
+            for page_id in candidate_page_ids:
+                page_override = page_aliases.setdefault(page_id, {})
+                aliases = sorted(set(page_override.get("aliases", live_aliases_by_page_id.get(page_id, []))))
+                aliases = [alias for alias in aliases if normalize_alias_value(alias) != normalized_alias]
+                if page_id == primary_page_id and alias_to_assign not in aliases:
+                    aliases.append(alias_to_assign)
+                page_override["aliases"] = sorted(set(aliases))
+
+            write_page_alias_overrides(target, overrides)
+        else:
+            remove_alias_from_overrides(target, candidate_page_ids, alias_to_assign)
+
+        review_record["status"] = "resolved"
+        review_record["resolved_at"] = utc_now_iso()
+        review_record["lifecycle_status"] = "active"
+        return {
+            "action": action,
+            "changed_page_ids": candidate_page_ids,
+            "resolved_review_id": review_record["review_id"],
+            "alias_value": alias_to_assign,
+            "primary_page_id": primary_page_id,
+        }
+
     if action == "keep_both":
         review_record["status"] = "resolved"
         review_record["resolved_at"] = utc_now_iso()
@@ -4728,6 +5481,8 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
         action=args.action,
         primary_claim_id=args.primary_claim_id,
         secondary_claim_id=args.secondary_claim_id,
+        primary_page_id=args.primary_page_id,
+        alias_value=args.alias_value,
         live_claims_by_id=live_claims_by_id,
         historical_claims_by_id=historical_claims_by_id,
         live_reviews_by_id=live_reviews_by_id,
@@ -4853,6 +5608,7 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "# Lint Report\n\nNo lint runs yet.\n",
         encoding="utf-8",
     )
+    write_alias_index(target_dir, [])
 
     git_steps: list[str] = []
     if not (target_dir / ".git").exists():
@@ -4921,6 +5677,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     claims_by_similarity_bucket: dict[str, list[dict]] = {}
     for record in live_existing_claims:
         claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
+    claim_similarity_index = rebuild_claim_similarity_index(live_existing_claims)
     existing_review_records = [
         ensure_review_lifecycle_defaults(record)
         for record in (load_jsonl(reviews_path) if reviews_path.exists() else [])
@@ -5010,6 +5767,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             claims_by_similarity_bucket = {}
             for record in claims_by_id.values():
                 claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
+            claim_similarity_index = rebuild_claim_similarity_index(list(claims_by_id.values()))
 
             updated_record = dict(previous_path_record)
             updated_record.update({
@@ -5218,15 +5976,20 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
                 continue
 
             similarity_bucket = build_similarity_bucket(claim_record["text"])
-            similar_claims = claims_by_similarity_bucket.get(similarity_bucket, [])
+            candidate_claim_ids = collect_claim_review_candidate_ids(
+                claim_record=claim_record,
+                claims_by_similarity_bucket=claims_by_similarity_bucket,
+                claim_similarity_index=claim_similarity_index,
+            )
             conflicting_candidates = []
             duplicate_candidates = []
-            incoming_conflict_base = normalize_claim_base_for_conflict(claim_record["text"])
             incoming_has_negation = has_negation(claim_record["text"])
 
-            for similar_claim in similar_claims:
-                candidate_conflict_base = normalize_claim_base_for_conflict(similar_claim["text"])
-                if candidate_conflict_base != incoming_conflict_base:
+            for candidate_claim_id in sorted(candidate_claim_ids):
+                similar_claim = claims_by_id.get(candidate_claim_id)
+                if similar_claim is None:
+                    continue
+                if not claims_are_similar_for_review(claim_record["text"], similar_claim["text"]):
                     continue
                 if has_negation(similar_claim["text"]) != incoming_has_negation:
                     conflicting_candidates.append(similar_claim)
@@ -5341,6 +6104,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             claims_by_id[claim_record["claim_id"]] = claim_record
             claims_by_normalized_text[claim_record["normalized_text"]] = claim_record
             claims_by_similarity_bucket.setdefault(similarity_bucket, []).append(claim_record)
+            index_claim_similarity_tokens(claim_similarity_index, claim_record)
             source_id = claim_record["source_ids"][0]
             claims_created_by_source[source_id] = claims_created_by_source.get(source_id, 0) + 1
 
@@ -5540,6 +6304,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             claim_records=source_claims,
             chunk_records=source_chunks,
         )
+        page_record = apply_page_alias_overrides(target, page_record)
         page_rel_path = source_summary_page_path(source_id, page_record["title"])
         page_record["page_path"] = str(page_rel_path)
         stored_page_record, page_changed = upsert_wiki_page(
@@ -5589,14 +6354,24 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         ]
         if not active_claim_source_ids:
             continue
-        # 这里先按 similarity bucket 聚合，后续再替换成更稳的实体/概念归并逻辑。
-        bucket_key = build_similarity_bucket(claim_record["text"])
+        # 概念页聚合与 review 检测共享更稳的 group key，减少“同主题分裂成多页”。
+        bucket_key = build_concept_group_key(claim_record)
         concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
+    concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
 
     changed_bucket_keys = set()
     for claim_record in all_claim_records:
         if any(source_id in changed_source_ids for source_id in claim_record.get("source_ids", [])):
-            changed_bucket_keys.add(build_similarity_bucket(claim_record["text"]))
+            original_bucket_key = build_concept_group_key(claim_record)
+            matching_bucket_key = next(
+                (
+                    bucket_key
+                    for bucket_key, grouped_claims in concept_claim_groups.items()
+                    if any(item["claim_id"] == claim_record["claim_id"] for item in grouped_claims)
+                ),
+                original_bucket_key,
+            )
+            changed_bucket_keys.add(matching_bucket_key)
     changed_bucket_keys.update(
         collect_missing_concept_bucket_keys(
             claims_by_similarity_bucket=concept_claim_groups,
@@ -5624,6 +6399,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             page_records_by_id=page_records_by_id,
             review_records=review_records,
         )
+        page_record = apply_page_alias_overrides(target, page_record)
         page_record["page_path"] = str(page_rel_path)
         stored_page_record, page_changed = upsert_wiki_page(
             target=target,
@@ -5705,6 +6481,14 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         previous_records=previous_search_index_records,
     )
 
+    alias_index = write_alias_index(target, page_records_for_index)
+    alias_conflict_reviews, _ = build_alias_conflict_reviews(alias_index, existing_reviews)
+    for review_record in alias_conflict_reviews:
+        review_file_path = write_review_file(target, review_record)
+        review_record["review_file_path"] = review_file_path
+        append_jsonl(reviews_path, review_record)
+        existing_reviews[review_record["review_id"]] = review_record
+        review_items.append(review_record)
     rebuild_wiki_index(target, list(page_records_by_id.values()))
     append_wiki_log(target, task_id, generated_pages)
 
@@ -5719,6 +6503,13 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         "claimed_sources": claimed_sources,
         "generated_pages": generated_pages,
         "search_index": search_index,
+        "alias_index": {
+            "index_path": str(ALIAS_INDEX_REL_PATH),
+            "canonical_count": len(alias_index.get("canonical_map", {})),
+            "alias_key_count": len(alias_index.get("alias_map", {})),
+            "conflict_count": len(alias_index.get("conflicts", [])),
+            "index_version": alias_index.get("index_version"),
+        },
         "review_items": review_items,
         "error_items": error_items,
         "summary": {
@@ -5742,7 +6533,9 @@ def command_stub(args: argparse.Namespace) -> CommandResult:
 
 
 def command_lint(args: argparse.Namespace) -> CommandResult:
-    # lint 目前主要做结构检查：目录、关键文件、状态文件是否齐全。
+    # lint 在 V1 里承担“结构 + 基础质量巡检”双重职责：
+    # - 目录与状态文件是否完整
+    # - page / claim / review / alias index 是否彼此对齐
     root = find_project_root()
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else root
 
@@ -5776,6 +6569,7 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             "config/project.yml",
             "AGENTS.md",
             "CLAUDE.md",
+            str(ALIAS_INDEX_REL_PATH),
         ]
 
     for rel_path in required_paths:
@@ -5844,6 +6638,11 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             ok=(target / SEARCH_PAGES_INDEX_REL_PATH).exists(),
             details=f"Workspace should contain {target / SEARCH_PAGES_INDEX_REL_PATH}.",
         )
+        add_check(
+            name="index_aliases_exists",
+            ok=alias_index_path(target).exists(),
+            details=f"Workspace should contain {alias_index_path(target)}.",
+        )
 
         chunk_records = load_jsonl(target / "state" / "chunks.jsonl") if (target / "state" / "chunks.jsonl").exists() else []
         if chunk_records:
@@ -5900,8 +6699,11 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             )
             add_check(
                 name="live_review_candidate_claims_present",
-                ok=all(record.get("candidate_claim_ids") for record in live_review_records),
-                details="Each live review record should contain candidate_claim_ids.",
+                ok=all(
+                    record.get("candidate_claim_ids") or record.get("kind") == "alias_conflict"
+                    for record in live_review_records
+                ),
+                details="Claim-oriented live reviews should contain candidate_claim_ids; alias_conflict may use candidate_page_ids only.",
             )
             add_check(
                 name="live_review_candidate_pages_present",
@@ -5934,6 +6736,21 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 details="Each page record should include page_path.",
             )
             add_check(
+                name="page_titles_present",
+                ok=all(record.get("title") for record in live_page_records),
+                details="Each live page should include title.",
+            )
+            add_check(
+                name="page_types_present",
+                ok=all(record.get("type") for record in live_page_records),
+                details="Each live page should include type.",
+            )
+            add_check(
+                name="page_canonical_ids_present",
+                ok=all(record.get("canonical_id") for record in live_page_records),
+                details="Each live page should include canonical_id.",
+            )
+            add_check(
                 name="live_pages_exist_on_disk",
                 ok=all((target / record["page_path"]).exists() for record in live_page_records),
                 details="Each live page record should have a corresponding wiki markdown file on disk.",
@@ -5948,6 +6765,59 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 ok=all(not is_live_page_record(record) for record in removed_page_records),
                 details="Removed page records should not be treated as live pages for index/query rebuilds.",
             )
+
+            canonical_ids = [record.get("canonical_id") for record in live_page_records if record.get("canonical_id")]
+            add_check(
+                name="canonical_ids_unique",
+                ok=len(canonical_ids) == len(set(canonical_ids)),
+                details="Live page canonical_id values should be unique.",
+            )
+
+            alias_index = load_alias_index(target) if alias_index_path(target).exists() else {}
+            alias_conflicts = alias_index.get("conflicts", []) if alias_index else []
+            add_check(
+                name="alias_conflicts_absent",
+                ok=len(alias_conflicts) == 0,
+                details="Alias registry should not contain unresolved alias conflicts.",
+                severity="warning",
+            )
+
+            alias_canonical_ids = set(alias_index.get("canonical_map", {}).keys()) if alias_index else set()
+            live_page_canonical_ids = {record.get("canonical_id") for record in live_page_records if record.get("canonical_id")}
+            add_check(
+                name="alias_index_covers_live_pages",
+                ok=live_page_canonical_ids.issubset(alias_canonical_ids),
+                details="Alias registry should cover every live page canonical_id.",
+            )
+
+            search_index_records = load_search_pages_index(target) if (target / SEARCH_PAGES_INDEX_REL_PATH).exists() else []
+            indexed_page_ids = {record.get("page_id") for record in search_index_records}
+            expected_live_page_ids = {record.get("page_id") for record in live_page_records}
+            add_check(
+                name="search_index_covers_live_pages",
+                ok=expected_live_page_ids.issubset(indexed_page_ids),
+                details="Search index should contain every live page.",
+            )
+
+    if target != root:
+        report_lines = [
+            "# Lint Report",
+            "",
+            f"- 目标目录: `{target}`",
+            f"- 错误数量: `{len([check for check in checks if not check['ok'] and check['severity'] == 'error'])}`",
+            f"- 警告数量: `{len([check for check in checks if not check['ok'] and check['severity'] == 'warning'])}`",
+            "",
+            "## 检查结果 / Checks",
+            "",
+        ]
+        for check in checks:
+            marker = "PASS" if check["ok"] else ("WARN" if check["severity"] == "warning" else "FAIL")
+            report_lines.append(f"- [{marker}] `{check['name']}`: {check['details']}")
+        atomic_write_text(
+            target / "reports" / "lint" / "lint_latest.md",
+            "\n".join(report_lines).strip() + "\n",
+            encoding="utf-8",
+        )
 
     # 先把 error / warning 分开统计，后面扩展更多级别也会比较自然。
     errors = [check for check in checks if not check["ok"] and check["severity"] == "error"]
@@ -6037,11 +6907,13 @@ def build_parser() -> argparse.ArgumentParser:
     review_apply_parser.add_argument("review_id", help="Review id to apply action to.")
     review_apply_parser.add_argument(
         "action",
-        choices=("keep_both", "archive_one", "merge", "edit_then_resume"),
+        choices=("keep_both", "archive_one", "merge", "edit_then_resume", "assign_alias", "remove_alias"),
         help="Decision action to apply.",
     )
     review_apply_parser.add_argument("--primary-claim-id", help="Primary claim id for archive_one / merge.")
     review_apply_parser.add_argument("--secondary-claim-id", help="Secondary claim id for merge.")
+    review_apply_parser.add_argument("--primary-page-id", help="Primary page id for alias-conflict assign_alias.")
+    review_apply_parser.add_argument("--alias-value", help="Alias value to assign during alias-conflict handling.")
     review_apply_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
     review_apply_parser.add_argument("--json", action="store_true", help="Output JSON.")
     review_apply_parser.set_defaults(handler=command_review_apply)

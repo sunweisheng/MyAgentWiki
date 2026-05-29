@@ -20,11 +20,14 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - `Agent.md`：共享核心规则源。
 - `AGENTS.md`：Codex 入口文件。
 - `CLAUDE.md`：Claude Code 入口文件。
+- `SKILL.md`：Skill 主入口。
+- `agents/openai.yaml`：Skill UI 元数据。
 - `pyproject.toml`：Python 依赖、可选依赖和 CLI 入口定义。
 - Python 包与统一 CLI。
 - 初始化模板工程。
 - 运行环境清单与平台兼容说明。
 - 项目自身知识沉淀目录 `docs/`。
+- 工作流验证脚本与交付级排障文档。
 - 面向用户工程的目录模板、配置模板、状态模板、审核模板。
 
 ### 用户工程职责
@@ -42,12 +45,15 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - `Agent.md`
 - `AGENTS.md`
 - `CLAUDE.md`
+- `SKILL.md`
+- `agents/openai.yaml`
 - `README.md`
 - `pyproject.toml`
 - `docs/`
 - `src/myagentwiki/`
 - `templates/`
 - `tests/`
+- `scripts/`
 
 ### 初始化后的用户工程目录
 - `raw/`
@@ -74,6 +80,10 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - `pyproject.toml`：声明 Python 依赖、可选 extras、CLI 入口。
 - `config/runtime_manifest.yml`：声明系统级依赖、是否必需、支持平台、检测命令、缺失时的降级策略。
 - `docs/runtime-deps.md`：面向用户的依赖说明、平台安装指引和常见问题。
+- `docs/troubleshooting.md`：交付级故障排查文档。
+- `SKILL.md`：面向 Codex / Claude Code 的 Skill 入口。
+- `agents/openai.yaml`：Skill UI 元数据。
+- `scripts/validate_workflow.py`：跨平台 CLI 工作流验证脚本。
 
 运行依赖分两层：
 - Python 依赖：允许自动安装。
@@ -190,6 +200,7 @@ V1 当前实现说明：
 V1 当前实现说明：
 - 当前已落地的自动页面类型主要是 `source-summary` 与 `concept-summary`。
 - `state/pages.jsonl` 当前会保留已被自动移除页面的历史记录，移除态页面不会继续参与 query、索引和 wiki 目录。
+- 当前概念页生成在第一层相似 bucket 之后，还会按最终 `canonical_key` 再做一次主题收口，避免多个 live page 共用同一 `canonical_id`。
 
 ### 审核项 ReviewItem
 表示人工审核单。
@@ -212,6 +223,7 @@ V1 当前实现说明：
 V1 当前实现说明：
 - 当前 Review 权威源为 `reviews/*.json`，`state/reviews.jsonl` 作为可扫描账本存在。
 - 当前已实现 Review 历史态与活跃态分离；但“已解决 review”默认仍保留在 active lifecycle 中，仅 `status=resolved`。
+- 当前 `alias_conflict` review 允许只使用 `candidate_page_ids`，不强制要求 `candidate_claim_ids`。
 
 ## 初始化工作流 Initialization Workflow
 
@@ -249,6 +261,21 @@ V1 增加两个环境命令：
   - 生成运行环境报告。
   - 不默认静默安装系统级软件，只提示缺失项和平台安装建议。
 
+### Skill 打包与入口 Skill Packaging And Entry
+
+母仓库需要具备最小可安装 Skill 入口：
+
+- 根目录 `SKILL.md`
+- `agents/openai.yaml`
+- 共享规则源 `Agent.md`
+- Codex / Claude Code 适配入口 `AGENTS.md`、`CLAUDE.md`
+
+V1 当前实现说明：
+
+- 当前仓库已经补齐 `SKILL.md` 与 `agents/openai.yaml`
+- 当前 Skill 约束仍然坚持 CLI-first，不允许 Agent 默认绕过命令直接批量修改账本
+- 当前 README、运行依赖文档、排障文档、验证脚本与测试目录说明，已经组成第一版可交付安装说明面。
+
 ## 标识与命名 Identity And Naming
 
 ### 原始来源ID规则 Source ID Rules
@@ -274,6 +301,11 @@ V1 当前实现说明：
 - Alias registry 作为检索扩展、页面去重、自动加链接和别名冲突巡检的统一数据源。
 - AI 或脚本在新建页面前，必须先查询 alias registry 和现有页面 frontmatter。
 - 如果同一 alias 可能对应多个 `canonical_id`，不自动合并，转入 `needs_review`。
+
+V1 当前实现说明：
+- 当前别名注册表已落地为 `indexes/aliases.json`。
+- 当前人工 alias 修正独立持久化在 `state/page_alias_overrides.json`。
+- `assign_alias / remove_alias` 当前基于 live page 的 alias 集合增删，避免人工处理单个 alias 时误伤该页原有其他 alias。
 
 ## 标准化层 Normalization Layer
 
@@ -388,6 +420,23 @@ V1 当前实现说明：
 - Git、工具检测、文件扫描通过 Python 标准库和可移植命令实现。
 - 文档转换优先纯 Python 库，避免一开始就绑定平台特有软件。
 
+### 跨平台验证 Cross-platform Validation
+
+V1 至少需要有一条可执行的验证路径，覆盖：
+
+- `doctor`
+- `bootstrap`
+- `init`
+- `ingest`
+- `query`
+- `lint`
+
+V1 当前实现说明：
+
+- 当前已提供 `scripts/validate_workflow.py`
+- 当前脚本会自动构造最小样例资料并验证 `raw/` 子目录递归扫描
+- 当前仓库内尚未在真实 Windows 环境完成自动实跑，但脚本与命令示例已按 Windows 兼容约束设计
+
 ### 标准化器版本与哈希 Normalizer Version And Hash
 - 同时保留 `raw_hash` 和 `normalized_hash`。
 - 额外记录 `normalizer_version`，用于判断“原文件没变，但标准化规则变了”的场景。
@@ -405,7 +454,10 @@ V1 最小要求：
 
 V1 当前实现说明：
 - 当前已实现的是多字段 BM25 检索与页面权重、状态权重叠加。
-- `query_normalizer`、alias 扩展、canonical 归一、意图识别当前尚未独立落地。
+- 当前已实现第一版 query normalization：规范化查询、alias 精确命中扩展、canonical 目标回传。
+- 当前已实现轻量意图识别，主要覆盖 `lookup / definition / compare / timeline / how_to / evidence`。
+- 当前意图识别主要服务检索增强与页面类型轻量调权，尚未发展为复杂问句分析器。
+- 当前 `evidence` 类查询已明确优先 `source-summary` 页面，而不是只做轻微偏向。
 
 ## 切块设计 Chunking Design
 
@@ -511,6 +563,10 @@ V1 当前实现说明：
 V1 当前实现说明：
 - 当前 query 优先读取 `indexes/search_pages.jsonl`。
 - 当前页面索引支持按 `page_signature` 增量复用，未变化页面可直接复用既有索引记录。
+- 当前 alias/title/canonical 精确命中会参与额外加权。
+- 当前已实现 `lookup / definition / compare / timeline / how_to / evidence` 六类轻量意图识别。
+- 当前 `timeline` 查询会额外返回 `timeline_sources`。
+- 当前 `evidence` 查询会更强地提升 `source-summary`，并相对压低 `concept-summary`，确保“先看出处”的阅读顺序更稳定。
 
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`、frontmatter、`summary`、`aliases`、`headings`。
@@ -578,17 +634,30 @@ V1 不实现复杂动态预算器，但规则文件中必须明确轻量阅读�
 - 将 `qa-note` 提升为正式概念页或综述页。
 - 涉及 private / sensitive 内容流向 public / export 区域。
 
+V1 当前实现说明：
+- Claim 冲突 / 近重复检测采用“前缀 bucket + token 倒排召回 + 文本相似度复核”的组合策略。
+- 冲突判断会先去掉否定词生成 `conflict base`，再结合否定极性差异判定是否进入 `claim_conflict`。
+- 近重复判断会综合 token 重合度、最长公共文本片段比例、字符序列相似度，尽量兼顾“前缀不同但核心结论相同”的句子。
+- alias registry 若发现同一 alias 同时映射到多个 canonical 页面，也会生成 `alias_conflict` review。
+- 当前策略仍是启发式规则，目标是降低漏检与明显误报；不等同于最终语义判定。
+
 ### V1审核动作 V1 Review Actions
 - `merge`
 - `keep_both`
 - `archive_one`
 - `edit_then_resume`
+- `assign_alias`
+- `remove_alias`
 
 V1 当前实现说明：
 - `merge`：保留主 Claim，归档次 Claim，并自动改写其他仍为 open 的 review 候选。
 - `keep_both`：解决当前 review，但保留双方 Claim。
 - `archive_one`：归档指定活跃 Claim。
 - `edit_then_resume`：允许人工先修改 `claims/*.json`，再从当前 review 状态恢复后续页面与索引刷新。
+- `assign_alias`：用于 alias conflict review，把冲突 alias 指定给目标页面，并写入持久化 alias 覆盖层。
+- `remove_alias`：用于 alias conflict review，把冲突 alias 从页面覆盖层中移除。
+- 当前 alias 覆盖层已经按“基于 live page 当前 alias 集合增删”的方式实现，避免人工处理单个 alias 时误伤该页原有其他 alias。
+- 当前 `assign_alias / remove_alias` 已补充“重复 ingest 后仍然保持人工裁决结果”的回归测试。
 
 ### 自动化分级
 V1 引入四级自动化边界：
@@ -633,6 +702,7 @@ V1 为三类页面提供固定模板：
 V1 当前实现说明：
 - 当前 `review-apply` 执行动作后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与 `indexes/search_pages.jsonl`。
 - `edit_then_resume` 当前已支持“人工先改 Claim 文件，再恢复页面和索引重建”。
+- 当前 alias conflict 在 `review-apply` 后，若人工覆盖层已消除冲突，下一轮 ingest 不会重新打开同一条 open review。
 
 ## 状态与日志 State And Logging
 
@@ -714,7 +784,9 @@ V1 的 lint 至少分为：
 
 V1 当前实现说明：
 - 当前 `lint` 已落地的是工作区结构检查、state 文件存在性检查、`chunk_id/claim_id/review_id/page_id` 唯一性检查、Claim 溯源检查、页面记录与页面文件一致性检查，以及历史态 page/claim/review 的基本一致性检查。
-- 其余 lint 分类仍属于后续细分方向，当前尚未拆成独立子命令。
+- 当前还补充了 `canonical_id` 唯一性、alias registry 覆盖、search index 覆盖、alias 冲突预警与 `reports/lint/lint_latest.md` 写回。
+- 当前 lint 已适配 alias conflict review 的结构特征，不再把“仅有 `candidate_page_ids` 的 alias review”误判为 claim review 缺字段。
+- 更细的 `normalize/chunk/wikilink/page quality` 子命令仍属于后续细分方向，当前尚未拆成独立子命令。
 
 ### 巡检级别 Lint Severity
 - `error`：必须修复，否则不能提交。
@@ -765,17 +837,18 @@ V1 当前实现说明：
 
 V1 当前实现说明：
 - 前三项当前已实现。
-- aliases 扩展、canonical 归一和基本意图识别当前尚未独立实现。
+- aliases 扩展与 canonical 命中回传当前已实现。
+- 基本意图识别当前已实现轻量版本。
 
 ### 审核
 - 相反结论进入 review queue。
 - 相似 claim 可生成待审单。
-- 四种审核动作都能驱动后续恢复。
+- 六种审核动作都能驱动后续恢复。
 - `qa-note` 提升正式页必须经过 review。
 
 V1 当前实现说明：
 - 当前已实现相似 Claim 和相反结论两类基础 review 触发。
-- 四种审核动作当前已落地并已有回归测试。
+- 六种审核动作当前已落地并已有回归测试，其中包含 alias conflict 的 `assign_alias / remove_alias`。
 - `qa-note` 提升正式页当前尚未实现具体页面工作流。
 
 ### 巡检与恢复 Lint And Recovery
@@ -789,6 +862,10 @@ V1 当前实现说明：
 - `bootstrap` 至少能自动处理 Python 依赖安装，不依赖 shell 专属语法。
 - 路径、换行、编码处理在 Windows 上不破坏 `raw -> normalized -> chunk` 主流程。
 
+V1 当前实现说明：
+- 当前 `validate_workflow.py` 已能在本地环境跑通最小主链路。
+- 当前仓库已补齐 Windows 命令示例与排障文档，但真实 Windows 实机验证仍属于下一阶段工作。
+
 ### 当前已落地测试
 - `tests/test_review_apply.py`
   - 覆盖 `merge / keep_both / edit_then_resume` 三条关键 review 恢复链路。
@@ -796,6 +873,14 @@ V1 当前实现说明：
   - 覆盖 `.doc / .xls` fallback、图片 OCR / 非 OCR 两种标准化输出。
 - `tests/test_claim_extraction.py`
   - 覆盖中文 claim 切分、去噪、长句拆分。
+- `tests/test_review_detection.py`
+  - 覆盖近重复 / 冲突候选召回与误报边界。
+- `tests/test_query_alias_and_lint.py`
+  - 覆盖 alias/canonical 命中、definition/how_to/compare/timeline/evidence 六类查询行为、alias conflict review 生成、`assign_alias / remove_alias`、以及 re-ingest 后的持久化行为。
+- `tests/test_e2e_workflow.py`
+  - 覆盖 `init -> ingest -> query -> review -> lint` 主闭环 E2E。
+- `scripts/validate_workflow.py`
+  - 覆盖 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint` 交付级烟雾验证流程。
 
 ## 前提假设 Assumptions
 

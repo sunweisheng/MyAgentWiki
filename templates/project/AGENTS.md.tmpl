@@ -1,9 +1,32 @@
 # ${project_name} AGENTS
 
-This workspace was initialized by MyAgentWiki.
+本文件是当前用户工作区面向 Codex 的入口规则。
 
-Source directory:
+## 工作区来源
 
-- `${source_dir_path}`
+- 原始资料目录：`${source_dir_path}`
 
-Primary rules should be derived from the parent MyAgentWiki project and adapted for this workspace.
+## 执行约定
+
+- 优先调用 MyAgentWiki CLI，而不是手工改写 `state/*.jsonl`
+- 固定流程优先使用脚本：`init / ingest / query / lint / review-list / review-apply`
+- 必须依赖语义理解、冲突裁决、页面重写的步骤，再交给 Agent
+
+## 推荐命令顺序
+
+1. `python -m myagentwiki doctor`
+2. `python -m myagentwiki bootstrap`
+3. `python -m myagentwiki ingest`
+4. `python -m myagentwiki lint`
+5. `python -m myagentwiki query "你的问题"`
+
+## review / state 恢复约定
+
+- 处理 review 前先读取 `reviews/*.json` 与 `state/reviews.jsonl`
+- 需要人工修改 Claim 时，优先编辑 `claims/*.json`，然后执行 `review-apply ... edit_then_resume`
+- 不直接删除历史态 claim / review / page 记录，保留可追踪链路
+
+## 查询约定
+
+- 先读 query 返回的候选页面、字段命中解释和 `reading_pack`
+- 若涉及冲突、证据或引用，继续回读 claim、chunk、source，不只停在页面摘要

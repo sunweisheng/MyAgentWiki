@@ -11,3 +11,4 @@
 
 - `../MyAgentWiki系统详细设计-V1.md`
 - `runtime-deps.md`
+- `troubleshooting.md`

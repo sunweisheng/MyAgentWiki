@@ -1,0 +1,7 @@
+interface:
+  display_name: "MyAgentWiki"
+  short_description: "本地 LLM Wiki 工作区与知识维护 Skill"
+  default_prompt: "Use $myagentwiki to initialize, ingest, query, lint, and maintain a MyAgentWiki workspace."
+
+policy:
+  allow_implicit_invocation: true

@@ -67,3 +67,35 @@ V1 原则：
 
 - 核心流程不依赖外部办公软件才能运行
 - 可选系统工具缺失时，`doctor` 需要明确提示并说明降级策略
+- `bootstrap` 与文档示例应避免依赖 shell 专属语法，保证 Windows 可直接照做
+
+## 当前推荐启动方式
+
+Windows:
+
+- `py -3.12 -m venv .venv`
+- `.venv\\Scripts\\python -m pip install -U pip`
+- `.venv\\Scripts\\python -m myagentwiki bootstrap --extra dev`
+
+macOS / Linux:
+
+- `python3.12 -m venv .venv`
+- `.venv/bin/python -m pip install -U pip`
+- `.venv/bin/python -m myagentwiki bootstrap --extra dev`
+
+## 工作流验证脚本
+
+仓库当前已提供：
+
+- [scripts/validate_workflow.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/scripts/validate_workflow.py)
+
+用途：
+
+- 用最小样例跑通 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
+- 验证递归扫描 `raw/` 子目录
+- 为 Windows / macOS / Linux 提供统一的 CLI 烟雾测试入口
+
+说明：
+
+- 当前脚本本身是跨平台的
+- 但本仓库当前轮开发是在非 Windows 环境完成，因此 Windows 侧属于“脚本与命令路径已适配、待真实机器补充实跑确认”
