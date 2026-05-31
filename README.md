@@ -42,7 +42,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 ## V1 范围
 
-V1 重点先把骨架和规则打稳，优先完成：
+V1 已完成并收口。当前版本重点是把骨架和规则打稳，已经完成：
 
 - Python `3.12+` CLI 基础入口
 - `raw -> normalized -> chunk -> claim -> wiki` 主链路设计落地
@@ -52,7 +52,18 @@ V1 重点先把骨架和规则打稳，优先完成：
 - review 审核队列与状态恢复机制
 - Windows / macOS / Linux 兼容边界
 
-V1 当前不把这些当成必须前提：
+V1 已通过本地全量测试和端到端验证：
+
+- `python -m pytest`
+  - `28 passed`
+- `python scripts/validate_workflow.py`
+  - 覆盖 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
+- `python -m myagentwiki lint --json`
+  - 当前仓库结构检查通过
+- `python -m myagentwiki doctor --json`
+  - 必需依赖检查通过
+
+V1 不把这些当成必须前提：
 
 - LibreOffice
 - Pandoc
@@ -63,7 +74,7 @@ V1 当前不把这些当成必须前提：
 
 ## Skill 安装与接入 / Skill Installation
 
-当前仓库已经提供：
+当前仓库已经是一个可安装 / 可引用的 Skill 仓库，包含：
 
 - [SKILL.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/SKILL.md)
 - [agents/openai.yaml](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/agents/openai.yaml)
@@ -71,13 +82,100 @@ V1 当前不把这些当成必须前提：
 - [AGENTS.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/AGENTS.md)
 - [CLAUDE.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/CLAUDE.md)
 
-这意味着它已经具备“作为 Skill 仓库被安装或引用”的基础入口。
+这意味着它可以被 Codex 或 Claude Code 作为一个包含 `SKILL.md` 的目录加载。推荐优先用软链接 / 目录链接安装，这样仓库更新后 Skill 会同步生效。
 
 面向 Agent 的核心约束是：
 
 - 固定流程优先执行 CLI
 - 证据追踪优先走 `wiki -> claim -> chunk -> source`
 - review / state 恢复优先走 `review-list / review-apply`
+
+### 在 Codex 中安装
+
+Codex 会从个人技能目录中发现包含 `SKILL.md` 的 Skill 目录。默认位置是：
+
+- macOS / Linux：`${CODEX_HOME:-$HOME/.codex}/skills/`
+- Windows：`%USERPROFILE%\.codex\skills\`
+
+macOS / Linux 推荐使用软链接：
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s /path/to/MyAgentWiki "${CODEX_HOME:-$HOME/.codex}/skills/myagentwiki"
+```
+
+如果不想使用软链接，也可以复制一份：
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R /path/to/MyAgentWiki "${CODEX_HOME:-$HOME/.codex}/skills/myagentwiki"
+```
+
+Windows PowerShell 推荐使用目录链接：
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills"
+New-Item -ItemType Junction `
+  -Path "$env:USERPROFILE\.codex\skills\myagentwiki" `
+  -Target "C:\path\to\MyAgentWiki"
+```
+
+安装后重启 Codex，让新的 Skill 被重新扫描。使用时可以直接说：
+
+```text
+使用 myagentwiki skill，帮我初始化并导入这个本地知识库。
+```
+
+如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
+
+### 在 Claude Code 中安装
+
+Claude Code 支持用户级和项目级 Skill：
+
+- 用户级：`~/.claude/skills/`
+  - 适合在所有项目中复用 MyAgentWiki
+- 项目级：`.claude/skills/`
+  - 适合只在某个项目中启用 MyAgentWiki
+
+用户级安装，macOS / Linux：
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+ln -s /path/to/MyAgentWiki "$HOME/.claude/skills/myagentwiki"
+```
+
+项目级安装，macOS / Linux：
+
+```bash
+mkdir -p .claude/skills
+ln -s /path/to/MyAgentWiki .claude/skills/myagentwiki
+```
+
+Windows PowerShell 用户级安装：
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"
+New-Item -ItemType Junction `
+  -Path "$env:USERPROFILE\.claude\skills\myagentwiki" `
+  -Target "C:\path\to\MyAgentWiki"
+```
+
+安装后重启 Claude Code。使用时可以直接说：
+
+```text
+使用 myagentwiki skill，执行 doctor、init、ingest、query 和 lint。
+```
+
+如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Claude Code 还会读取根目录的 `CLAUDE.md`，它会把 Claude Code 引导到共享规则 `Agent.md` 和 review / state 恢复约定。
+
+## 文档导航
+
+如果你想先从文档理解项目，建议先看：
+
+- [docs/index.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/index.md)
+  - 文档总入口，包含主设计、运行说明、排障文档和项目资料导航
+- [docs/MyAgentWiki系统详细设计-V1.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计-V1.md)
+  - 当前版本的系统详细设计主文档
 
 ## 快速开始 / Quick Start
 
@@ -151,25 +249,27 @@ MyAgentWiki/
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── README.md
-├── MyAgentWiki系统详细设计-V1.md
 ├── pyproject.toml
 ├── config/
 │   └── runtime_manifest.yml
 ├── docs/
+│   ├── MyAgentWiki系统详细设计-V1.md
 │   ├── index.md
-│   └── runtime-deps.md
+│   ├── runtime-deps.md
+│   ├── troubleshooting.md
+│   └── project-materials/
 ├── src/
 │   └── myagentwiki/
 │       ├── __init__.py
 │       └── cli.py
 ├── templates/
 ├── tests/
-└── 项目资料/
+└── scripts/
 ```
 
 主要文件说明：
 
-- `MyAgentWiki系统详细设计-V1.md`
+- `docs/MyAgentWiki系统详细设计-V1.md`
   - 当前版本的详细设计主文档
 
 - `Agent.md`
@@ -193,7 +293,7 @@ MyAgentWiki/
 - `agents/openai.yaml`
   - Skill UI 元数据
 
-- `项目资料/`
+- `docs/project-materials/`
   - 现阶段的学习记录、工程思考和历史整理材料
 
 ## 环境要求
@@ -216,9 +316,9 @@ MyAgentWiki/
 - `pandoc`
 - `pdftotext`
 
-## 计划中的 CLI 命令
+## V1 CLI 命令实现状态
 
-当前已经预留这些命令入口：
+V1 已实现这些命令入口：
 
 - `myagentwiki init`
 - `myagentwiki ingest`
@@ -362,25 +462,24 @@ python scripts/validate_workflow.py --keep-workspace
 如果你想快速理解项目，建议阅读顺序如下：
 
 1. `README.md`
-2. `MyAgentWiki系统详细设计-V1.md`
+2. `docs/MyAgentWiki系统详细设计-V1.md`
 3. `docs/runtime-deps.md`
-4. `项目资料/` 中的学习与工程记录
+4. `docs/project-materials/` 中的学习与工程记录
 5. `docs/troubleshooting.md`
 
 ## 开发说明
 
-当前阶段仓库重点是：
+V1 已经完成收口，当前仓库重点从“打通主链路”转为“保持 V1 稳定、准备 V1.1 增强”。
 
-- 固化设计
-- 建立跨平台骨架
-- 为后续实现准备规则、模板和入口
+V1.1 可以继续推进：
 
-下一步会继续补：
-
-- Word / 图片 OCR 的进一步增强，以及 `.doc` / `.xls` 的更完整兼容
-- Claim 层与 Agent 增强抽取、冲突审核队列深化
-- 概念页 / 主题页等更高层的 Wiki 页面生成与回链
-- 更稳定的中文分词、增量重建索引、以及更智能的阅读预算控制
+- 自动迁移与 state 版本升级
+- 更深入的 `stable / disputed` Claim 治理
+- `qa-note` 正式页面提升流程
+- entity / overview 等更高层 Wiki 页面生成
+- 更细的 lint 子命令与结构化日志
+- Windows 真机回归验证
+- 可选 Office / PDF / OCR 高保真工具集成
 
 ## 测试说明
 

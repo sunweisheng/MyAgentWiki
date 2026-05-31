@@ -1835,15 +1835,20 @@ def convert_image_to_markdown(raw_path: Path) -> tuple[str, dict]:
         warnings.append("pillow_missing")
         width, height, image_format = image_size_from_binary(raw_path)
     else:
-        with Image.open(raw_path) as image:
-            width = image.width
-            height = image.height
-            image_mode = image.mode
-            image_format = image.format or "unknown"
-            if hasattr(image, "getexif"):
-                exif_data = image.getexif()
-                if exif_data:
-                    exif = {str(key): str(value) for key, value in exif_data.items()}
+        try:
+            with Image.open(raw_path) as image:
+                width = image.width
+                height = image.height
+                image_mode = image.mode
+                image_format = image.format or "unknown"
+                if hasattr(image, "getexif"):
+                    exif_data = image.getexif()
+                    if exif_data:
+                        exif = {str(key): str(value) for key, value in exif_data.items()}
+        except Exception as exc:
+            warnings.append("pillow_image_open_failed")
+            width, height, image_format = image_size_from_binary(raw_path)
+            image_mode = "unknown"
 
     metadata_lines.extend([
         f"- 尺寸: {width}x{height}" if width and height else "- 尺寸: unknown",
@@ -6554,7 +6559,7 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
         add_check("project_root", True, "Linting repository root scaffold.", severity="info")
         required_paths = [
             "README.md",
-            "MyAgentWiki系统详细设计-V1.md",
+            "docs/MyAgentWiki系统详细设计-V1.md",
             "pyproject.toml",
             "config/runtime_manifest.yml",
             "src/myagentwiki/cli.py",
