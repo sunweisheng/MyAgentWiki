@@ -481,14 +481,47 @@ def ensure_clean_target(target: Path) -> None:
         raise FileExistsError(f"Target directory already exists and is not empty: {target}")
 
 
+def baseline_git_paths(target: Path) -> list[str]:
+    # 基线提交只纳入 MyAgentWiki 自己生成的骨架与状态文件；
+    # raw/ 明确保留在工作区里，但默认绝不进入 Git 历史。
+    candidates = [
+        ".gitignore",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "config/project.yml",
+        "config/runtime_manifest.yml",
+        "indexes/aliases.json",
+        str(SEARCH_PAGES_INDEX_REL_PATH),
+        "reports/lint/lint_latest.md",
+        "state/claims.jsonl",
+        "state/chunks.jsonl",
+        "state/error_log.jsonl",
+        "state/ingest_state.jsonl",
+        "state/normalized.jsonl",
+        "state/pages.jsonl",
+        "state/reviews.jsonl",
+        "state/sources.jsonl",
+        "wiki/index.md",
+        "wiki/log.md",
+    ]
+    return [path for path in candidates if (target / path).exists()]
+
+
 def git_init_and_commit(target: Path) -> list[str]:
     # 初始化工作区时自动建一个 Git 基线，方便后续所有自动化改动都可回滚。
     steps: list[str] = []
     # 这里故意拆成三步记录，后面如果你要把这些步骤展示到日志或界面，会更直观。
     subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True, text=True)
     steps.append("git init")
-    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
-    steps.append("git add .")
+    tracked_paths = baseline_git_paths(target)
+    subprocess.run(
+        ["git", "add", "--", *tracked_paths],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    steps.append("git add whitelist")
     # 用固定的本地身份提交第一次基线，避免依赖用户电脑上是否已经配置 git 用户名邮箱。
     subprocess.run(
         [
