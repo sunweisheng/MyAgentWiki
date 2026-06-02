@@ -148,3 +148,28 @@ def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
     assert raw_dir.exists()
     assert raw_dir.is_dir()
     assert not any(raw_dir.iterdir())
+
+
+def test_wiki_index_escapes_paths_with_spaces(tmp_path: Path) -> None:
+    # 目录页里的 Markdown 链接需要对空格转义，否则部分查看器会把路径截断。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "#### 2. Chunk Lint\n\n"
+        "Chunk Lint 检查 chunk 是否可用： chunk 是否超过 hard max tokens。\n\n"
+        "chunk 是否过短且未合并。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "EscapedWikiLinks",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    index_text = (workspace_dir / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "wiki/concepts/" in index_text
+    assert "Chunk%20Lint.md" in index_text

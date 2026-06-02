@@ -23,6 +23,7 @@ from string import Template
 import ast
 import tomllib
 import tempfile
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 try:
@@ -3618,7 +3619,12 @@ def aggregate_source_refs_for_page(claim_records: list[dict]) -> list[dict]:
 def markdown_link_between_pages(from_page: Path, to_page: Path) -> str:
     # 页面正文里尽量使用相对链接，这样整个工作区换目录后链接仍然有效。
     relative = os.path.relpath(to_page, start=from_page.parent)
-    return relative.replace(os.sep, "/")
+    return quote(relative.replace(os.sep, "/"), safe="/._-~")
+
+
+def markdown_link_target(path: str) -> str:
+    # 目录页链接也需要对空格等字符做转义，避免某些 Markdown 查看器截断路径。
+    return quote(path.replace(os.sep, "/"), safe="/._-~")
 
 
 def collect_source_summary_pages_for_claims(claim_records: list[dict], page_records_by_id: dict[str, dict]) -> list[dict]:
@@ -4025,7 +4031,7 @@ def rebuild_wiki_index(target: Path, page_records: list[dict]) -> None:
 
     if concept_pages:
         for record in sorted(concept_pages, key=lambda item: item["title"].lower()):
-            page_path = record.get("page_path", "")
+            page_path = markdown_link_target(record.get("page_path", ""))
             lines.append(
                 f"- [{record['title']}]({page_path}) "
                 f"({record['type']}, claims={len(record.get('claim_ids', []))}, reviews={len(record.get('review_ids', []))}) "
@@ -4041,7 +4047,7 @@ def rebuild_wiki_index(target: Path, page_records: list[dict]) -> None:
     ])
     if source_pages:
         for record in sorted(source_pages, key=lambda item: item["title"].lower()):
-            page_path = record.get("page_path", "")
+            page_path = markdown_link_target(record.get("page_path", ""))
             lines.append(
                 f"- [{record['title']}]({page_path}) "
                 f"({record['type']}, claims={len(record.get('claim_ids', []))}) - {record['summary']}"
@@ -4056,7 +4062,7 @@ def rebuild_wiki_index(target: Path, page_records: list[dict]) -> None:
             "",
         ])
         for record in sorted(other_pages, key=lambda item: item["title"].lower()):
-            page_path = record.get("page_path", "")
+            page_path = markdown_link_target(record.get("page_path", ""))
             lines.append(
                 f"- [{record['title']}]({page_path}) "
                 f"({record['type']}, claims={len(record.get('claim_ids', []))}) - {record['summary']}"
