@@ -82,6 +82,90 @@ def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Pat
     assert result["results"][0]["intent_boost"] >= 1.0
 
 
+def test_concept_page_title_and_path_are_human_readable_for_question_headings(tmp_path: Path) -> None:
+    # FAQ 风格标题不应把编号、问句尾巴和内部 page_id 暴露成最终页面主标题。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 1. Claim 是什么\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ConceptTitleRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = [
+        json.loads(line)
+        for line in pages_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+
+    assert concept_page["title"] == "Claim"
+    assert concept_page["canonical_id"] == "concept:claim"
+    assert concept_page["page_path"].startswith(f"wiki/concepts/{concept_page['page_id']}/")
+    assert concept_page["page_path"].endswith("/Claim.md")
+    assert "__page_cpt_" not in concept_page["page_path"]
+
+    page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "# Claim" in page_text
+    assert "规范概念键: `claim`" in page_text
+
+
+def test_concept_page_ignores_yaml_examples_inside_definition_section(tmp_path: Path) -> None:
+    # “Claim 是什么”小节里的 YAML 示例不应被当成真正的 claim 并抢占代表陈述。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "## 问题 9：知识声明 Claim 层如何在第一版实现\n\n"
+        "### 1. Claim 是什么\n\n"
+        "Claim 是从 chunk 中抽取出来的一条相对原子的知识声明。\n\n"
+        "它不是普通摘要，也不是整段原文。\n\n"
+        "例如：\n\n"
+        "```yaml\n"
+        "claim_id: claim_20260527_bm25_001\n"
+        "text: BM25 是一种用于关键词检索的相关性排序算法。\n"
+        "claim_type: definition\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ClaimExampleRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = [
+        json.loads(line)
+        for line in pages_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(
+        record
+        for record in page_records
+        if record.get("type") == "concept-summary" and record.get("canonical_id") == "concept:claim"
+    )
+
+    assert concept_page["summary"] == "Claim 是从 chunk 中抽取出来的一条相对原子的知识声明"
+    page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "代表陈述: Claim 是从 chunk 中抽取出来的一条相对原子的知识声明" in page_text
+    assert "BM25 是一种用于关键词检索的相关性排序算法。" not in page_text
+
+
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     # “来源/证据”类问题应识别为 evidence，并让 source_refs 字段真正参与更强排序。
     source_dir = tmp_path / "raw"

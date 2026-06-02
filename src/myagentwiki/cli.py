@@ -2343,6 +2343,46 @@ def markdown_to_plain_text(text: str) -> str:
     return cleaned.strip()
 
 
+def strip_fenced_code_blocks(text: str) -> str:
+    # 示例代码块里的 YAML/JSON/命令通常不是正文知识陈述，不应直接进入 claim 抽取。
+    lines: list[str] = []
+    in_code_fence = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def normalize_heading_plus_body_claim_candidate(text: str) -> str:
+    # Markdown 标题和正文在压平成单行后，常变成“Claim 是什么 Claim 是...”这种重复前缀。
+    cleaned = clean_concept_title_text(text)
+    if not cleaned:
+        return ""
+
+    suffix_match = re.match(r"^(.{1,32}?)\s*(?:是|指)?什么\s+(.+)$", cleaned, flags=re.IGNORECASE)
+    if suffix_match:
+        label = clean_concept_title_text(suffix_match.group(1))
+        remainder = clean_concept_title_text(suffix_match.group(2))
+        if label and remainder.startswith(label):
+            return remainder
+
+    prefix_match = re.match(r"^什么是\s+(.{1,32}?)\s+(.+)$", cleaned, flags=re.IGNORECASE)
+    if prefix_match:
+        label = clean_concept_title_text(prefix_match.group(1))
+        remainder = clean_concept_title_text(prefix_match.group(2))
+        if label and remainder.startswith(label):
+            return remainder
+
+    return text
+
+
 def normalize_claim_text(text: str) -> str:
     # Claim 的规范文本用于去重、冲突判断和稳定生成 claim_id。
     cleaned = markdown_to_plain_text(text).lower()
@@ -2363,6 +2403,7 @@ def clean_claim_candidate_text(text: str) -> str:
     cleaned = re.sub(r"^\s*\d+[.)、:：]\s*", "", cleaned)
     cleaned = re.sub(r"^\s*[（(]?\d+[）)]\s*", "", cleaned)
     cleaned = re.sub(r"^\s*(因此|所以|同时|此外|另外|不过|但是|而且|并且|而是)\s*", "", cleaned)
+    cleaned = normalize_heading_plus_body_claim_candidate(cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" -:;,.!?。！？；：，、()[]{}\"'")
 
@@ -3026,7 +3067,7 @@ def append_error_record(
 
 def build_claims_from_chunk(chunk_record: dict) -> list[dict]:
     # 一个 chunk 里可能有多个可提取陈述，但 V1 先控制上限，避免 claim 过碎。
-    plain_text = markdown_to_plain_text(chunk_record["text"])
+    plain_text = markdown_to_plain_text(strip_fenced_code_blocks(chunk_record["text"]))
     claim_candidates = split_claim_candidates_from_text(plain_text)
     claim_records: list[dict] = []
 
@@ -3323,6 +3364,14 @@ def sanitize_page_slug(value: str) -> str:
     return slug or "page"
 
 
+def sanitize_page_filename(value: str) -> str:
+    # 面向最终导出的页面文件名尽量保留可读性，避免把标题压成一串下划线。
+    cleaned = clean_concept_title_text(value)
+    cleaned = re.sub(r"[\\/:*?\"<>|#]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or "page"
+
+
 def summarize_claims_for_page(claim_records: list[dict], limit: int = 3) -> list[str]:
     # 来源摘要页先挑几条 claim 做“核心观点”。
     ranked = sorted(
@@ -3367,15 +3416,37 @@ def build_concept_group_key(claim_record: dict) -> str:
 
 
 def concept_summary_page_path(page_id: str, title: str) -> Path:
-    # 概念页单独放到 wiki/concepts 目录，和来源页分开，便于后续继续扩展更多页面类型。
-    slug = sanitize_page_slug(title)
-    return Path("wiki") / "concepts" / f"{slug}__{page_id}.md"
+    # 概念页文件名尽量贴近最终展示标题，避免导出到外部工具时把内部 page_id 暴露成主标题。
+    filename = sanitize_page_filename(title)
+    return Path("wiki") / "concepts" / page_id / f"{filename}.md"
 
 
 def clean_concept_title_text(value: str) -> str:
     # 概念页标题要尽量像“页面名”，而不是原始 claim 文本残片。
-    cleaned = value.replace("|", " ")
+    cleaned = value.replace("|", " ").replace("_", " ")
+    cleaned = re.sub(r"^\s*\d+\s*[.)、:：-]?\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.!?。！？；：|")
+    return cleaned
+
+
+def normalize_question_style_concept_label(label: str) -> str:
+    # FAQ/目录型标题常写成“1. Claim 是什么”或“什么是 Claim”，这里尽量还原成概念名本身。
+    cleaned = clean_concept_title_text(label)
+    if not cleaned:
+        return ""
+
+    suffix_match = re.fullmatch(r"(.+?)\s*(?:是|指)?什么[？?]?", cleaned, flags=re.IGNORECASE)
+    if suffix_match:
+        candidate = clean_concept_title_text(suffix_match.group(1))
+        if candidate:
+            return candidate
+
+    prefix_match = re.fullmatch(r"(?:什么是|什么叫|何谓)\s*(.+?)[？?]?", cleaned, flags=re.IGNORECASE)
+    if prefix_match:
+        candidate = clean_concept_title_text(prefix_match.group(1))
+        if candidate:
+            return candidate
+
     return cleaned
 
 
@@ -3387,7 +3458,7 @@ def extract_primary_section_label(claim_record: dict) -> str:
             continue
         parts = [part.strip() for part in section_path.split(">") if part.strip()]
         if parts:
-            return clean_concept_title_text(parts[-1])
+            return normalize_question_style_concept_label(parts[-1])
     return ""
 
 
@@ -3856,6 +3927,28 @@ def write_wiki_page(target: Path, relative_path: Path, page_text: str) -> None:
     atomic_write_text(page_path, page_text, encoding="utf-8")
 
 
+def remove_stale_page_file(target: Path, previous_path: str, current_path: str) -> None:
+    # 页面改名后，把旧文件清掉，避免 wiki 目录里残留同一 page_id 的历史壳文件。
+    if not previous_path or previous_path == current_path:
+        return
+    previous_page_path = target / previous_path
+    if previous_page_path.exists():
+        previous_page_path.unlink()
+
+    stop_dirs = {
+        (target / "wiki").resolve(),
+        (target / "wiki" / "concepts").resolve(),
+        (target / "wiki" / "sources").resolve(),
+    }
+    parent = previous_page_path.parent
+    while parent.exists() and parent.resolve() not in stop_dirs:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
 def build_page_signature(page_record: dict, page_text: str) -> str:
     # 页面签名用于判断“这页内容是否真的变了”。
     # 如果签名不变，就没必要重写页面文件、日志和页面索引记录。
@@ -3894,6 +3987,11 @@ def upsert_wiki_page(
         return previous_record, False
 
     if previous_record is not None:
+        remove_stale_page_file(
+            target=target,
+            previous_path=previous_record.get("page_path", ""),
+            current_path=page_record.get("page_path", ""),
+        )
         page_record["created"] = previous_record.get("created", page_record.get("created"))
     page_record["updated"] = utc_now_iso()
 
