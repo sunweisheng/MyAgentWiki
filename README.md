@@ -360,6 +360,7 @@ V1 已实现这些命令入口：
 - `myagentwiki ingest`
   - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、最小 chunk 流程、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
   - 已实现两类基础 Wiki 页面：`source-summary` 与 `concept-summary`，会同步生成 `wiki/sources/*.md`、`wiki/concepts/*.md`、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
+  - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
 - `myagentwiki lint`
   - 已实现仓库骨架 / 工作区结构检查，以及 `chunk_id` / `claim_id` / `page_id` 唯一性、Claim 溯源、页面记录完整性、`reviews.jsonl` / `error_log.jsonl` / `pages.jsonl` 存在性检查
@@ -448,6 +449,7 @@ python scripts/validate_workflow.py --keep-workspace
 - `wiki/concepts/*.md`
   - 基于 Claim 聚合出的概念候选页，作为后续综述页、主题页的起点
   - 当前已加入一层轻量命名清洗，优先使用 `section_path` 和短主题短语生成更像 Wiki 的页面名
+  - 页面文件名若包含空格等特殊字符，目录页与页面间链接会自动使用 URL 编码后的相对路径
 - `state/*.jsonl`
   - 全局索引与状态账本，包括 `sources`、`normalized`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
   - 其中 `state/pages.jsonl` 会保留已被自动移除页面的历史记录，便于追踪页面演化；但 `removed` 页面不会继续进入在线检索与页面索引
