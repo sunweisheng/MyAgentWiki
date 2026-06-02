@@ -47,7 +47,7 @@ def run_git(cwd: Path, *args: str) -> str:
 
 def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     # 这条 E2E 目标不是把所有边角都覆盖完，而是把“用户第一次上手”的主闭环跑通。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     nested_dir = source_dir / "nested" / "topic"
     nested_dir.mkdir(parents=True)
     (nested_dir / "knowledge.md").write_text(
@@ -73,17 +73,12 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
         str(workspace_dir),
     )
     assert Path(init_result["target_dir"]).resolve() == workspace_dir.resolve()
+    assert Path(init_result["raw_dir"]).resolve() == source_dir.resolve()
+    assert init_result["raw_dir_relative_path"] == "../raw"
+    assert init_result["raw_dir_preexisting"] is True
+    assert not (workspace_dir / "raw").exists()
     tracked_files = set(run_git(workspace_dir, "ls-files").splitlines())
-    assert "raw/review.md" not in tracked_files
-    assert "raw/nested/topic/knowledge.md" not in tracked_files
-    ignored_files = run_git(
-        workspace_dir,
-        "check-ignore",
-        "raw/review.md",
-        "raw/nested/topic/knowledge.md",
-    ).splitlines()
-    assert "raw/review.md" in ignored_files
-    assert "raw/nested/topic/knowledge.md" in ignored_files
+    assert not any(path.startswith("raw/") for path in tracked_files)
 
     ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
     assert ingest_result["summary"]["normalized_count"] >= 2
@@ -133,3 +128,23 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
 
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
+
+
+def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "LocalKnowledgeWiki"
+
+    init_result = run_cli(
+        "init",
+        "--project-name",
+        "LocalKnowledgeWiki",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    raw_dir = tmp_path / "raw"
+    assert Path(init_result["target_dir"]).resolve() == workspace_dir.resolve()
+    assert Path(init_result["raw_dir"]).resolve() == raw_dir.resolve()
+    assert init_result["raw_dir_preexisting"] is False
+    assert raw_dir.exists()
+    assert raw_dir.is_dir()
+    assert not any(raw_dir.iterdir())

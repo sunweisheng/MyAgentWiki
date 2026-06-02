@@ -12,7 +12,7 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 
 这套系统采用分层思路组织知识：
 
-- `raw`：原始资料，只读保留
+- `raw`：工作区外 sibling 原始资料目录，只读保留
 - `normalized`：标准化后的可分析文本
 - `chunks`：切块后的证据单元
 - `claim`：独立知识声明层
@@ -44,11 +44,11 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 用户工作区默认会初始化 Git，但提交边界需要明确区分：
 
-- `raw/` 永远视为本地原始资料区，默认不提交到 Git。
+- sibling `raw/` 永远视为本地原始资料区，不会被 `init` 复制进工作区，也默认不纳入工作区 Git 基线。
 - `init` 生成的基线提交只包含 MyAgentWiki 创建的骨架、配置、索引、账本和初始 Wiki 文件。
 - `normalized/`、`chunks/`、`claims/`、`wiki/`、`reviews/`、`state/` 是否持续提交到 Git，由用户自己按隐私和协作需求决定。
 
-如果你的资料包含敏感内容，不要因为 `raw/` 已被忽略，就默认认为仓库可以公开。`normalized/`、`chunks/`、`claims/` 和 `wiki/` 里仍可能包含原文片段、摘要、结论或可回推出来源的信息；需要公开仓库时，请先审查这些目录，再决定是否继续纳入版本控制。
+如果你的资料包含敏感内容，不要因为外部 `raw/` 没进工作区 Git，就默认认为仓库可以公开。`normalized/`、`chunks/`、`claims/` 和 `wiki/` 里仍可能包含原文片段、摘要、结论或可回推出来源的信息；需要公开仓库时，请先审查这些目录，再决定是否继续纳入版本控制。
 
 ## V1 范围
 
@@ -218,10 +218,17 @@ python -m myagentwiki bootstrap --dry-run --extra dev
 
 ```bash
 python -m myagentwiki init \
-  --source-dir /path/to/your/raw_notes \
+  --source-dir /path/to/raw \
   --project-name MyNotesWiki \
   --target-dir /path/to/MyNotesWiki
 ```
+
+说明：
+
+- `raw/` 需要与 `MyNotesWiki/` 平级。
+- 如果 `/path/to/raw` 已存在，就直接复用。
+- 如果不传 `--source-dir`，`init` 会自动在工作区旁边创建一个空的 `raw/`。
+- `init` 不会再复制或预填充 `raw/` 内容，放什么文件由用户自己决定。
 
 ### 4. 导入资料并生成第一版 Wiki
 
@@ -398,8 +405,8 @@ V1 已实现这些命令入口：
 面向最终用户的大致流程会是：
 
 1. 在 Codex 或 Claude Code 中安装或接入 MyAgentWiki Skill
-2. 准备自己的原始知识目录
-3. 运行 `init`，在原始知识目录同级创建 Wiki 工程
+2. 准备自己的 `raw/` 原始知识目录，放在目标工作区同级
+3. 运行 `init`，创建 Wiki 工程并复用或创建 sibling `raw/`
 4. 使用 Agent 执行 `ingest`
 5. 检查 `normalized/`、`chunks/`、`claims/`、`wiki/` 和 `state/*.jsonl` 结果，重点关注 `state/error_log.jsonl`、`state/reviews.jsonl`、`state/pages.jsonl`
 6. 使用 `lint` 和 review 机制维护知识库健康
@@ -411,7 +418,7 @@ V1 已实现这些命令入口：
 
 - [scripts/validate_workflow.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/scripts/validate_workflow.py)
   - 串行执行 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
-  - 会自动准备一个最小样例资料集
+  - 会自动准备一个最小 sibling `raw/` 样例资料集
   - 样例包含 `raw/` 子目录，能顺便验证递归扫描
 
 执行方式：

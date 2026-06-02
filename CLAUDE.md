@@ -16,6 +16,7 @@
 
 - `init` 后默认生成 `AGENTS.md`、`CLAUDE.md`、`config/project.yml`、`indexes/aliases.json`
 - 新工作区应默认带 Git 基线提交
+- `raw/` 应放在工作区外部并与工作区平级；若已存在则复用，不存在则创建空目录
 - `raw/` 允许包含子目录，Agent 不应假定原始资料是扁平结构
 
 ## review / state 恢复约定 / Review and State Recovery

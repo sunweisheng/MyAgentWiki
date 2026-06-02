@@ -481,9 +481,14 @@ def ensure_clean_target(target: Path) -> None:
         raise FileExistsError(f"Target directory already exists and is not empty: {target}")
 
 
+def ensure_directory(path: Path) -> None:
+    # 原始资料目录与工作区子目录都统一走这里，避免各处重复 mkdir 参数。
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def baseline_git_paths(target: Path) -> list[str]:
     # 基线提交只纳入 MyAgentWiki 自己生成的骨架与状态文件；
-    # raw/ 明确保留在工作区里，但默认绝不进入 Git 历史。
+    # 外部 raw/ 不属于工作区仓库，基线里也不应试图追踪它。
     candidates = [
         ".gitignore",
         "AGENTS.md",
@@ -640,13 +645,24 @@ def build_source_version_group(raw_root: Path, file_path: Path) -> str:
     return f"vgrp_{relative_key}"
 
 
+def source_path_to_raw_relative(source_path: str) -> str:
+    # source_path 可能是 raw/topic/a.md，也可能是 ../raw/topic/a.md；
+    # 这里统一裁成“相对 raw 根目录的路径”，供 version_group 与展示逻辑复用。
+    path = Path(source_path)
+    parts = list(path.parts)
+    if "raw" in parts:
+        raw_index = parts.index("raw")
+        relative = Path(*parts[raw_index + 1:]) if raw_index + 1 < len(parts) else Path()
+    else:
+        relative = path
+    return relative.with_suffix("").as_posix().lstrip("./")
+
+
 def build_source_version_group_from_source_path(source_path: str) -> str:
-    # sources.jsonl 里保存的是相对工作区路径，例如 raw/topic/a.md。
+    # sources.jsonl 里保存的是可回到 raw 的路径，例如 raw/topic/a.md 或 ../raw/topic/a.md。
     # 这里补一个从已存记录反推 version_group 的帮助函数。
-    raw_relative = source_path
-    if raw_relative.startswith("raw/"):
-        raw_relative = raw_relative[4:]
-    relative_key = sanitize_source_key(Path(raw_relative).with_suffix("").as_posix())
+    raw_relative = source_path_to_raw_relative(source_path)
+    relative_key = sanitize_source_key(raw_relative)
     return f"vgrp_{relative_key}"
 
 
@@ -693,6 +709,22 @@ def load_workspace_config(target: Path) -> dict:
     # 工作区自己的配置放在 config/project.yml，后续 chunk/query 也会继续依赖它。
     config_path = target / "config" / "project.yml"
     return load_simple_yaml(config_path)
+
+
+def resolve_workspace_path(target: Path, configured_path: str) -> Path:
+    # config 里的路径既可能是相对工作区，也可能是绝对路径。
+    path = Path(configured_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (target / path).resolve()
+
+
+def resolve_source_record_path(target: Path, source_path: str) -> Path:
+    # source_path 默认按“相对工作区可访问路径”解释，这样 ../raw/... 也能稳定解析。
+    path = Path(source_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (target / path).resolve()
 
 
 def alias_index_path(target: Path) -> Path:
@@ -945,7 +977,7 @@ def normalize_text_content(source_type: str, raw_text: str) -> str:
 def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict:
     # Markdown 和纯文本是当前最稳定的一类输入，直接按文本规范化处理。
     source_type = source_record["source_type"]
-    raw_path = target / source_record["source_path"]
+    raw_path = resolve_source_record_path(target, source_record["source_path"])
     raw_text = raw_path.read_text(encoding="utf-8")
     normalized_text = normalize_text_content(source_type, raw_text)
     normalized_rel_path = Path("normalized") / f"{source_record['source_id']}.md"
@@ -2018,7 +2050,7 @@ def normalize_source_record(target: Path, source_record: dict) -> dict | None:
     if source_type in {"markdown", "plain_text"}:
         return normalize_markdown_or_text_record(target, source_record)
 
-    raw_path = target / source_record["source_path"]
+    raw_path = resolve_source_record_path(target, source_record["source_path"])
     try:
         normalized_text, metadata = convert_source_to_normalized_markdown(raw_path, source_type)
     except Exception as exc:
@@ -2349,7 +2381,7 @@ def claim_candidate_is_noise(text: str) -> bool:
         return True
     if cleaned.count("/") >= 3 and len(cleaned) < 48:
         return True
-    if cleaned.lower().startswith(("raw/", "wiki/", "claims/", "chunks/", "normalized/")):
+    if cleaned.lower().startswith(("raw/", "../raw/", "wiki/", "claims/", "chunks/", "normalized/")):
         return True
     if len(cleaned) < 12:
         return True
@@ -5571,28 +5603,43 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
 def command_init(args: argparse.Namespace) -> CommandResult:
     # init 负责把“普通资料目录”初始化成“可被 Agent 驱动的 MyAgentWiki 工作区”。
     root = find_project_root()
-    source_dir = Path(args.source_dir).expanduser().resolve()
-    if not source_dir.is_dir():
-        raise FileNotFoundError(f"Source directory does not exist: {source_dir}")
+    raw_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else None
+    target_dir = Path(args.target_dir).expanduser().resolve() if args.target_dir else None
 
-    target_dir = (
-        Path(args.target_dir).expanduser().resolve()
-        if args.target_dir
-        else source_dir.parent / args.project_name
-    )
+    if raw_dir is None and target_dir is None:
+        target_dir = (Path.cwd() / args.project_name).resolve()
+        raw_dir = (target_dir.parent / "raw").resolve()
+    elif raw_dir is not None and target_dir is None:
+        target_dir = (raw_dir.parent / args.project_name).resolve()
+    elif raw_dir is None and target_dir is not None:
+        raw_dir = (target_dir.parent / "raw").resolve()
+
+    assert raw_dir is not None
+    assert target_dir is not None
+    if raw_dir.name != "raw":
+        raise ValueError(f"Raw directory must be named 'raw': {raw_dir}")
+    if raw_dir.parent != target_dir.parent:
+        raise ValueError(
+            f"Raw directory must be a sibling of the workspace: raw={raw_dir} target={target_dir}"
+        )
+    if raw_dir.exists() and not raw_dir.is_dir():
+        raise FileExistsError(f"Raw path exists but is not a directory: {raw_dir}")
+
     ensure_clean_target(target_dir)
     # 这里即使目录不存在也没关系，mkdir 会顺手把父目录一起建出来。
-    target_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory(target_dir)
+    raw_dir_preexisting = raw_dir.exists()
+    ensure_directory(raw_dir)
+    raw_dir_relative_path = os.path.relpath(raw_dir, start=target_dir).replace(os.sep, "/")
 
     context = {
         "project_name": args.project_name,
-        "source_dir_name": source_dir.name,
-        "source_dir_path": str(source_dir),
+        "source_dir_name": raw_dir.name,
+        "source_dir_path": str(raw_dir),
+        "raw_dir_name": raw_dir.name,
+        "raw_dir_path": str(raw_dir),
+        "raw_dir_relative_path": raw_dir_relative_path,
     }
-
-    raw_target = target_dir / "raw"
-    # 初始化时完整复制原始知识目录，保留用户已有的子目录结构。
-    shutil.copytree(source_dir, raw_target)
 
     for directory in (
         "normalized",
@@ -5608,7 +5655,7 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "reports/lint",
     ):
         # 工作区目录先一次性建齐，后面各阶段脚本就可以假定这些路径始终存在。
-        (target_dir / directory).mkdir(parents=True, exist_ok=True)
+        ensure_directory(target_dir / directory)
 
     template_root = root / "templates" / "project"
     # 模板文件保存的是“用户工作区初始化时需要复制的骨架文件”。
@@ -5654,25 +5701,30 @@ def command_init(args: argparse.Namespace) -> CommandResult:
 
     payload = {
         "project_name": args.project_name,
-        "source_dir": str(source_dir),
+        "source_dir": str(raw_dir),
+        "raw_dir": str(raw_dir),
         "target_dir": str(target_dir),
         "created_directories": [
-            str(target_dir / path)
-            for path in (
-                "raw",
-                "normalized",
-                "chunks",
-                "claims",
-                "wiki",
-                "indexes",
-                "state",
-                "reviews",
-                "logs",
-                "outputs",
-                "config",
-                "reports/lint",
-            )
+            str(raw_dir),
+            *[
+                str(target_dir / path)
+                for path in (
+                    "normalized",
+                    "chunks",
+                    "claims",
+                    "wiki",
+                    "indexes",
+                    "state",
+                    "reviews",
+                    "logs",
+                    "outputs",
+                    "config",
+                    "reports/lint",
+                )
+            ],
         ],
+        "raw_dir_relative_path": raw_dir_relative_path,
+        "raw_dir_preexisting": raw_dir_preexisting,
         "metadata_files": [str(path) for path in metadata_files],
         "git_steps": git_steps,
     }
@@ -5684,7 +5736,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     # 它现在包含五步：来源登记、标准化、切块、Claim 草稿抽取、Wiki 页面生成。
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     config = load_workspace_config(target)
-    raw_dir = target / config["paths"]["raw"]
+    raw_dir = resolve_workspace_path(target, config["paths"]["raw"])
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw directory does not exist: {raw_dir}")
 
@@ -5751,7 +5803,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     # ingest 第一阶段只做来源登记：扫描 raw、生成 source_id、写 sources/state。
     for file_path in collect_files(raw_dir):
         source_hash = file_sha256(file_path)
-        relative_path = str(file_path.relative_to(target))
+        relative_path = os.path.relpath(file_path, start=target).replace(os.sep, "/")
         if source_hash in existing_by_hash:
             # 已有相同内容时跳过，避免反复导入导致 state 膨胀。
             skipped_sources.append({
@@ -6601,7 +6653,6 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
     else:
         add_check("workspace_target", True, f"Linting initialized workspace: {target}", severity="info")
         required_paths = [
-            "raw",
             "wiki/index.md",
             "wiki/log.md",
             "config/project.yml",
@@ -6620,11 +6671,12 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
         )
 
     if target != root:
-        raw_dir = target / "raw"
+        config_path = target / "config" / "project.yml"
+        raw_dir = resolve_workspace_path(target, load_simple_yaml(config_path)["paths"]["raw"]) if config_path.exists() else target / "raw"
         add_check(
-            name="raw_not_empty",
-            ok=raw_dir.exists() and any(raw_dir.iterdir()),
-            details="The raw directory should contain copied source files.",
+            name="raw_exists",
+            ok=raw_dir.exists(),
+            details="The raw directory should exist next to the workspace.",
         )
         add_check(
             name="git_initialized",
@@ -6884,9 +6936,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # init: 从用户原始资料目录创建一个新的 MyAgentWiki 工作区。
+    # init: 创建一个新的 MyAgentWiki 工作区，并复用/创建其外部 sibling raw 目录。
     init_parser = subparsers.add_parser("init", help="Initialize a new MyAgentWiki workspace.")
-    init_parser.add_argument("--source-dir", required=True, help="Path to the original knowledge directory.")
+    init_parser.add_argument(
+        "--source-dir",
+        help="Optional path to the sibling raw directory. If omitted, create/use ../raw next to the workspace.",
+    )
     init_parser.add_argument("--project-name", required=True, help="Name of the new wiki workspace.")
     init_parser.add_argument("--target-dir", help="Optional explicit target directory.")
     init_parser.add_argument("--json", action="store_true", help="Output JSON.")

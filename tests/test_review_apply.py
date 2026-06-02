@@ -46,7 +46,7 @@ def write_json(path: Path, record: dict) -> None:
 def test_review_merge_rewrites_other_open_reviews(tmp_path: Path) -> None:
     # 这个回归场景覆盖最容易遗漏的一类问题：
     # 某个 claim 被 merge 掉后，其他仍然 open 的 review 不应继续引用它。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 主题\n\n"
@@ -167,7 +167,7 @@ def test_review_merge_rewrites_other_open_reviews(tmp_path: Path) -> None:
 
 def test_review_edit_then_resume_reloads_manual_claim_edits(tmp_path: Path) -> None:
     # 这个场景验证“人先改 claim 文件，再让系统恢复后续步骤”。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 主题\n\n"
@@ -256,7 +256,7 @@ def test_review_edit_then_resume_reloads_manual_claim_edits(tmp_path: Path) -> N
 def test_review_keep_both_clears_claim_review_flags_when_no_other_open_reviews(tmp_path: Path) -> None:
     # keep_both 的语义是“这张审核单处理完了，但两条 claim 都保留”。
     # 如果没有其他 open review，它们不该继续停在 needs_review。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 主题\n\n"

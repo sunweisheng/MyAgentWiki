@@ -48,7 +48,7 @@ def prepare_demo_source(source_dir: Path) -> None:
 def validate_workspace(workspace_dir: Path) -> dict:
     # 这组步骤就是我们想交付给用户的最小闭环：
     # doctor -> bootstrap(dry-run) -> init -> ingest -> query -> lint
-    source_dir = workspace_dir / "_demo_source"
+    source_dir = workspace_dir / "raw"
     prepare_demo_source(source_dir)
 
     init_target = workspace_dir / "demo_wiki"

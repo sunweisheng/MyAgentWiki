@@ -92,7 +92,7 @@ macOS / Linux:
 用途：
 
 - 用最小样例跑通 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
-- 验证递归扫描 `raw/` 子目录
+- 验证 sibling `raw/` 的递归扫描子目录能力
 - 为 Windows / macOS / Linux 提供统一的 CLI 烟雾测试入口
 
 说明：

@@ -26,7 +26,7 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
 def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     # 这条回归验证 query_normalizer 已经真正接入：
     # 用 alias 命中时，不只返回页面，还要回传 alias/canonical 线索。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 知识声明层\n\n"
@@ -56,7 +56,7 @@ def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
 
 def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Path) -> None:
     # “什么是...” 这类问法应该识别为 definition，并把概念页轻微前推。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 知识声明层\n\n"
@@ -84,7 +84,7 @@ def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Pat
 
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     # “来源/证据”类问题应识别为 evidence，并让 source_refs 字段真正参与更强排序。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 证据回链\n\n"
@@ -114,7 +114,7 @@ def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
 
 def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path) -> None:
     # lint 现在除了返回 JSON，还应把最新报告写到 reports/lint/lint_latest.md。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# Git 版本管理\n\n"
@@ -143,7 +143,7 @@ def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path)
 
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
     # 初始化后的工作区应该直接带 alias registry，占位也好过缺文件。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text("知识库需要来源追踪。", encoding="utf-8")
 
@@ -165,7 +165,7 @@ def test_init_creates_alias_index_file(tmp_path: Path) -> None:
 def test_ingest_creates_alias_conflict_review_when_alias_registry_collides(tmp_path: Path) -> None:
     # 这个回归直接验证 alias registry 不只是“发现冲突”，
     # 而是真的会把冲突送进 review 队列。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text(
         "# Alpha 术语\n\n"
@@ -223,7 +223,7 @@ def test_ingest_creates_alias_conflict_review_when_alias_registry_collides(tmp_p
 
 def test_review_apply_assign_alias_updates_page_alias_overrides(tmp_path: Path) -> None:
     # alias_conflict 的细动作应能把某个 alias 指定给目标页，并写入可持久化的覆盖层。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是用于管理版本状态的概念。\n", encoding="utf-8")
     (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是用于管理审核状态的概念。\n", encoding="utf-8")
@@ -274,7 +274,7 @@ def test_review_apply_assign_alias_updates_page_alias_overrides(tmp_path: Path) 
 
 def test_review_apply_remove_alias_clears_alias_from_overrides(tmp_path: Path) -> None:
     # remove_alias 应能把冲突 alias 从覆盖层里移掉，适合人工决定“先都别用这个别名”。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是用于管理版本状态的概念。\n", encoding="utf-8")
     (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是用于管理审核状态的概念。\n", encoding="utf-8")
@@ -324,7 +324,7 @@ def test_review_apply_remove_alias_clears_alias_from_overrides(tmp_path: Path) -
 
 def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp_path: Path) -> None:
     # assign_alias 后重新 ingest，不应因为自动页面重建而把同一冲突重新打开。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
     (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
@@ -382,7 +382,7 @@ def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp
 
 def test_remove_alias_persists_after_reingest(tmp_path: Path) -> None:
     # remove_alias 后再次 ingest，冲突 alias 不应重新回到人工覆盖层里。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
     (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
@@ -435,7 +435,7 @@ def test_remove_alias_persists_after_reingest(tmp_path: Path) -> None:
 
 def test_assign_alias_keeps_existing_page_aliases(tmp_path: Path) -> None:
     # assign_alias 不应该把页面原本已有的其他 alias 一起抹掉。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
     (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
@@ -503,7 +503,7 @@ def test_assign_alias_keeps_existing_page_aliases(tmp_path: Path) -> None:
 
 def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None:
     # 不同 query intent 至少应在 reading_pack 上体现出不同的关注重点。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
         "# 操作与对比\n\n"
@@ -533,7 +533,7 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
 
 def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
     # timeline query 应返回时间线 focus，并把命中的 chunk 按来源做一层分组。
-    source_dir = tmp_path / "source_notes"
+    source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "timeline.md").write_text(
         "# 时间线\n\n"

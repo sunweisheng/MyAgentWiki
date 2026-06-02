@@ -21,4 +21,4 @@
   - query alias/canonical 扩展、alias index 初始化、lint 报告写回测试
 - `test_e2e_workflow.py`
   - `init -> ingest -> query -> review -> lint` 主闭环 E2E 测试
-  - 覆盖 `raw/` 子目录递归扫描与 alias conflict 处理收口
+  - 覆盖 sibling `raw/` 子目录递归扫描与 alias conflict 处理收口
