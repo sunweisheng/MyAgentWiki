@@ -2349,6 +2349,7 @@ def markdown_to_plain_text(text: str) -> str:
     # Claim 草稿抽取先基于“较干净的正文文本”进行。
     # 这里只做保守清理，不追求完美去 markdown。
     cleaned = text
+    cleaned = re.sub(r"<!--.*?-->", " ", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"^#{1,6}\s+", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
@@ -2412,6 +2413,7 @@ def clean_claim_candidate_text(text: str) -> str:
     # - 去掉常见编号前缀
     # - 压缩多余空白
     cleaned = text.strip()
+    cleaned = re.sub(r"<!--.*?-->", " ", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"^\s*>\s*", "", cleaned)
     cleaned = re.sub(r"^\s*[-*+]\s*", "", cleaned)
@@ -2432,6 +2434,14 @@ def claim_candidate_is_noise(text: str) -> bool:
     if not cleaned:
         return True
     if cleaned.startswith(("http://", "https://", "file://")):
+        return True
+    if any(marker in cleaned.lower() for marker in ("turn_id", "speaker:", "time:")):
+        return True
+    if re.match(r"^[A-Za-z][A-Za-z0-9_ -]{0,24}\s*:\s*", cleaned):
+        return True
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+        return True
+    if re.search(r"\b[A-Za-z][A-Za-z0-9_ -]{0,24}\s*:\s*", cleaned):
         return True
     if re.fullmatch(r"[-|: ]{3,}", cleaned):
         return True
@@ -2503,7 +2513,7 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
         fallback_piece = clean_claim_candidate_text(text.strip())
         if not claim_candidate_is_noise(fallback_piece):
             return [fallback_piece]
-        return [text.strip()]
+        return []
     return candidates[:DEFAULT_MAX_CLAIMS_PER_CHUNK]
 
 
@@ -2544,6 +2554,20 @@ def format_workspace_file_reference(from_page: Path, path_str: str) -> str:
     # 原始来源、标准化文件、chunk 文件统一渲染成工作区内相对链接，便于直接点开查看。
     link = markdown_link_between_pages(from_page, Path(path_str))
     return f"[`{path_str}`]({link})"
+
+
+def format_source_page_label(from_page: Path, source_page: dict) -> str:
+    link = markdown_link_between_pages(from_page, Path(source_page["page_path"]))
+    return f"[{source_page['title']}]({link})"
+
+
+def format_source_page_meta(source_page: dict | None, source_ref: dict) -> str:
+    # 内部 ID 仍然保留，但放到次级信息里，避免压过真正对人有用的标题和来源路径。
+    parts = []
+    if source_page is not None:
+        parts.append(f"page=`{source_page['page_id']}`")
+    parts.append(f"source=`{source_ref['source_id']}`")
+    return ", ".join(parts)
 
 
 def estimate_claim_confidence(text: str) -> float:
@@ -3920,12 +3944,11 @@ def build_concept_summary_page(
             source_page = source_pages_by_id.get(f"page_src_{source_ref['source_id']}")
             if source_page is None:
                 continue
-            link = markdown_link_between_pages(page_rel_path, Path(source_page["page_path"]))
             lines.append(
-                f"- [{source_page['title']}]({link}) "
-                f"`{source_page['page_id']}` "
-                f"source: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
+                f"- 来源摘要页: {format_source_page_label(page_rel_path, source_page)}"
             )
+            lines.append(f"  原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}")
+            lines.append(f"  标识: {format_source_page_meta(source_page, source_ref)}")
     else:
         lines.append("- 当前还没有可链接的来源摘要页。")
 
@@ -3940,23 +3963,24 @@ def build_concept_summary_page(
             None,
         )
         source_label = (
-            f"[{source_page['title']}]({markdown_link_between_pages(page_rel_path, Path(source_page['page_path']))})"
+            format_source_page_label(page_rel_path, source_page)
             if source_page is not None
-            else f"`{source_ref['source_id']}`"
+            else "未生成来源摘要页"
         )
         lines.append(
-            f"- {source_label} {format_workspace_file_reference(page_rel_path, source_ref['source_path'])} "
-            f"`{source_ref['source_id']}` "
-            f"(claims={len(source_ref['claim_ids'])}, chunks={len(source_ref['chunk_ids'])})"
+            f"- 来源: {source_label}"
         )
+        lines.append(f"  原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}")
+        lines.append(
+            f"  覆盖范围: claims={len(source_ref['claim_ids'])}, chunks={len(source_ref['chunk_ids'])}"
+        )
+        lines.append(f"  标识: {format_source_page_meta(source_page, source_ref)}")
         if source_ref.get("chunks"):
-            chunk_links = "; ".join(
-                format_chunk_reference(page_rel_path, source_ref["source_id"], chunk_ref)
-                for chunk_ref in source_ref["chunks"][:6]
-            )
+            lines.append("  证据切块:")
+            for chunk_ref in source_ref["chunks"][:6]:
+                lines.append(f"  - {format_chunk_reference(page_rel_path, source_ref['source_id'], chunk_ref)}")
             if len(source_ref["chunks"]) > 6:
-                chunk_links += f"; ... 其余 {len(source_ref['chunks']) - 6} 个 chunk"
-            lines.append(f"  chunks: {chunk_links}")
+                lines.append(f"  - ... 其余 {len(source_ref['chunks']) - 6} 个 chunk")
 
     lines.extend([
         "",

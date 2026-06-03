@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
 from myagentwiki.cli import split_claim_candidates_from_text
 
 
@@ -39,3 +45,18 @@ def test_split_claim_candidates_keeps_useful_fallback_when_only_one_sentence_exi
     candidates = split_claim_candidates_from_text(text)
 
     assert candidates == ["知识声明层应该能反向查到自己被多少个 Wiki 页面引用"]
+
+
+def test_split_claim_candidates_filters_conversation_metadata_and_speaker_lines() -> None:
+    # 对话日志里的 turn_id/speaker 注释和 “Alice: ...” 这类发言行不应被当成 claim。
+    text = """
+    ## 2026-05-24
+
+    <!-- turn_id: t001, speaker: Alice, time: 10:03 -->
+    Alice: 我们需要先定义 source_id。
+    Bob: 然后再确定 chunk_id 的生成规则。
+    """
+
+    candidates = split_claim_candidates_from_text(text)
+
+    assert candidates == []

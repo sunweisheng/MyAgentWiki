@@ -272,7 +272,8 @@ def test_concept_page_links_claim_ids_to_claim_json_files(tmp_path: Path) -> Non
 
 
 def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) -> None:
-    # 概念页应能继续下钻到来源摘要页、原始来源文件和对应 chunk 文件。
+    # 概念页应能继续下钻到来源摘要页、原始来源文件和对应 chunk 文件，
+    # 并以更适合人阅读的标签呈现这些入口。
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     source_path = source_dir / "topic.md"
@@ -322,6 +323,9 @@ def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) 
         safe="/._-~",
     )
 
+    assert "来源摘要页:" in concept_page_text
+    assert "原始文件:" in concept_page_text
+    assert "证据切块:" in concept_page_text
     assert f"[{source_page['title']}]({expected_source_page_link})" in concept_page_text
     assert f"[`{source_ref['source_path']}`]({expected_source_path_link})" in concept_page_text
     assert f"[`{source_ref['chunk_id']}`]({expected_chunk_link})" in concept_page_text
