@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +122,39 @@ def test_concept_page_title_and_path_are_human_readable_for_question_headings(tm
     assert "规范概念键: `claim`" in page_text
 
 
+def test_concept_page_title_keeps_full_date_headings(tmp_path: Path) -> None:
+    # 日期标题不应被当作“编号前缀”裁成 05-24 这种残缺标题。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 2026-05-24\n\n"
+        "<!-- turn_id: t001, speaker: Alice, time: 10:03 -->\n\n"
+        "Alice: 我们需要先定义 source_id。\n\n"
+        "Bob: 然后再确定 chunk_id 的生成规则。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "DateHeadingRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = [
+        json.loads(line)
+        for line in pages_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+
+    assert concept_page["title"] == "2026-05-24"
+    assert concept_page["page_path"].endswith("/2026-05-24.md")
+
+
 def test_concept_page_ignores_yaml_examples_inside_definition_section(tmp_path: Path) -> None:
     # “Claim 是什么”小节里的 YAML 示例不应被当成真正的 claim 并抢占代表陈述。
     source_dir = tmp_path / "raw"
@@ -235,6 +269,62 @@ def test_concept_page_links_claim_ids_to_claim_json_files(tmp_path: Path) -> Non
     linked_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
     assert linked_claim["claim_file_path"] == f"claims/{linked_claim['claim_id']}.json"
     assert f"[`{linked_claim['claim_id']}`](../../../claims/{linked_claim['claim_id']}.json)" in concept_page_text
+
+
+def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) -> None:
+    # 概念页应能继续下钻到来源摘要页、原始来源文件和对应 chunk 文件。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    source_path = source_dir / "topic.md"
+    source_path.write_text(
+        "# Chunk Lint\n\n"
+        "Chunk Lint 检查 chunk 是否可用： chunk 是否超过 hard max tokens。\n\n"
+        "chunk 是否过短且未合并。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "SourceEvidenceLinkRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+    source_page = next(record for record in page_records if record.get("type") == "source-summary")
+    concept_page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+
+    claim_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "claims.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    linked_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    source_ref = linked_claim["source_refs"][0]
+    concept_page_path = Path(concept_page["page_path"])
+    expected_source_page_link = quote(
+        os.path.relpath(source_page["page_path"], start=concept_page_path.parent).replace(os.sep, "/"),
+        safe="/._-~",
+    )
+    expected_source_path_link = quote(
+        os.path.relpath(source_ref["source_path"], start=concept_page_path.parent).replace(os.sep, "/"),
+        safe="/._-~",
+    )
+    expected_chunk_link = quote(
+        os.path.relpath(f"chunks/{source_ref['source_id']}.jsonl", start=concept_page_path.parent).replace(os.sep, "/"),
+        safe="/._-~",
+    )
+
+    assert f"[{source_page['title']}]({expected_source_page_link})" in concept_page_text
+    assert f"[`{source_ref['source_path']}`]({expected_source_path_link})" in concept_page_text
+    assert f"[`{source_ref['chunk_id']}`]({expected_chunk_link})" in concept_page_text
 
 
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:

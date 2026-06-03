@@ -2302,6 +2302,20 @@ def write_source_chunks(target: Path, source_id: str, chunk_records: list[dict])
     return str(chunk_rel_path)
 
 
+def format_chunk_reference(from_page: Path, source_id: str, chunk_ref: dict) -> str:
+    # chunk 目前按 source_id 聚合存成 JSONL，这里把 chunk_id 链到对应文件，并附上段落定位信息。
+    chunk_file_link = markdown_link_between_pages(from_page, Path("chunks") / f"{source_id}.jsonl")
+    section_path = chunk_ref.get("section_path") or "unknown section"
+    start_line = chunk_ref.get("start_line")
+    end_line = chunk_ref.get("end_line")
+    location = (
+        f"{section_path} (lines {start_line}-{end_line})"
+        if start_line is not None and end_line is not None
+        else section_path
+    )
+    return f"[`{chunk_ref['chunk_id']}`]({chunk_file_link}) {location}"
+
+
 def chunk_normalized_record(target: Path, normalized_record: dict) -> dict | None:
     # poor / failed 的文档暂时不进入稳定 chunk 流程，避免把低质量文本继续放大。
     if normalized_record["extraction_quality"] not in {"good", "partial"}:
@@ -2524,6 +2538,12 @@ def format_claim_reference(from_page: Path, claim_record: dict) -> str:
         return f"`{claim_id}`"
     link = markdown_link_between_pages(from_page, Path(claim_file))
     return f"[`{claim_id}`]({link})"
+
+
+def format_workspace_file_reference(from_page: Path, path_str: str) -> str:
+    # 原始来源、标准化文件、chunk 文件统一渲染成工作区内相对链接，便于直接点开查看。
+    link = markdown_link_between_pages(from_page, Path(path_str))
+    return f"[`{path_str}`]({link})"
 
 
 def estimate_claim_confidence(text: str) -> float:
@@ -3440,7 +3460,8 @@ def concept_summary_page_path(page_id: str, title: str) -> Path:
 def clean_concept_title_text(value: str) -> str:
     # 概念页标题要尽量像“页面名”，而不是原始 claim 文本残片。
     cleaned = value.replace("|", " ").replace("_", " ")
-    cleaned = re.sub(r"^\s*\d+\s*[.)、:：-]?\s*", "", cleaned)
+    # 仅清理“1. 标题”“2) 标题”这类前导编号，不要把 2026-05-24 这类日期误裁成 05-24。
+    cleaned = re.sub(r"^\s*\d+\s*[.)、:：]\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.!?。！？；：|")
     return cleaned
 
@@ -3625,9 +3646,24 @@ def aggregate_source_refs_for_page(claim_records: list[dict]) -> list[dict]:
                     "source_path": source_ref["source_path"],
                     "chunk_ids": [],
                     "claim_ids": [],
+                    "chunks": [],
                 }
-            append_unique(aggregated[source_id]["chunk_ids"], source_ref["chunk_id"])
+            if source_ref["chunk_id"] not in aggregated[source_id]["chunk_ids"]:
+                aggregated[source_id]["chunk_ids"].append(source_ref["chunk_id"])
+                aggregated[source_id]["chunks"].append({
+                    "chunk_id": source_ref["chunk_id"],
+                    "section_path": source_ref.get("section_path"),
+                    "start_line": source_ref.get("start_line"),
+                    "end_line": source_ref.get("end_line"),
+                })
             append_unique(aggregated[source_id]["claim_ids"], claim_record["claim_id"])
+    for record in aggregated.values():
+        record["chunks"].sort(
+            key=lambda item: (
+                item.get("start_line") if item.get("start_line") is not None else math.inf,
+                item.get("chunk_id", ""),
+            )
+        )
     return sorted(aggregated.values(), key=lambda item: item["source_id"])
 
 
@@ -3748,8 +3784,7 @@ def build_source_summary_page(
     if chunk_records:
         for chunk_record in chunk_records[:10]:
             lines.append(
-                f"- `{chunk_record['chunk_id']}` {chunk_record['section_path']} "
-                f"(lines {chunk_record['start_line']}-{chunk_record['end_line']})"
+                f"- {format_chunk_reference(page_rel_path, source_record['source_id'], chunk_record)}"
             )
         if len(chunk_records) > 10:
             lines.append(f"- ... 其余 {len(chunk_records) - 10} 个 chunk 省略")
@@ -3880,11 +3915,16 @@ def build_concept_summary_page(
         "",
     ])
     if source_pages:
-        for source_page in source_pages:
+        source_pages_by_id = {source_page["page_id"]: source_page for source_page in source_pages}
+        for source_ref in source_refs:
+            source_page = source_pages_by_id.get(f"page_src_{source_ref['source_id']}")
+            if source_page is None:
+                continue
             link = markdown_link_between_pages(page_rel_path, Path(source_page["page_path"]))
             lines.append(
                 f"- [{source_page['title']}]({link}) "
-                f"`{source_page['page_id']}`"
+                f"`{source_page['page_id']}` "
+                f"source: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
             )
     else:
         lines.append("- 当前还没有可链接的来源摘要页。")
@@ -3895,10 +3935,28 @@ def build_concept_summary_page(
         "",
     ])
     for source_ref in source_refs:
+        source_page = next(
+            (item for item in source_pages if item["page_id"] == f"page_src_{source_ref['source_id']}"),
+            None,
+        )
+        source_label = (
+            f"[{source_page['title']}]({markdown_link_between_pages(page_rel_path, Path(source_page['page_path']))})"
+            if source_page is not None
+            else f"`{source_ref['source_id']}`"
+        )
         lines.append(
-            f"- `{source_ref['source_id']}` `{source_ref['source_path']}` "
+            f"- {source_label} {format_workspace_file_reference(page_rel_path, source_ref['source_path'])} "
+            f"`{source_ref['source_id']}` "
             f"(claims={len(source_ref['claim_ids'])}, chunks={len(source_ref['chunk_ids'])})"
         )
+        if source_ref.get("chunks"):
+            chunk_links = "; ".join(
+                format_chunk_reference(page_rel_path, source_ref["source_id"], chunk_ref)
+                for chunk_ref in source_ref["chunks"][:6]
+            )
+            if len(source_ref["chunks"]) > 6:
+                chunk_links += f"; ... 其余 {len(source_ref['chunks']) - 6} 个 chunk"
+            lines.append(f"  chunks: {chunk_links}")
 
     lines.extend([
         "",
