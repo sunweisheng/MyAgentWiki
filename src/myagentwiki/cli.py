@@ -149,6 +149,53 @@ QUERY_INTENT_FIELD_MULTIPLIERS = {
         "body": 1.05,
     },
 }
+CLAIM_DEPENDENT_PREFIXES = (
+    "旨在",
+    "以便",
+    "从而",
+    "从而让",
+    "从而使",
+    "具体细节",
+    "而不是",
+    "并且",
+    "同时",
+    "以及",
+    "其中",
+    "例如",
+    "比如",
+)
+CLAIM_META_PREFIXES = (
+    "这是一",
+    "这是",
+    "本文件",
+    "本文",
+    "这份",
+    "这个",
+    "该文",
+    "该文件",
+)
+CLAIM_STANDALONE_PREDICATE_MARKERS = (
+    "是",
+    "不是",
+    "意味着",
+    "需要",
+    "应该",
+    "可以",
+    "能够",
+    "会",
+    "能",
+    "支持",
+    "保持",
+    "维护",
+    "构成",
+    "属于",
+    "记录",
+    "标注",
+    "更新",
+    "提取",
+    "整合",
+    "构建",
+)
 
 
 @dataclass
@@ -2355,7 +2402,10 @@ def markdown_to_plain_text(text: str) -> str:
     cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"`{1,3}", "", cleaned)
     cleaned = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("*", "").replace("~~", "")
+    normalized_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.splitlines()]
+    cleaned = "\n".join(normalized_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
 
@@ -2423,6 +2473,54 @@ def clean_claim_candidate_text(text: str) -> str:
     cleaned = normalize_heading_plus_body_claim_candidate(cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" -:;,.!?。！？；：，、()[]{}\"'")
+
+
+def text_is_iso_date_label(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned))
+
+
+def claim_starts_with_dependent_prefix(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    return any(cleaned.startswith(prefix) for prefix in CLAIM_DEPENDENT_PREFIXES)
+
+
+def claim_starts_with_meta_prefix(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    return any(cleaned.startswith(prefix) for prefix in CLAIM_META_PREFIXES)
+
+
+def claim_has_standalone_predicate(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    return any(marker in cleaned for marker in CLAIM_STANDALONE_PREDICATE_MARKERS)
+
+
+def claim_can_stand_alone(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if claim_candidate_is_noise(cleaned):
+        return False
+    if claim_starts_with_dependent_prefix(cleaned):
+        return False
+    if len(cleaned) < 16:
+        return False
+    return claim_has_standalone_predicate(cleaned) or cleaned[:1].isalnum() or "\u4e00" <= cleaned[:1] <= "\u9fff"
+
+
+def claim_is_definition_like_phrase(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    if claim_starts_with_dependent_prefix(cleaned) or claim_starts_with_meta_prefix(cleaned):
+        return False
+    if len(cleaned) > 48:
+        return False
+    return bool(re.match(r"^(一种|一类|一个|一套|一组|一条|一项).+", cleaned))
 
 
 def claim_candidate_is_noise(text: str) -> bool:
@@ -2498,8 +2596,17 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
         piece = clean_claim_candidate_text(raw_piece)
         if claim_candidate_is_noise(piece):
             continue
-        for refined_piece in split_long_claim_candidate(piece):
-            normalized_piece = clean_claim_candidate_text(refined_piece)
+        sentence_candidates = [piece]
+        refined_parts = split_long_claim_candidate(piece)
+        if len(refined_parts) >= 2:
+            sentence_candidates.extend(
+                refined_piece
+                for refined_piece in refined_parts
+                if refined_piece != piece and claim_can_stand_alone(refined_piece)
+            )
+
+        for candidate_text in sentence_candidates:
+            normalized_piece = clean_claim_candidate_text(candidate_text)
             if claim_candidate_is_noise(normalized_piece):
                 continue
             if normalized_piece in candidates:
@@ -2519,7 +2626,8 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
 
 def classify_claim_type(text: str) -> str:
     # 先给 Claim 一个启发式类型，后面接入 Agent 时可以被重写或提升。
-    lowered = text.lower()
+    cleaned = clean_claim_candidate_text(text)
+    lowered = cleaned.lower()
     if any(keyword in text for keyword in ("注意", "警告", "风险", "不要", "禁止")):
         return "warning"
     if any(keyword in text for keyword in ("步骤", "做法", "如何", "怎么", "先", "然后")):
@@ -2528,6 +2636,8 @@ def classify_claim_type(text: str) -> str:
         return "causal"
     if any(keyword in text for keyword in ("相比", "对比", "区别", "优于", "弱于")):
         return "comparison"
+    if claim_is_definition_like_phrase(cleaned):
+        return "definition"
     if any(keyword in text for keyword in ("是", "是指", "定义", "叫做")):
         return "definition"
     if any(keyword in lowered for keyword in ("better", "worse", "useful", "important", "effective")):
@@ -3137,6 +3247,17 @@ def build_claims_from_chunk(chunk_record: dict) -> list[dict]:
             continue
         claim_records.append(build_claim_record_from_chunk(chunk_record, candidate_text))
 
+    if claim_records:
+        return claim_records
+
+    # 某些时间线型文档正文可能几乎全是对话/元数据噪声，但章节标题本身仍值得沉淀成概念入口。
+    section_path = chunk_record.get("section_path", "")
+    section_parts = [part.strip() for part in section_path.split(">") if part.strip()]
+    if section_parts:
+        fallback_label = clean_concept_title_text(section_parts[-1])
+        if text_is_iso_date_label(fallback_label):
+            return [build_claim_record_from_chunk(chunk_record, fallback_label)]
+
     return claim_records
 
 
@@ -3436,7 +3557,7 @@ def summarize_claims_for_page(claim_records: list[dict], limit: int = 3) -> list
     # 来源摘要页先挑几条 claim 做“核心观点”。
     ranked = sorted(
         claim_records,
-        key=lambda item: (item.get("confidence", 0.0), len(item.get("text", ""))),
+        key=claim_record_rank_key,
         reverse=True,
     )
     return [item["text"] for item in ranked[:limit]]
@@ -3618,18 +3739,67 @@ def build_concept_canonical_key(title: str) -> str:
     return compact or "concept"
 
 
+def claim_record_readability_score(claim_record: dict) -> int:
+    text = claim_record.get("text", "")
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return -10
+
+    score = 0
+    if claim_record.get("claim_type") == "definition":
+        score += 2
+    if not claim_starts_with_dependent_prefix(cleaned):
+        score += 2
+    if claim_has_standalone_predicate(cleaned):
+        score += 1
+    if claim_is_definition_like_phrase(cleaned):
+        score += 3
+
+    section_label = extract_primary_section_label(claim_record)
+    if section_label and cleaned.lower().startswith(section_label.lower()):
+        score += 2
+
+    if 16 <= len(cleaned) <= 72:
+        score += 1
+    elif len(cleaned) > 120:
+        score -= 1
+
+    if claim_starts_with_dependent_prefix(cleaned):
+        score -= 3
+    if claim_starts_with_meta_prefix(cleaned):
+        score -= 3
+    return score
+
+
+def claim_record_rank_key(claim_record: dict) -> tuple:
+    text = claim_record.get("text", "")
+    return (
+        len(claim_record.get("source_ids", [])),
+        len(claim_record.get("source_refs", [])),
+        claim_record_readability_score(claim_record),
+        claim_record.get("confidence", 0.0),
+        -abs(len(text) - 42),
+        len(text),
+    )
+
+
+def build_display_claim_text(claim_record: dict, concept_title: str = "") -> str:
+    # 概念页里的代表陈述优先展示成“概念名 + 定义短语”，
+    # 这样比孤立的“一种……”更像一句可读的说明。
+    raw_text = markdown_to_plain_text(claim_record.get("text", ""))
+    cleaned = clean_claim_candidate_text(raw_text)
+    if not cleaned:
+        return raw_text.strip()
+
+    title = clean_concept_title_text(concept_title)
+    if title and claim_is_definition_like_phrase(cleaned) and not cleaned.lower().startswith(title.lower()):
+        return clean_concept_title_text(f"{title} {cleaned}")
+    return cleaned
+
+
 def choose_canonical_claim(claim_records: list[dict]) -> dict:
     # 一组 claim 需要选一个“代表陈述”，后面会用它来命名页面和生成摘要。
-    ranked = sorted(
-        claim_records,
-        key=lambda item: (
-            len(item.get("source_ids", [])),
-            len(item.get("source_refs", [])),
-            item.get("confidence", 0.0),
-            len(item.get("text", "")),
-        ),
-        reverse=True,
-    )
+    ranked = sorted(claim_records, key=claim_record_rank_key, reverse=True)
     return ranked[0]
 
 
@@ -3652,9 +3822,14 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
         return False
     canonical_claim = choose_canonical_claim(claim_records)
     claim_text = canonical_claim.get("text", "")
+    cleaned_claim_text = clean_claim_candidate_text(claim_text)
     # 一些明显是“转换占位提示”的文本先不提升成概念页，避免 Wiki 被环境提示刷屏。
     if any(marker in claim_text for marker in ("当前环境缺少", "当前环境未启用", "仅生成占位", "估计页数:")):
         return False
+    if text_is_iso_date_label(cleaned_claim_text):
+        return True
+    if canonical_claim.get("claim_type") == "definition" and len(cleaned_claim_text) >= 14:
+        return True
     return canonical_claim.get("confidence", 0.0) >= 0.35 and len(claim_text) >= 18
 
 
@@ -3862,6 +4037,7 @@ def build_concept_summary_page(
     canonical_claim = choose_canonical_claim(claim_records)
     page_id = build_concept_page_id(bucket_key)
     title = build_concept_title(canonical_claim)
+    canonical_display_text = build_display_claim_text(canonical_claim, title)
     canonical_key = build_concept_canonical_key(title)
     review_ids = collect_review_ids_for_claims(
         [claim_record["claim_id"] for claim_record in claim_records],
@@ -3903,14 +4079,14 @@ def build_concept_summary_page(
         "",
         f"- 规范概念键: `{canonical_key}`",
         f"- 聚类键: `{bucket_key}`",
-        f"- 代表陈述: {canonical_claim['text']}",
+        f"- 代表陈述: {canonical_display_text}",
         f"- 关联 Claim 数量: `{len(claim_records)}`",
         f"- 关联来源数量: `{len(source_refs)}`",
         f"- 关联审核项数量: `{len(review_ids)}`",
         "",
         "## 核心陈述 / Canonical Claim",
         "",
-        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_claim['text']} "
+        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_display_text} "
         f"(confidence={canonical_claim['confidence']:.2f})",
         "",
         "## 支撑声明 / Supporting Claims",
@@ -3919,11 +4095,7 @@ def build_concept_summary_page(
 
     for claim_record in sorted(
         claim_records,
-        key=lambda item: (
-            len(item.get("source_ids", [])),
-            item.get("confidence", 0.0),
-            len(item.get("text", "")),
-        ),
+        key=claim_record_rank_key,
         reverse=True,
     ):
         lines.append(

@@ -60,3 +60,20 @@ def test_split_claim_candidates_filters_conversation_metadata_and_speaker_lines(
     candidates = split_claim_candidates_from_text(text)
 
     assert candidates == []
+
+
+def test_split_claim_candidates_keeps_full_sentence_before_clause_fragments() -> None:
+    # 抽取长句时应先保留整句，再把可独立理解的子句作为补充候选。
+    text = (
+        "这是一份思路文件，旨在复制粘贴到你自己的 LLM Agent 中，"
+        "它的目标是传达高层思想，具体细节由你的 Agent 与你共同构建。"
+    )
+
+    candidates = split_claim_candidates_from_text(text)
+
+    assert candidates
+    assert candidates[0] == (
+        "这是一份思路文件，旨在复制粘贴到你自己的 LLM Agent 中，它的目标是传达高层思想，具体细节由你的 Agent 与你共同构建"
+    )
+    assert "旨在复制粘贴到你自己的 LLM Agent 中" not in candidates
+    assert "具体细节由你的 Agent 与你共同构建" not in candidates

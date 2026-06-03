@@ -200,6 +200,46 @@ def test_concept_page_ignores_yaml_examples_inside_definition_section(tmp_path: 
     assert "BM25 是一种用于关键词检索的相关性排序算法。" not in page_text
 
 
+def test_concept_page_prefers_standalone_definition_over_dependent_clause(tmp_path: Path) -> None:
+    # 概念页的代表陈述应优先选择可独立理解的定义句，而不是被长句切出来的从句残片。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# LLM Wiki\n\n"
+        "**一种利用 LLM 构建个人知识库的模式。**\n\n"
+        "这是一份思路文件，旨在复制粘贴到你自己的 LLM Agent 中"
+        "（如 OpenAI Codex、Claude Code、OpenCode / Pi 等）。"
+        "它的目标是传达高层思想，具体细节由你的 Agent 与你共同构建。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "CanonicalClaimReadabilityRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(
+        record
+        for record in page_records
+        if record.get("type") == "concept-summary" and record.get("canonical_id") == "concept:llm_wiki"
+    )
+
+    page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "代表陈述: LLM Wiki 一种利用 LLM 构建个人知识库的模式" in page_text
+    assert "## 核心陈述 / Canonical Claim" in page_text
+    assert "旨在复制粘贴到你自己的 LLM Agent 中" in page_text
+    assert "具体细节由你的 Agent 与你共同构建" in page_text
+
+
 def test_concept_page_claim_type_label_is_not_rendered_as_markdown_link(tmp_path: Path) -> None:
     # claim_type 应显示为代码标签，而不是 [definition] 这种容易被查看器误判为链接的写法。
     source_dir = tmp_path / "raw"

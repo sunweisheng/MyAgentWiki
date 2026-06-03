@@ -359,7 +359,13 @@ V1 已实现这些命令入口：
   - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md` / `CLAUDE.md`、以及 query/agent 基础配置
 - `myagentwiki ingest`
   - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、最小 chunk 流程、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
+  - 当前规则式 Claim 草稿抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再只把可独立理解的子句作为补充候选，避免把逗号后的半句话直接推进到 Claim 层
+  - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
+  - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失
   - 已实现两类基础 Wiki 页面：`source-summary` 与 `concept-summary`，会同步生成 `wiki/sources/*.md`、`wiki/concepts/*.md`、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
+  - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择更像定义、能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类定义短语会优先于说明性长句
+  - 当前概念页展示层会把“概念名 + 定义短语”组合成更可读的代表陈述，例如 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`
+  - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
 - `myagentwiki lint`
@@ -446,9 +452,11 @@ python scripts/validate_workflow.py --keep-workspace
   - 按 Claim 单文件保存的知识声明草稿，便于后续审核与回链
 - `wiki/sources/*.md`
   - 首批自动生成的来源摘要页，每个来源至少对应一个 `source-summary` 页面
+  - 当前来源摘要页里的 `Chunks` 列表会直接链接到对应 `chunks/<source_id>.jsonl`，并附带 `section_path` 与行号，便于继续定位证据
 - `wiki/concepts/*.md`
   - 基于 Claim 聚合出的概念候选页，作为后续综述页、主题页的起点
   - 当前已加入一层轻量命名清洗，优先使用 `section_path` 和短主题短语生成更像 Wiki 的页面名
+  - 当前概念页里的 `Source Pages / Source Evidence` 会分别展示来源摘要页入口、原始来源文件入口、覆盖范围，以及按条列出的证据切块链接
   - 页面文件名若包含空格等特殊字符，目录页与页面间链接会自动使用 URL 编码后的相对路径
 - `state/*.jsonl`
   - 全局索引与状态账本，包括 `sources`、`normalized`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
