@@ -2511,6 +2511,21 @@ def classify_claim_type(text: str) -> str:
     return "fact"
 
 
+def format_claim_type_label(claim_type: str | None) -> str:
+    # 用代码样式展示 claim 类型，避免 Markdown 方括号在部分查看器里被误解成可点击引用。
+    return f"`{claim_type or 'unknown'}`"
+
+
+def format_claim_reference(from_page: Path, claim_record: dict) -> str:
+    # 优先把 claim_id 渲染成可跳转到 claims/*.json 的相对链接，方便沿证据链继续下钻。
+    claim_id = claim_record["claim_id"]
+    claim_file = claim_record.get("claim_file_path")
+    if not claim_file:
+        return f"`{claim_id}`"
+    link = markdown_link_between_pages(from_page, Path(claim_file))
+    return f"[`{claim_id}`]({link})"
+
+
 def estimate_claim_confidence(text: str) -> float:
     # 规则抽取得到的 claim 先统一低置信度起步，避免后续页面把它当成“已确认事实”。
     base = 0.35
@@ -3658,6 +3673,7 @@ def collect_review_ids_for_claims(claim_ids: list[str], review_records: list[dic
 
 def build_source_summary_page(
     source_record: dict,
+    page_rel_path: Path,
     normalized_record: dict | None,
     claim_records: list[dict],
     chunk_records: list[dict],
@@ -3718,7 +3734,7 @@ def build_source_summary_page(
     if claim_records:
         for claim_record in claim_records:
             lines.append(
-                f"- `{claim_record['claim_id']}` [{claim_record['claim_type']}] "
+                f"- {format_claim_reference(page_rel_path, claim_record)} {format_claim_type_label(claim_record.get('claim_type'))} "
                 f"{claim_record['text']} (confidence={claim_record['confidence']:.2f})"
             )
     else:
@@ -3835,7 +3851,7 @@ def build_concept_summary_page(
         "",
         "## 核心陈述 / Canonical Claim",
         "",
-        f"- `{canonical_claim['claim_id']}` [{canonical_claim['claim_type']}] {canonical_claim['text']} "
+        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_claim['text']} "
         f"(confidence={canonical_claim['confidence']:.2f})",
         "",
         "## 支撑声明 / Supporting Claims",
@@ -3852,7 +3868,7 @@ def build_concept_summary_page(
         reverse=True,
     ):
         lines.append(
-            f"- `{claim_record['claim_id']}` [{claim_record['claim_type']}] {claim_record['text']} "
+            f"- {format_claim_reference(page_rel_path, claim_record)} {format_claim_type_label(claim_record.get('claim_type'))} {claim_record['text']} "
             f"(sources={len(claim_record.get('source_ids', []))}, "
             f"chunks={len(claim_record.get('chunk_ids', []))}, "
             f"confidence={claim_record['confidence']:.2f})"
@@ -4961,7 +4977,7 @@ def command_query(args: argparse.Namespace) -> CommandResult:
             lines.append("   matched_claims:")
             for claim in matched_claims:
                 lines.append(
-                    f"     - {claim['claim_id']} [{claim.get('claim_type')}] "
+                    f"     - {claim['claim_id']} {format_claim_type_label(claim.get('claim_type'))} "
                     f"{claim['text']} (hits={'/'.join(claim.get('matched_tokens', []))})"
                 )
         if matched_chunks:
@@ -5130,14 +5146,16 @@ def rebuild_review_affected_pages(
         source_record_for_page = dict(source_record)
         source_record_for_page["status"] = "generated"
         normalized_record = normalized_records_by_source.get(source_id)
+        page_rel_path = source_summary_page_path(source_id, normalized_record["title"] if normalized_record else Path(source_record["source_path"]).stem)
         page_text, page_record = build_source_summary_page(
             source_record=source_record_for_page,
+            page_rel_path=page_rel_path,
             normalized_record=normalized_record,
             claim_records=source_claims,
             chunk_records=source_chunks,
         )
         page_record = apply_page_alias_overrides(target, page_record)
-        page_record["page_path"] = str(source_summary_page_path(source_id, page_record["title"]))
+        page_record["page_path"] = str(page_rel_path)
         stored_page_record, _ = upsert_wiki_page(
             target=target,
             page_records_by_id=page_records_by_id,
@@ -6492,14 +6510,18 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         source_record_for_page["status"] = "generated"
 
         normalized_record = normalized_records_by_source.get(source_id)
+        page_rel_path = source_summary_page_path(
+            source_id,
+            normalized_record["title"] if normalized_record else Path(source_record["source_path"]).stem,
+        )
         page_text, page_record = build_source_summary_page(
             source_record=source_record_for_page,
+            page_rel_path=page_rel_path,
             normalized_record=normalized_record,
             claim_records=source_claims,
             chunk_records=source_chunks,
         )
         page_record = apply_page_alias_overrides(target, page_record)
-        page_rel_path = source_summary_page_path(source_id, page_record["title"])
         page_record["page_path"] = str(page_rel_path)
         stored_page_record, page_changed = upsert_wiki_page(
             target=target,

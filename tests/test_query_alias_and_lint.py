@@ -166,6 +166,77 @@ def test_concept_page_ignores_yaml_examples_inside_definition_section(tmp_path: 
     assert "BM25 是一种用于关键词检索的相关性排序算法。" not in page_text
 
 
+def test_concept_page_claim_type_label_is_not_rendered_as_markdown_link(tmp_path: Path) -> None:
+    # claim_type 应显示为代码标签，而不是 [definition] 这种容易被查看器误判为链接的写法。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Chunk Lint\n\n"
+        "Chunk Lint 检查 chunk 是否可用： chunk 是否超过 hard max tokens。\n\n"
+        "chunk 是否过短且未合并。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ClaimTypeLabelRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = [
+        json.loads(line)
+        for line in pages_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+
+    page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "`definition`" in page_text
+    assert "[definition]" not in page_text
+
+
+def test_concept_page_links_claim_ids_to_claim_json_files(tmp_path: Path) -> None:
+    # 概念页里的 claim_id 应该能直接跳到 claims/<claim_id>.json，方便继续下钻证据链。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Chunk Lint\n\n"
+        "Chunk Lint 检查 chunk 是否可用： chunk 是否超过 hard max tokens。\n\n"
+        "chunk 是否过短且未合并。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ClaimReferenceRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+    concept_page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+
+    claim_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "claims.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    linked_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    assert linked_claim["claim_file_path"] == f"claims/{linked_claim['claim_id']}.json"
+    assert f"[`{linked_claim['claim_id']}`](../../../claims/{linked_claim['claim_id']}.json)" in concept_page_text
+
+
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     # “来源/证据”类问题应识别为 evidence，并让 source_refs 字段真正参与更强排序。
     source_dir = tmp_path / "raw"
