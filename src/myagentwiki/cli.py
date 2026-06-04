@@ -141,6 +141,8 @@ QUERY_HEADING_BLACKLIST = {
 SEARCH_PAGES_INDEX_REL_PATH = Path("indexes") / "search_pages.jsonl"
 SEARCH_PAGES_INDEX_VERSION = "search_pages_v1"
 ALIAS_INDEX_VERSION = "aliases_v1"
+QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
+ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 QUERY_INTENT_MARKERS = {
     "overview": (
         "概览", "概况", "总览", "总述", "整体", "全局", "框架", "脉络", "overview",
@@ -6774,8 +6776,137 @@ def build_source_trail(claim_matches: list[dict], chunk_matches: list[dict]) -> 
     )
 
 
+def query_reading_focus(query_intent: str) -> str:
+    if query_intent == "overview":
+        return "workspace_overview"
+    if query_intent == "compare":
+        return "compare_claims"
+    if query_intent == "timeline":
+        return "timeline_evidence"
+    if query_intent == "how_to":
+        return "procedural_chunks"
+    if query_intent == "evidence":
+        return "source_evidence"
+    return "general_lookup"
+
+
+def build_answer_guardrails(
+    query_intent: str,
+    page_status: str,
+    review_ids: list[str],
+    matched_claims: list[dict],
+    matched_chunks: list[dict],
+    timeline_sources: list[dict],
+    source_trail: list[dict],
+) -> dict:
+    risk_flags: list[str] = []
+    if review_ids:
+        risk_flags.append("has_open_reviews")
+    if page_status == "needs_review":
+        risk_flags.append("page_needs_review")
+    elif page_status == "disputed":
+        risk_flags.append("page_disputed")
+    elif page_status == "outdated":
+        risk_flags.append("page_outdated")
+    elif page_status == "draft":
+        risk_flags.append("page_draft")
+    if not matched_claims:
+        risk_flags.append("no_matched_claims")
+    if query_intent in {"how_to", "timeline", "evidence"} and not matched_chunks:
+        risk_flags.append("no_matched_chunks")
+    if query_intent == "timeline" and not timeline_sources:
+        risk_flags.append("no_timeline_sources")
+    if query_intent == "evidence" and not source_trail and not any(
+        claim.get("source_refs") for claim in matched_claims
+    ):
+        risk_flags.append("weak_source_trace")
+
+    can_answer_from_summary_only = (
+        query_intent in {"lookup", "definition", "overview"}
+        and page_status not in {"needs_review", "disputed", "outdated"}
+        and not review_ids
+    )
+
+    return {
+        "can_answer_from_summary_only": can_answer_from_summary_only,
+        "must_read_claims": query_intent in {"compare", "timeline", "evidence"},
+        "must_read_chunks": query_intent in {"how_to", "timeline", "evidence"},
+        "must_read_sources": query_intent in {"timeline", "evidence"},
+        "cite_expectation": (
+            "strong" if query_intent in {"timeline", "evidence"}
+            else "light" if query_intent in {"compare", "how_to"}
+            else "none"
+        ),
+        "risk_flags": risk_flags,
+    }
+
+
+def build_answer_handoff(query_intent: str, answer_guardrails: dict) -> dict:
+    if query_intent in {"timeline", "evidence"}:
+        answer_mode = "sources_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "evidence_context.matched_claims",
+            "evidence_context.matched_chunks",
+            "evidence_context.timeline_sources" if query_intent == "timeline" else "evidence_context.source_trail",
+            "page_context.summary",
+        ]
+    elif query_intent == "how_to":
+        answer_mode = "chunks_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "evidence_context.matched_chunks",
+            "evidence_context.matched_claims",
+            "page_context.summary",
+        ]
+    elif query_intent == "compare":
+        answer_mode = "claims_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "evidence_context.matched_claims",
+            "evidence_context.matched_chunks",
+            "page_context.summary",
+        ]
+    else:
+        answer_mode = "summary_first"
+        recommended_read_order = [
+            "page_context.summary",
+            "evidence_context.matched_claims",
+            "retrieval_context.focus",
+        ]
+
+    required_evidence_paths = []
+    if answer_guardrails.get("must_read_claims"):
+        required_evidence_paths.append("evidence_context.matched_claims")
+    if answer_guardrails.get("must_read_chunks"):
+        required_evidence_paths.append("evidence_context.matched_chunks")
+    if answer_guardrails.get("must_read_sources"):
+        required_evidence_paths.append(
+            "evidence_context.timeline_sources" if query_intent == "timeline" else "evidence_context.source_trail"
+        )
+
+    risk_flags = answer_guardrails.get("risk_flags", [])
+    if risk_flags:
+        fallback_action = "answer_with_uncertainty"
+    elif answer_guardrails.get("can_answer_from_summary_only"):
+        fallback_action = "answer_from_summary_and_claims"
+    else:
+        fallback_action = "read_required_evidence_before_answering"
+
+    return {
+        "answer_mode": answer_mode,
+        "recommended_read_order": recommended_read_order,
+        "required_evidence_paths": required_evidence_paths,
+        "should_cite_sources": answer_guardrails.get("cite_expectation") in {"light", "strong"},
+        "should_surface_uncertainty": bool(risk_flags),
+        "fallback_action": fallback_action,
+    }
+
+
 def build_result_reading_pack(
     result: dict,
+    query_text: str,
+    normalized_query: str,
     query_tokens: list[str],
     claim_records_by_id: dict[str, dict],
     chunk_records_by_id: dict[str, dict],
@@ -6860,25 +6991,448 @@ def build_result_reading_pack(
 
     reading_depth = result.get("reading_depth", "standard")
     source_trail = build_source_trail(trimmed_claims, trimmed_chunks) if reading_depth == "deep" else []
+    timeline_sources = build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else []
+    focus = query_reading_focus(query_intent)
+    ranking_reasons = []
+    if result.get("exact_match_reasons"):
+        ranking_reasons.extend(result["exact_match_reasons"])
+    if result.get("intent_boost_reason"):
+        ranking_reasons.append(result["intent_boost_reason"])
+    ranking_reasons.extend(sorted(result.get("field_scores", {}).keys()))
+    answer_guardrails = build_answer_guardrails(
+        query_intent=query_intent,
+        page_status=result.get("status", ""),
+        review_ids=result.get("review_ids", []),
+        matched_claims=trimmed_claims,
+        matched_chunks=trimmed_chunks,
+        timeline_sources=timeline_sources,
+        source_trail=source_trail,
+    )
+    answer_handoff = build_answer_handoff(
+        query_intent=query_intent,
+        answer_guardrails=answer_guardrails,
+    )
 
     return {
+        "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
+        "handoff_kind": "reading_pack",
         "page_summary": result.get("summary", ""),
         "query_intent": query_intent,
         "reading_depth": reading_depth,
         "matched_claims": trimmed_claims,
         "matched_chunks": trimmed_chunks,
         "source_trail": source_trail,
-        "timeline_sources": build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else [],
+        "timeline_sources": timeline_sources,
         "review_ids": result.get("review_ids", []),
-        "focus": (
-            "workspace_overview" if query_intent == "overview"
-            else "compare_claims" if query_intent == "compare"
-            else "timeline_evidence" if query_intent == "timeline"
-            else "procedural_chunks" if query_intent == "how_to"
-            else "source_evidence" if query_intent == "evidence"
-            else "general_lookup"
-        ),
+        "focus": focus,
+        "query": {
+            "text": query_text,
+            "normalized_text": normalized_query,
+            "intent": query_intent,
+            "reading_depth": reading_depth,
+        },
+        "page_context": {
+            "page_id": result.get("page_id"),
+            "title": result.get("title", ""),
+            "page_path": result.get("page_path", ""),
+            "type": result.get("type", ""),
+            "status": result.get("status", ""),
+            "summary": result.get("summary", ""),
+            "canonical_id": result.get("canonical_id"),
+            "aliases": result.get("aliases", []),
+        },
+        "retrieval_context": {
+            "focus": focus,
+            "matched_fields": sorted(result.get("field_hits", {}).keys()),
+            "ranking_reasons": ranking_reasons,
+            "review_ids": result.get("review_ids", []),
+        },
+        "evidence_context": {
+            "matched_claims": trimmed_claims,
+            "matched_chunks": trimmed_chunks,
+            "timeline_sources": timeline_sources,
+            "source_trail": source_trail,
+        },
+        "answer_guardrails": answer_guardrails,
+        "answer_handoff": answer_handoff,
     }
+
+
+def build_answer_ready_payload(query_payload: dict) -> dict:
+    base_payload = {
+        "contract_version": ANSWER_READY_OUTPUT_VERSION,
+        "query_contract_version": query_payload.get("contract_version"),
+        "workspace": query_payload.get("workspace"),
+        "query": query_payload.get("query"),
+        "normalized_query": query_payload.get("normalized_query"),
+        "expanded_query": query_payload.get("expanded_query"),
+        "intent": query_payload.get("intent"),
+        "reading_depth": query_payload.get("reading_depth"),
+        "selected_result": None,
+        "alternatives": [],
+        "agent_brief": {
+            "answer_mode": "no_match",
+            "recommended_read_order": [],
+            "required_evidence_paths": [],
+            "should_cite_sources": False,
+            "should_surface_uncertainty": True,
+            "fallback_action": "broaden_or_rephrase_query",
+            "risk_flags": ["no_query_results"],
+        },
+        "answer_context": {
+            "page_summary": "",
+            "key_claims": [],
+            "key_chunks": [],
+            "key_sources": [],
+        },
+        "agent_summary": "No matched page was found. Broaden or rephrase the query before attempting an answer.",
+    }
+
+    results = query_payload.get("results", [])
+    if not results:
+        return base_payload
+
+    top_result = results[0]
+    reading_pack = top_result.get("reading_pack", {})
+    answer_guardrails = reading_pack.get("answer_guardrails", {})
+    answer_handoff = reading_pack.get("answer_handoff", {})
+    evidence_context = reading_pack.get("evidence_context", {})
+    matched_fields = reading_pack.get("retrieval_context", {}).get("matched_fields", [])
+    weak_match = (
+        not matched_fields
+        or (
+            top_result.get("score", 0.0) < 1.0
+            and not evidence_context.get("matched_claims")
+            and not evidence_context.get("matched_chunks")
+        )
+    )
+    if weak_match:
+        base_payload["agent_brief"] = {
+            "answer_mode": "no_match",
+            "recommended_read_order": [],
+            "required_evidence_paths": [],
+            "should_cite_sources": False,
+            "should_surface_uncertainty": True,
+            "fallback_action": "broaden_or_rephrase_query",
+            "risk_flags": ["weak_top_match"],
+        }
+        base_payload["selected_result"] = {
+            "rank": 1,
+            "page_id": top_result.get("page_id"),
+            "title": top_result.get("title", ""),
+            "page_path": top_result.get("page_path", ""),
+            "type": top_result.get("type", ""),
+            "status": top_result.get("status", ""),
+            "summary": top_result.get("summary", ""),
+            "score": top_result.get("score"),
+            "focus": reading_pack.get("focus"),
+            "ready_state": "answer_with_uncertainty",
+        }
+        base_payload["alternatives"] = [
+            {
+                "rank": index,
+                "page_id": result.get("page_id"),
+                "title": result.get("title", ""),
+                "page_path": result.get("page_path", ""),
+                "type": result.get("type", ""),
+                "status": result.get("status", ""),
+                "score": result.get("score"),
+            }
+            for index, result in enumerate(results[1:4], start=2)
+        ]
+        base_payload["agent_summary"] = (
+            "Top query result is too weak to serve as a safe answer anchor. "
+            "Broaden or rephrase the query before attempting an answer."
+        )
+        return base_payload
+
+    key_claims = [
+        {
+            "claim_id": claim.get("claim_id"),
+            "text": claim.get("text", ""),
+            "claim_type": claim.get("claim_type"),
+            "status": claim.get("status"),
+            "confidence": claim.get("confidence"),
+            "source_ref_count": len(claim.get("source_refs", [])),
+        }
+        for claim in evidence_context.get("matched_claims", [])[:3]
+    ]
+    key_chunks = [
+        {
+            "chunk_id": chunk.get("chunk_id"),
+            "section_path": chunk.get("section_path"),
+            "summary": chunk.get("summary") or chunk.get("text", "")[:180],
+            "start_line": chunk.get("start_line"),
+            "end_line": chunk.get("end_line"),
+            "source_path": chunk.get("source_path"),
+        }
+        for chunk in evidence_context.get("matched_chunks", [])[:3]
+    ]
+    key_sources = (
+        evidence_context.get("timeline_sources")
+        or evidence_context.get("source_trail")
+        or [
+            {
+                "source_id": source_ref.get("source_id"),
+                "source_path": source_ref.get("source_path"),
+                "section_path": source_ref.get("section_path"),
+                "chunk_id": source_ref.get("chunk_id"),
+            }
+            for claim in evidence_context.get("matched_claims", [])
+            for source_ref in claim.get("source_refs", [])
+        ][:5]
+    )
+
+    if answer_handoff.get("fallback_action") == "answer_with_uncertainty":
+        ready_state = "answer_with_uncertainty"
+    elif answer_guardrails.get("can_answer_from_summary_only"):
+        ready_state = "summary_ready"
+    else:
+        ready_state = "evidence_required"
+
+    risk_flags = answer_guardrails.get("risk_flags", [])
+    risk_text = ", ".join(risk_flags) if risk_flags else "none"
+    selected_title = top_result.get("title", "")
+    agent_summary_lines = [
+        f"Use page '{selected_title}' as the answer anchor.",
+        f"Answer mode: {answer_handoff.get('answer_mode', 'summary_first')}.",
+        f"Read order: {' -> '.join(answer_handoff.get('recommended_read_order', [])) or 'page_context.summary'}.",
+        f"Fallback action: {answer_handoff.get('fallback_action', 'read_required_evidence_before_answering')}.",
+        f"Risk flags: {risk_text}.",
+    ]
+
+    base_payload.update({
+        "selected_result": {
+            "rank": 1,
+            "page_id": top_result.get("page_id"),
+            "title": top_result.get("title", ""),
+            "page_path": top_result.get("page_path", ""),
+            "type": top_result.get("type", ""),
+            "status": top_result.get("status", ""),
+            "summary": top_result.get("summary", ""),
+            "score": top_result.get("score"),
+            "focus": reading_pack.get("focus"),
+            "ready_state": ready_state,
+        },
+        "alternatives": [
+            {
+                "rank": index,
+                "page_id": result.get("page_id"),
+                "title": result.get("title", ""),
+                "page_path": result.get("page_path", ""),
+                "type": result.get("type", ""),
+                "status": result.get("status", ""),
+                "score": result.get("score"),
+            }
+            for index, result in enumerate(results[1:4], start=2)
+        ],
+        "agent_brief": {
+            "answer_mode": answer_handoff.get("answer_mode"),
+            "recommended_read_order": answer_handoff.get("recommended_read_order", []),
+            "required_evidence_paths": answer_handoff.get("required_evidence_paths", []),
+            "should_cite_sources": answer_handoff.get("should_cite_sources", False),
+            "should_surface_uncertainty": answer_handoff.get("should_surface_uncertainty", False),
+            "fallback_action": answer_handoff.get("fallback_action"),
+            "risk_flags": risk_flags,
+        },
+        "answer_context": {
+            "page_summary": reading_pack.get("page_summary", top_result.get("summary", "")),
+            "key_claims": key_claims,
+            "key_chunks": key_chunks,
+            "key_sources": key_sources,
+        },
+        "agent_summary": "\n".join(agent_summary_lines),
+    })
+    return base_payload
+
+
+def render_answer_ready_message(answer_ready_payload: dict) -> str:
+    lines = [
+        f"Query: {answer_ready_payload['query']}",
+        f"Intent: {answer_ready_payload['intent']}",
+    ]
+    selected_result = answer_ready_payload.get("selected_result")
+    if selected_result is None:
+        lines.append("")
+        lines.append("Answer-Ready Summary:")
+        lines.append("  No matched page was found.")
+        lines.append("  Action: broaden or rephrase the query before answering.")
+        return "\n".join(lines)
+
+    agent_brief = answer_ready_payload.get("agent_brief", {})
+    answer_context = answer_ready_payload.get("answer_context", {})
+    lines.extend([
+        "",
+        "Answer-Ready Summary:",
+        f"  anchor_page: {selected_result.get('title')} [{selected_result.get('type')}, status={selected_result.get('status')}]",
+        f"  path: {selected_result.get('page_path')}",
+        f"  ready_state: {selected_result.get('ready_state')}",
+        f"  answer_mode: {agent_brief.get('answer_mode')}",
+        f"  fallback_action: {agent_brief.get('fallback_action')}",
+        f"  read_order: {' -> '.join(agent_brief.get('recommended_read_order', []))}",
+    ])
+    if agent_brief.get("required_evidence_paths"):
+        lines.append(f"  required_evidence: {', '.join(agent_brief['required_evidence_paths'])}")
+    if agent_brief.get("risk_flags"):
+        lines.append(f"  risk_flags: {', '.join(agent_brief['risk_flags'])}")
+    lines.append(f"  summary: {answer_context.get('page_summary', '')}")
+
+    key_claims = answer_context.get("key_claims", [])
+    if key_claims:
+        lines.append("  key_claims:")
+        for claim in key_claims:
+            lines.append(f"    - {claim['claim_id']} {claim['text']}")
+
+    key_chunks = answer_context.get("key_chunks", [])
+    if key_chunks:
+        lines.append("  key_chunks:")
+        for chunk in key_chunks:
+            lines.append(
+                f"    - {chunk['chunk_id']} {chunk.get('section_path')} "
+                f"(lines {chunk.get('start_line')}-{chunk.get('end_line')})"
+            )
+
+    key_sources = answer_context.get("key_sources", [])
+    if key_sources:
+        lines.append("  key_sources:")
+        for source in key_sources[:5]:
+            lines.append(
+                f"    - {source.get('source_id')} {source.get('source_path')} "
+                f"{source.get('section_path') or ''}".rstrip()
+            )
+
+    alternatives = answer_ready_payload.get("alternatives", [])
+    if alternatives:
+        lines.append("  alternatives:")
+        for alternative in alternatives:
+            lines.append(
+                f"    - #{alternative['rank']} {alternative['title']} "
+                f"[{alternative['type']}, status={alternative['status']}]"
+            )
+    return "\n".join(lines)
+
+
+def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
+    selected_result = answer_ready_payload.get("selected_result")
+    agent_brief = answer_ready_payload.get("agent_brief", {})
+    answer_context = answer_ready_payload.get("answer_context", {})
+
+    lines = [
+        "You are the answer layer for a MyAgentWiki query handoff.",
+        "Use only the provided handoff context to answer.",
+        "If evidence is weak or risk flags are present, explicitly say what is uncertain.",
+        "Do not invent citations or unsupported details.",
+        "",
+        "## Query",
+        f"- user_query: {answer_ready_payload.get('query', '')}",
+        f"- intent: {answer_ready_payload.get('intent', '')}",
+        f"- reading_depth: {answer_ready_payload.get('reading_depth', '')}",
+        "",
+        "## Handoff",
+        f"- answer_mode: {agent_brief.get('answer_mode', '')}",
+        f"- fallback_action: {agent_brief.get('fallback_action', '')}",
+        f"- should_cite_sources: {agent_brief.get('should_cite_sources', False)}",
+        f"- should_surface_uncertainty: {agent_brief.get('should_surface_uncertainty', False)}",
+        f"- risk_flags: {', '.join(agent_brief.get('risk_flags', [])) or 'none'}",
+        f"- recommended_read_order: {' -> '.join(agent_brief.get('recommended_read_order', [])) or 'none'}",
+        f"- required_evidence_paths: {', '.join(agent_brief.get('required_evidence_paths', [])) or 'none'}",
+        "",
+        "## Selected Result",
+    ]
+
+    if selected_result is None:
+        lines.extend([
+            "- selected_result: none",
+            "",
+            "## Answer Instruction",
+            "Explain that no reliable answer anchor was found and suggest broadening or rephrasing the query.",
+        ])
+        return "\n".join(lines)
+
+    lines.extend([
+        f"- title: {selected_result.get('title', '')}",
+        f"- page_type: {selected_result.get('type', '')}",
+        f"- page_status: {selected_result.get('status', '')}",
+        f"- ready_state: {selected_result.get('ready_state', '')}",
+        f"- page_path: {selected_result.get('page_path', '')}",
+        f"- page_summary: {answer_context.get('page_summary', '')}",
+        "",
+        "## Key Claims",
+    ])
+
+    key_claims = answer_context.get("key_claims", [])
+    if key_claims:
+        for claim in key_claims:
+            lines.append(
+                f"- {claim.get('claim_id')}: {claim.get('text', '')} "
+                f"(type={claim.get('claim_type')}, status={claim.get('status')}, confidence={claim.get('confidence')})"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend([
+        "",
+        "## Key Chunks",
+    ])
+    key_chunks = answer_context.get("key_chunks", [])
+    if key_chunks:
+        for chunk in key_chunks:
+            lines.append(
+                f"- {chunk.get('chunk_id')}: {chunk.get('summary', '')} "
+                f"[section={chunk.get('section_path')}, lines={chunk.get('start_line')}-{chunk.get('end_line')}, source={chunk.get('source_path')}]"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend([
+        "",
+        "## Key Sources",
+    ])
+    key_sources = answer_context.get("key_sources", [])
+    if key_sources:
+        for source in key_sources:
+            lines.append(
+                f"- source_id={source.get('source_id')} path={source.get('source_path')} "
+                f"section={source.get('section_path') or ''} chunk_id={source.get('chunk_id') or ''}".rstrip()
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend([
+        "",
+        "## Answer Instruction",
+        "Write a concise answer for the user grounded only in the handoff above.",
+        "If `should_cite_sources` is true, mention the supporting source paths or sections in the answer.",
+        "If `should_surface_uncertainty` is true, include a short uncertainty note.",
+        "If `fallback_action` is not `answer_from_summary_and_claims`, obey that fallback instead of overclaiming.",
+    ])
+    return "\n".join(lines)
+
+
+def build_answer_ready_messages(answer_ready_payload: dict) -> list[dict]:
+    prompt_text = render_answer_ready_prompt(answer_ready_payload)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the answer layer for a MyAgentWiki handoff. "
+                "Answer only from the provided context, surface uncertainty when required, "
+                "and do not invent unsupported claims or citations."
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt_text,
+        },
+    ]
+
+
+def render_answer_ready_chatml(answer_ready_payload: dict) -> str:
+    messages = build_answer_ready_messages(answer_ready_payload)
+    blocks = []
+    for message in messages:
+        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
+    return "\n".join(blocks)
 
 
 def select_top_matches(query_tokens: list[str], field_tokens: list[str], limit: int = 5) -> list[str]:
@@ -6980,6 +7534,7 @@ def build_query_payload(
             "canonical_id": page_record.get("canonical_id"),
             "status": page_record.get("status", ""),
             "summary": page_record.get("summary", ""),
+            "aliases": page_record.get("aliases", []),
             "claim_ids": page_record.get("claim_ids", []),
             "review_ids": page_record.get("review_ids", []),
             "score": round(final_score, 6),
@@ -6996,6 +7551,8 @@ def build_query_payload(
         }
         result_record["reading_pack"] = build_result_reading_pack(
             result=result_record,
+            query_text=query_text,
+            normalized_query=normalized_query,
             query_tokens=query_tokens,
             claim_records_by_id=claim_records_by_id,
             chunk_records_by_id=chunk_records_by_id,
@@ -7008,6 +7565,7 @@ def build_query_payload(
     scored_results.sort(key=lambda item: (item["score"], item["title"]), reverse=True)
     return {
         "workspace": str(target),
+        "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
         "query": query_text,
         "normalized_query": normalized_query,
         "expanded_query": normalized_query_payload["expanded_query"],
@@ -7054,6 +7612,37 @@ def command_query(args: argparse.Namespace) -> CommandResult:
         chunk_limit=chunk_limit,
         reading_depth=reading_depth,
     )
+    if getattr(args, "answer_ready", False):
+        answer_ready_payload = build_answer_ready_payload(payload)
+        answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
+        if answer_ready_format == "prompt":
+            answer_ready_payload["prompt_text"] = render_answer_ready_prompt(answer_ready_payload)
+        elif answer_ready_format == "messages":
+            answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
+        elif answer_ready_format == "chatml":
+            answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
+            answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
+        if args.json:
+            return CommandResult(payload=answer_ready_payload, message="Answer-ready query completed.")
+        if answer_ready_format == "prompt":
+            return CommandResult(
+                payload=answer_ready_payload,
+                message=answer_ready_payload["prompt_text"],
+            )
+        if answer_ready_format == "messages":
+            return CommandResult(
+                payload=answer_ready_payload,
+                message=json.dumps(answer_ready_payload["messages"], ensure_ascii=False, indent=2),
+            )
+        if answer_ready_format == "chatml":
+            return CommandResult(
+                payload=answer_ready_payload,
+                message=answer_ready_payload["chatml_text"],
+            )
+        return CommandResult(
+            payload=answer_ready_payload,
+            message=render_answer_ready_message(answer_ready_payload),
+        )
 
     if args.json:
         return CommandResult(payload=payload, message="Query completed.")
@@ -7130,6 +7719,54 @@ def command_query(args: argparse.Namespace) -> CommandResult:
                     f"{source.get('source_path')}"
                 )
     return CommandResult(payload=payload, message="\n".join(lines))
+
+
+def command_answer_query(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
+    if reading_depth not in QUERY_READING_DEPTH_LIMITS:
+        reading_depth = "standard"
+    depth_limits = QUERY_READING_DEPTH_LIMITS[reading_depth]
+    claim_limit = args.claim_limit if getattr(args, "claim_limit", None) is not None else depth_limits["claim_limit"]
+    chunk_limit = args.chunk_limit if getattr(args, "chunk_limit", None) is not None else depth_limits["chunk_limit"]
+    query_payload = build_query_payload(
+        target=target,
+        query_text=args.text,
+        limit=args.limit,
+        claim_limit=claim_limit,
+        chunk_limit=chunk_limit,
+        reading_depth=reading_depth,
+    )
+    answer_ready_payload = build_answer_ready_payload(query_payload)
+    answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
+    if answer_ready_format == "prompt":
+        answer_ready_payload["prompt_text"] = render_answer_ready_prompt(answer_ready_payload)
+    elif answer_ready_format == "messages":
+        answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
+    elif answer_ready_format == "chatml":
+        answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
+        answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
+    if args.json:
+        return CommandResult(payload=answer_ready_payload, message="Answer-ready query completed.")
+    if answer_ready_format == "prompt":
+        return CommandResult(
+            payload=answer_ready_payload,
+            message=answer_ready_payload["prompt_text"],
+        )
+    if answer_ready_format == "messages":
+        return CommandResult(
+            payload=answer_ready_payload,
+            message=json.dumps(answer_ready_payload["messages"], ensure_ascii=False, indent=2),
+        )
+    if answer_ready_format == "chatml":
+        return CommandResult(
+            payload=answer_ready_payload,
+            message=answer_ready_payload["chatml_text"],
+        )
+    return CommandResult(
+        payload=answer_ready_payload,
+        message=render_answer_ready_message(answer_ready_payload),
+    )
 
 
 def build_review_list_payload(target: Path, status_filter: str | None = None) -> dict:
@@ -9641,10 +10278,45 @@ def build_parser() -> argparse.ArgumentParser:
         default="standard",
         help="Preset reading-pack thickness. `deep` returns more matched claims and chunks per page.",
     )
+    query_parser.add_argument(
+        "--answer-ready",
+        action="store_true",
+        help="Render reading_pack as an answer-ready handoff summary for an upper-layer Agent.",
+    )
+    query_parser.add_argument(
+        "--format",
+        choices=("summary", "prompt", "messages", "chatml"),
+        default="summary",
+        help="When used with --answer-ready, choose summary view or direct prompt view.",
+    )
     query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
     query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
     query_parser.add_argument("--json", action="store_true", help="Output JSON.")
     query_parser.set_defaults(handler=command_query)
+
+    answer_query_parser = subparsers.add_parser(
+        "answer-query",
+        help="Return an answer-ready handoff summary derived from query reading_pack.",
+    )
+    answer_query_parser.add_argument("text", help="Search query text.")
+    answer_query_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    answer_query_parser.add_argument("--limit", type=int, default=5, help="Maximum number of results to inspect.")
+    answer_query_parser.add_argument(
+        "--reading-depth",
+        choices=tuple(QUERY_READING_DEPTH_LIMITS.keys()),
+        default="standard",
+        help="Preset reading-pack thickness. `deep` returns more matched claims and chunks per page.",
+    )
+    answer_query_parser.add_argument(
+        "--format",
+        choices=("summary", "prompt", "messages", "chatml"),
+        default="summary",
+        help="Choose answer-ready summary view or direct prompt view.",
+    )
+    answer_query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
+    answer_query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
+    answer_query_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    answer_query_parser.set_defaults(handler=command_answer_query)
 
     render_page_parser = subparsers.add_parser(
         "render-page",

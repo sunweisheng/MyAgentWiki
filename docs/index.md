@@ -13,6 +13,8 @@
 
 - [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前版本的主设计文档，适合先理解系统目标、数据模型、工作流、`deterministic first` 原则，以及 `query / overview` 的最新实现边界。
+  - 其中已包含 `query -> answer handoff contract`，用于定义 `reading_pack` 如何作为上层回答器/Agent 的标准输入。
+  - 当前也已包含 `answer-ready output layer`，用于说明 `answer-query`、`query --answer-ready` 及其 `prompt/messages/chatml` 输出格式。
 
 - [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
   - 运行依赖、平台差异、安装方式与降级能力说明。

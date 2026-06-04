@@ -30,3 +30,7 @@
 
 - 先读 query 返回的候选页面、字段命中解释和 `reading_pack`
 - 若涉及冲突、证据或引用，继续回读 claim、chunk、source，不只停在页面摘要
+- 若目标是给上层回答器准备输入，优先使用 `answer-query` 或 `query --answer-ready`
+- 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，不要只根据页面摘要直接作答
+- 回答前优先按 `reading_pack.answer_handoff.recommended_read_order` 消费上下文
+- 若 `reading_pack.answer_guardrails.risk_flags` 非空，回答里应带上不确定性或待确认提示

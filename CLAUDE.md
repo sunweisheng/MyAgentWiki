@@ -24,6 +24,10 @@
 - `merge / archive_one / keep_both / edit_then_resume` 统一通过 `review-apply`
 - 人工改 claim 后恢复流程，使用 `edit_then_resume`
 - 需要解释查询结果时，优先使用 `query` 的 `reading_pack`
+- 若目标是给上层回答器准备输入，优先使用 `answer-query` 或 `query --answer-ready`
+- 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，不要只根据页面摘要直接作答
+- 回答前优先遵循 `reading_pack.answer_handoff.recommended_read_order`
+- 若 `reading_pack.answer_guardrails.risk_flags` 非空，回答中必须显式表达不确定性或待确认点
 
 ## 当前状态 / Current Status
 

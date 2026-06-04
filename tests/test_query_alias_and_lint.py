@@ -179,6 +179,156 @@ def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Pat
     assert result["results"][0]["intent_boost"] >= 1.0
 
 
+def test_query_answer_ready_returns_agent_consumable_summary(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerReadyQueryRegression")
+
+    result = run_cli(
+        "query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert result["query_contract_version"] == "query_answer_handoff/v1"
+    assert result["selected_result"]["title"]
+    assert result["selected_result"]["ready_state"] == "summary_ready"
+    assert result["agent_brief"]["answer_mode"] == "summary_first"
+    assert result["agent_brief"]["fallback_action"] == "answer_from_summary_and_claims"
+    assert result["answer_context"]["page_summary"]
+    assert result["answer_context"]["key_claims"]
+
+
+def test_answer_query_matches_query_answer_ready_view(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerQueryAliasRegression")
+
+    answer_ready_from_query = run_cli(
+        "query",
+        "Claim 和 Chunk 的区别",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+        "--reading-depth", "deep",
+    )
+    answer_ready_from_alias = run_cli(
+        "answer-query",
+        "Claim 和 Chunk 的区别",
+        "--target-dir", str(workspace_dir),
+        "--reading-depth", "deep",
+    )
+
+    assert answer_ready_from_alias == answer_ready_from_query
+
+
+def test_answer_query_prompt_format_returns_prompt_text(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerQueryPromptRegression")
+
+    result = run_cli(
+        "answer-query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--format", "prompt",
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert "prompt_text" in result
+    assert "## Query" in result["prompt_text"]
+    assert "## Answer Instruction" in result["prompt_text"]
+    assert "user_query: 什么是 Claim" in result["prompt_text"]
+
+
+def test_query_answer_ready_prompt_matches_answer_query_prompt(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "QueryAnswerReadyPromptParity")
+
+    from_query = run_cli(
+        "query",
+        "这个结论的来源证据是什么",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+        "--format", "prompt",
+        "--reading-depth", "deep",
+    )
+    from_alias = run_cli(
+        "answer-query",
+        "这个结论的来源证据是什么",
+        "--target-dir", str(workspace_dir),
+        "--format", "prompt",
+        "--reading-depth", "deep",
+    )
+
+    assert from_query == from_alias
+
+
+def test_answer_query_messages_format_returns_api_ready_messages(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerQueryMessagesRegression")
+
+    result = run_cli(
+        "answer-query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--format", "messages",
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert "messages" in result
+    assert len(result["messages"]) == 2
+    assert result["messages"][0]["role"] == "system"
+    assert result["messages"][1]["role"] == "user"
+    assert "## Query" in result["messages"][1]["content"]
+
+
+def test_answer_query_chatml_format_returns_chatml_and_messages(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerQueryChatMLRegression")
+
+    result = run_cli(
+        "answer-query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--format", "chatml",
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert "messages" in result
+    assert "chatml_text" in result
+    assert "<|im_start|>system" in result["chatml_text"]
+    assert "<|im_start|>user" in result["chatml_text"]
+
+
+def test_query_answer_ready_messages_matches_answer_query_messages(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "QueryAnswerReadyMessagesParity")
+
+    from_query = run_cli(
+        "query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+        "--format", "messages",
+    )
+    from_alias = run_cli(
+        "answer-query",
+        "什么是 Claim",
+        "--target-dir", str(workspace_dir),
+        "--format", "messages",
+    )
+
+    assert from_query == from_alias
+
+
+def test_answer_query_no_match_returns_fallback_brief(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "AnswerQueryNoMatchRegression")
+
+    result = run_cli(
+        "answer-query",
+        "完全不存在的主题 xyz",
+        "--target-dir", str(workspace_dir),
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert result["selected_result"]["ready_state"] == "answer_with_uncertainty"
+    assert result["agent_brief"]["fallback_action"] in {"answer_with_uncertainty", "broaden_or_rephrase_query"}
+    assert result["agent_brief"]["should_surface_uncertainty"] is True
+    assert result["agent_brief"]["risk_flags"]
+
+
 def test_claim_set_status_stable_generates_readable_concept_page(tmp_path: Path) -> None:
     # 第二阶段里，stable claim 应额外生成更适合人阅读的 concept 页，
     # 同时保留原来的 concept-summary 证据页。
@@ -618,6 +768,15 @@ def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     assert top_result["type"] == "source-summary"
     assert top_result["intent_boost_reason"] == "intent_evidence_prefers_source"
     assert top_result["reading_pack"]["query_intent"] == "evidence"
+    assert result["contract_version"] == "query_answer_handoff/v1"
+    assert top_result["reading_pack"]["contract_version"] == "query_answer_handoff/v1"
+    assert top_result["reading_pack"]["query"]["intent"] == "evidence"
+    assert top_result["reading_pack"]["retrieval_context"]["focus"] == "source_evidence"
+    assert top_result["reading_pack"]["answer_guardrails"]["must_read_sources"] is True
+    assert top_result["reading_pack"]["answer_guardrails"]["cite_expectation"] == "strong"
+    assert top_result["reading_pack"]["answer_handoff"]["answer_mode"] == "sources_first"
+    assert top_result["reading_pack"]["answer_handoff"]["should_cite_sources"] is True
+    assert top_result["reading_pack"]["answer_handoff"]["required_evidence_paths"][-1] == "evidence_context.source_trail"
 
 
 def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path) -> None:
@@ -1532,8 +1691,14 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
 
     assert how_to["intent"] == "how_to"
     assert how_to["results"][0]["reading_pack"]["focus"] == "procedural_chunks"
+    assert how_to["results"][0]["reading_pack"]["answer_guardrails"]["must_read_chunks"] is True
+    assert how_to["results"][0]["reading_pack"]["answer_guardrails"]["can_answer_from_summary_only"] is False
+    assert how_to["results"][0]["reading_pack"]["answer_handoff"]["answer_mode"] == "chunks_first"
     assert compare["intent"] == "compare"
     assert compare["results"][0]["reading_pack"]["focus"] == "compare_claims"
+    assert compare["results"][0]["reading_pack"]["answer_guardrails"]["must_read_claims"] is True
+    assert compare["results"][0]["reading_pack"]["answer_guardrails"]["must_read_sources"] is False
+    assert compare["results"][0]["reading_pack"]["answer_handoff"]["answer_mode"] == "claims_first"
 
 
 def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
@@ -1564,6 +1729,10 @@ def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
     reading_pack = timeline["results"][0]["reading_pack"]
     assert reading_pack["focus"] == "timeline_evidence"
     assert reading_pack["timeline_sources"]
+    assert reading_pack["answer_guardrails"]["must_read_sources"] is True
+    assert reading_pack["answer_guardrails"]["cite_expectation"] == "strong"
+    assert reading_pack["answer_handoff"]["answer_mode"] == "sources_first"
+    assert "evidence_context.timeline_sources" in reading_pack["answer_handoff"]["required_evidence_paths"]
 
 
 def test_query_reading_depth_deep_returns_thicker_reading_pack(tmp_path: Path) -> None:
@@ -1602,3 +1771,66 @@ def test_query_reading_depth_deep_returns_thicker_reading_pack(tmp_path: Path) -
     assert standard["results"][0]["reading_pack"]["source_trail"] == []
     assert deep["results"][0]["reading_pack"]["source_trail"]
     assert deep["results"][0]["reading_pack"]["source_trail"][0]["source_path"].endswith("topic.md")
+
+
+def test_query_definition_contract_exposes_page_and_guardrails(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "DefinitionContractRegression")
+
+    result = run_cli("query", "什么是 Claim", "--target-dir", str(workspace_dir))
+
+    assert result["contract_version"] == "query_answer_handoff/v1"
+    assert result["results"]
+    reading_pack = result["results"][0]["reading_pack"]
+    assert reading_pack["page_context"]["title"]
+    assert reading_pack["query"]["normalized_text"]
+    assert reading_pack["retrieval_context"]["matched_fields"]
+    assert reading_pack["evidence_context"]["matched_claims"] == reading_pack["matched_claims"]
+    assert reading_pack["answer_guardrails"]["can_answer_from_summary_only"] is True
+    assert reading_pack["answer_guardrails"]["must_read_sources"] is False
+    assert reading_pack["answer_handoff"]["answer_mode"] == "summary_first"
+    assert reading_pack["answer_handoff"]["fallback_action"] == "answer_from_summary_and_claims"
+
+
+def test_query_contract_risk_flags_drive_uncertainty_handoff(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 风险回答\n\n"
+        "系统需要保留待审核状态，避免把不稳定结论伪装成确定答案。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "RiskGuardrailRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    for record in page_records:
+        if record.get("status") != "removed":
+            record["status"] = "needs_review"
+    pages_path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in page_records),
+        encoding="utf-8",
+    )
+    search_index_path = workspace_dir / "indexes" / "search_pages.jsonl"
+    index_records = load_jsonl(search_index_path)
+    for record in index_records:
+        if record.get("status") != "removed":
+            record["status"] = "needs_review"
+    search_index_path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in index_records),
+        encoding="utf-8",
+    )
+
+    result = run_cli("query", "系统需要保留什么状态", "--target-dir", str(workspace_dir))
+
+    reading_pack = result["results"][0]["reading_pack"]
+    assert "page_needs_review" in reading_pack["answer_guardrails"]["risk_flags"]
+    assert reading_pack["answer_handoff"]["should_surface_uncertainty"] is True
+    assert reading_pack["answer_handoff"]["fallback_action"] == "answer_with_uncertainty"

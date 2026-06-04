@@ -192,6 +192,7 @@ New-Item -ItemType Junction `
   - 文档总入口，包含主设计、运行说明、排障文档和项目资料导航
 - [docs/MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前版本的系统详细设计主文档
+  - 其中包含 `query -> answer handoff contract`，说明 `reading_pack` 如何升级为回答器/Agent 可稳定消费的标准输入
 
 ## 快速开始 / Quick Start
 
@@ -248,8 +249,17 @@ python -m myagentwiki lint --target-dir /path/to/MyNotesWiki
 ```bash
 python -m myagentwiki query "什么是知识声明层" --target-dir /path/to/MyNotesWiki
 python -m myagentwiki query "如何生成 wiki 页面" --reading-depth deep --target-dir /path/to/MyNotesWiki
+python -m myagentwiki query "什么是知识声明层" --answer-ready --target-dir /path/to/MyNotesWiki
+python -m myagentwiki answer-query "这个结论的来源证据是什么" --target-dir /path/to/MyNotesWiki
+python -m myagentwiki answer-query "什么是知识声明层" --format prompt --target-dir /path/to/MyNotesWiki
+python -m myagentwiki answer-query "什么是知识声明层" --format messages --target-dir /path/to/MyNotesWiki
 python -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
 ```
+
+推荐用法：
+- 想先看检索候选页和证据包时，用 `query`
+- 想直接把结果交给上层回答器或 API 时，用 `answer-query`
+- 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 
 ## 推荐使用流程 / Recommended Workflow
 
@@ -393,6 +403,10 @@ V1 已实现这些命令入口：
   - `deep` 模式会在保持 deterministic 的前提下返回更厚的 `reading_pack`，并额外给出按来源聚合的 `source_trail`
   - 当前输出候选页面、得分解释、命中字段与命中 token，并返回阅读包 `reading_pack`
   - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；`deep` 模式下还会附带 `source_trail`
+  - `query --answer-ready` 和 `answer-query` 会把 `reading_pack.answer_handoff` 渲染成给上层 Agent 直接消费的回答就绪摘要，显式返回推荐读序、必读证据路径、风险标记与降级动作
+  - `--format prompt` 会进一步把回答就绪摘要压成可直接喂给上层 LLM/Agent 的 prompt block；JSON 模式下也会附带 `prompt_text`
+  - `--format messages` 会返回可直接传给聊天 API 的 messages 数组；`--format chatml` 会同时返回 messages 和 ChatML 文本
+  - answer-ready 输出当前使用独立版本 `answer_ready_query/v1`，与底层 `query_answer_handoff/v1` 分层演进
 - `myagentwiki review-list`
   - 已实现 review 队列查看，可列出待处理项、候选 claim、推荐动作与允许动作
 - `myagentwiki review-apply`

@@ -28,6 +28,10 @@
 - 先读页面摘要与字段命中解释，不直接把首条结果当最终答案
 - 涉及证据、冲突、来源、引用时，必须回读 `reading_pack`
 - 若 query 命中了 alias / canonical，应优先阅读其规范页面
+- 若目标是给上层回答器准备输入，优先使用 `answer-query` 或 `query --answer-ready`
+- 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，Agent 不应只根据页面摘要直接作答
+- 回答前优先遵循 `reading_pack.answer_handoff.recommended_read_order`
+- 若 `reading_pack.answer_guardrails.risk_flags` 非空，回答中必须显式表达不确定性或待确认点
 
 ## review / state 恢复约定 / Review and State Recovery
 

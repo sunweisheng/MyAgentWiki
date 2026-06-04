@@ -45,6 +45,10 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 - 再看 `reading_pack.claims`
 - 需要证据时继续读 `reading_pack.chunks` 与 `reading_pack.timeline_sources`
 - 涉及 alias / canonical 命中时，优先阅读规范页面
+- 若目标是把结果直接交给上层回答器，优先使用 `answer-query` 或 `query --answer-ready`
+- 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，不要只停在摘要层
+- 回答前优先按 `reading_pack.answer_handoff.recommended_read_order` 消费上下文
+- 若 `reading_pack.answer_guardrails.risk_flags` 非空，回答里应带上不确定性或待确认提示
 
 ## 参考文件 / References
 

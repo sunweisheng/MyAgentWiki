@@ -863,15 +863,150 @@ V1 的 query 不只是返回排序结果，还必须返回一个足够驱动 Age
 - `next_chunk`（后一切块）
 
 V1 当前实现说明：
+- `query` 顶层当前已显式返回 `contract_version: query_answer_handoff/v1`。
 - `query` 当前支持 `reading_depth`，默认 `standard`，可显式切到 `deep`。
 - `standard` 适合先定位页面与核心证据；`deep` 会返回更厚的 `reading_pack`，并额外附带按来源聚合的 `source_trail`。
 - `source_trail` 的目标不是做新的摘要生成，而是把已命中的 Claim/Chunk 沿来源维度重新收束，帮助 Agent 在大上下文窗口下继续做 deterministic 的证据阅读。
+- `reading_pack` 当前除保留兼容字段外，也已显式返回 `query`、`page_context`、`retrieval_context`、`evidence_context`、`answer_guardrails`、`answer_handoff`。
 
 工程约束：
 - Agent 默认先读结果页和排序解释，再决定是否进入 `reading_pack.claims`。
 - 若问题涉及证据、冲突、时间线或引用，不能只消费页面摘要，必须继续下钻 `claims/chunks/source summaries`。
 - Query 输出的目标不是“直接替用户回答一切”，而是把正确阅读路径打包出来。
 - 即使在 `deep` 模式下，也优先扩充结构化证据路径，而不是直接让 LLM 重新总结合成。
+
+### Query -> Answer Handoff Contract
+`reading_pack` 不应只被视为“检索结果附带的上下文”，还应被定义为上层回答器或 Agent 的标准输入。
+
+这层 handoff contract 的目标不是替回答器直接生成最终答案，而是把“回答前必须消费的结构化证据上下文”稳定交接出去。
+
+它至少要解决四个问题：
+- 哪些字段是回答器可以稳定依赖的必备输入。
+- 回答器面对不同 `query_intent` 时，应该先读什么、后读什么。
+- 哪些问题可以先基于页面摘要和核心 Claim 作答，哪些问题必须继续下钻 Chunk 与 Source。
+- 当证据不足、存在 review 风险或命中冲突时，回答器应该如何降级，而不是硬答。
+
+V1 建议把 handoff contract 理解成一个语义稳定层。即使底层 query 排序、打分细节或内部字段继续演化，这层对回答器暴露的消费协议也应尽量保持稳定。
+
+建议的 V1 contract 形态如下：
+
+```json
+{
+  "contract_version": "query_answer_handoff/v1",
+  "handoff_kind": "reading_pack",
+  "query": {
+    "text": "...",
+    "normalized_text": "...",
+    "intent": "lookup|definition|compare|timeline|how_to|evidence",
+    "reading_depth": "standard|deep"
+  },
+  "page_context": {
+    "page_id": "...",
+    "title": "...",
+    "page_path": "...",
+    "type": "...",
+    "status": "...",
+    "summary": "...",
+    "canonical_id": "...",
+    "aliases": []
+  },
+  "retrieval_context": {
+    "focus": "general_lookup|workspace_overview|compare_claims|timeline_evidence|procedural_chunks|source_evidence",
+    "matched_fields": [],
+    "ranking_reasons": [],
+    "review_ids": []
+  },
+  "evidence_context": {
+    "matched_claims": [],
+    "matched_chunks": [],
+    "timeline_sources": [],
+    "source_trail": []
+  },
+  "answer_guardrails": {
+    "can_answer_from_summary_only": false,
+    "must_read_claims": true,
+    "must_read_chunks": false,
+    "must_read_sources": false,
+    "cite_expectation": "none|light|strong",
+    "risk_flags": []
+  },
+  "answer_handoff": {
+    "answer_mode": "summary_first|claims_first|chunks_first|sources_first|no_match",
+    "recommended_read_order": [],
+    "required_evidence_paths": [],
+    "should_cite_sources": false,
+    "should_surface_uncertainty": false,
+    "fallback_action": "answer_from_summary_and_claims|read_required_evidence_before_answering|answer_with_uncertainty|broaden_or_rephrase_query"
+  }
+}
+```
+
+字段含义：
+- `contract_version`：显式声明回答器当前遵循的 handoff 版本，避免未来字段扩展时出现静默错配。
+- `handoff_kind`：标明这是一份给回答器消费的阅读包，而不是裸检索结果。
+- `query`：保存原始问题、标准化查询、意图和阅读深度，帮助回答器理解这次检索为什么会返回当前阅读路径。
+- `page_context`：给出当前最优结果页的稳定页面上下文，作为回答器组织答案时的默认锚点。
+- `retrieval_context`：描述检索器建议的阅读重心和风险入口，例如 `focus`、字段命中、排序解释和 `review_ids`。
+- `evidence_context`：承载回答器真正可引用、可继续下钻的结构化证据对象。
+- `answer_guardrails`：把“回答边界”显式化，避免回答器把 `reading_pack` 当作无约束素材池直接发挥。
+- `answer_handoff`：把“先读什么、是否应引用、风险出现时如何降级”显式化，减少上层回答器自行猜测消费顺序。
+
+V1 建议的消费规则：
+1. 回答器先读取 `page_context.summary`、`retrieval_context.focus` 和排序解释，确认当前命中的是哪一类页面与阅读路径。
+2. 若 `focus` 是 `workspace_overview` 或 `general_lookup`，且没有明显风险标记，可先基于页面摘要和高相关 Claim 组织简短回答。
+3. 若 `focus` 是 `compare_claims`、`timeline_evidence`、`procedural_chunks` 或 `source_evidence`，则不能停在摘要层，必须继续消费 `matched_claims`，并按需下钻 `matched_chunks`、`timeline_sources`、`source_trail`。
+4. 若 `review_ids` 非空、页面状态是 `needs_review` / `disputed`、或高相关 Claim / Chunk 明显不足，回答器必须输出不确定性提示，而不是把当前结果伪装成确定答案。
+5. 若用户问题显式要求证据、来源、引用、时间顺序或冲突解释，`cite_expectation` 应至少提升到 `light`，并优先引用 `source_refs`、`section_path`、`source_trail` 等可回链对象。
+
+V1 建议的 guardrail 推导规则：
+- `lookup` / `definition`：通常允许 `can_answer_from_summary_only=true`，但若无高相关 Claim，则仍应提示证据较薄。
+- `compare`：`must_read_claims=true`，必要时继续读 `matched_chunks`，避免只凭摘要做对比结论。
+- `timeline`：`must_read_claims=true` 且 `must_read_sources=true`，优先消费 `timeline_sources` 与时间相关 Chunk。
+- `how_to`：`must_read_chunks=true`，因为步骤型问题通常需要正文顺序和相邻 Chunk 线索。
+- `evidence`：`must_read_chunks=true` 且 `must_read_sources=true`，不能只引用页面摘要或孤立 Claim。
+
+与当前实现的映射关系：
+- 现有 `reading_pack.query_intent` 可直接映射到 `query.intent`。
+- 现有 `reading_pack.focus` 可直接映射到 `retrieval_context.focus`。
+- 现有 `matched_claims`、`matched_chunks`、`timeline_sources`、`source_trail` 已经是 `evidence_context` 的主体。
+- 现有结果页里的 `summary`、`page_id`、`page_path`、`type`、`status`、`aliases`、`canonical_id` 可归入 `page_context`。
+- 现有结果里的命中字段、命中 token 和排序解释可归入 `retrieval_context`。
+- `answer_guardrails` 与 `answer_handoff` 当前都已在 CLI JSON 中显式输出。
+
+工程边界：
+- handoff contract 服务的是“query 之后、answer 之前”的交接，不负责替回答器完成最终措辞。
+- 它的首要价值是减少上层 Agent 对底层检索细节的猜测成本。
+- 回答器若绕过这层 contract，直接把候选页正文或 raw 材料大段读入，就违背了 MyAgentWiki 的 CLI-first 和 deterministic-first 设计意图。
+
+### Answer-Ready Output Layer
+在 `reading_pack` 之上，当前实现已经补了一层面向上层回答器的 answer-ready 输出。
+
+当前支持两种入口：
+- `python -m myagentwiki query "..." --answer-ready`
+- `python -m myagentwiki answer-query "..."`
+
+这层输出的目标不是替回答器完成最终答案，而是把最适合回答阶段直接消费的内容再压一层，减少每个上层 Agent 都去手工解析 `reading_pack` 的重复工作。
+
+当前 answer-ready payload 使用独立版本：
+- `contract_version: answer_ready_query/v1`
+
+最小结构包含：
+- `selected_result`：当前回答锚点页、`ready_state`、页面状态与得分。
+- `alternatives`：次优候选页，供回答器在主锚点不稳时快速切换。
+- `agent_brief`：回答模式、推荐读序、必读证据路径、风险标记、降级动作。
+- `answer_context`：压缩后的 `page_summary`、`key_claims`、`key_chunks`、`key_sources`。
+- `agent_summary`：给上层 Agent 直接阅读的一段紧凑交接摘要。
+
+当前支持四种渲染格式：
+- `summary`：回答就绪摘要，适合人读或轻量 Agent 直接消费。
+- `prompt`：单段 prompt block，适合直接喂给上层 LLM。
+- `messages`：聊天 API 可直接消费的 messages 数组。
+- `chatml`：messages 的 ChatML 文本表示，同时保留结构化 messages。
+
+工程约束：
+- answer-ready 层只做“为回答阶段整理上下文”，不替代底层 query 排序与证据选择。
+- 若顶层结果存在明显风险，answer-ready 层应优先输出 `answer_with_uncertainty` 或 `broaden_or_rephrase_query` 这类降级动作，而不是假装已有稳定答案。
+- `messages` / `chatml` / `prompt` 三种格式应共享同一套 handoff 语义，避免不同渲染格式各自漂移。
 
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。
