@@ -24,6 +24,18 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     return json.loads(completed.stdout)
 
 
+def run_cli_text(*args: str, cwd: Path | None = None) -> str:
+    completed = subprocess.run(
+        [sys.executable, "-m", "myagentwiki.cli", *args],
+        cwd=str(cwd or REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+
 def load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -76,6 +88,9 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert Path(init_result["raw_dir"]).resolve() == source_dir.resolve()
     assert init_result["raw_dir_relative_path"] == "../raw"
     assert init_result["raw_dir_preexisting"] is True
+    assert init_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
+    assert init_result["workspace_summary"]["raw_dir"] == str(source_dir.resolve())
+    assert init_result["workspace_summary"]["entry_page_path"] == str((workspace_dir / "wiki" / "index.md").resolve())
     assert not (workspace_dir / "raw").exists()
     tracked_files = set(run_git(workspace_dir, "ls-files").splitlines())
     assert not any(path.startswith("raw/") for path in tracked_files)
@@ -83,10 +98,14 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
     assert ingest_result["summary"]["normalized_count"] >= 2
     assert ingest_result["summary"]["changed_page_count"] >= 1
+    assert ingest_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
+    assert ingest_result["workspace_summary"]["raw_dir"] == str(source_dir.resolve())
 
     query_result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir))
     assert query_result["intent"] == "definition"
     assert query_result["results"]
+    assert query_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
+    assert query_result["workspace_summary"]["entry_page_path"] == str((workspace_dir / "wiki" / "index.md").resolve())
     assert query_result["results"][0]["reading_pack"]["query_intent"] == "definition"
 
     pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
@@ -107,6 +126,7 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     review_list = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert review_list["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
     alias_review = next(item for item in review_list["items"] if item["kind"] == "alias_conflict")
 
     review_apply = run_cli(
@@ -121,10 +141,15 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
         str(workspace_dir),
     )
     assert review_apply["action"] == "assign_alias"
+    assert review_apply["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     assert lint_result["summary"]["ok"] is True
+    assert lint_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
+    assert lint_result["workspace_summary"]["lint_report_path"] == str(
+        (workspace_dir / "reports" / "lint" / "lint_latest.md").resolve()
+    )
 
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
@@ -148,6 +173,45 @@ def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
     assert raw_dir.exists()
     assert raw_dir.is_dir()
     assert not any(raw_dir.iterdir())
+
+
+def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "note.md").write_text("# 示例\n\n这是一条示例资料。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "LocalKnowledgeWiki"
+    init_stdout = run_cli_text(
+        "init",
+        "--project-name",
+        "LocalKnowledgeWiki",
+        "--source-dir",
+        str(source_dir),
+        "--target-dir",
+        str(workspace_dir),
+    )
+    assert f"Workspace: {workspace_dir.resolve()}" in init_stdout
+    assert f"Raw sibling: {source_dir.resolve()}" in init_stdout
+    assert f"Entry page: {(workspace_dir / 'wiki' / 'index.md').resolve()}" in init_stdout
+
+    ingest_stdout = run_cli_text("ingest", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in ingest_stdout
+    assert f"Raw sibling: {source_dir.resolve()}" in ingest_stdout
+    assert f"Entry page: {(workspace_dir / 'wiki' / 'index.md').resolve()}" in ingest_stdout
+
+    query_stdout = run_cli_text("query", "示例", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in query_stdout
+    assert f"Entry page: {(workspace_dir / 'wiki' / 'index.md').resolve()}" in query_stdout
+
+    answer_ready_stdout = run_cli_text("query", "示例", "--answer-ready", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in answer_ready_stdout
+
+    review_list_stdout = run_cli_text("review-list", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in review_list_stdout
+
+    lint_stdout = run_cli_text("lint", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in lint_stdout
+    assert f"Lint report: {(workspace_dir / 'reports' / 'lint' / 'lint_latest.md').resolve()}" in lint_stdout
 
 
 def test_wiki_index_escapes_paths_with_spaces(tmp_path: Path) -> None:

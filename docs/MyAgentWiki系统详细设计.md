@@ -481,6 +481,18 @@ CLI 入口固定为：
 - `python -m myagentwiki review-list`：列出审核队列。
 - `python -m myagentwiki review-apply`：应用审核决策并恢复后续流程。
 
+CLI 输出约定：
+- 这些主命令的 JSON 输出应优先保持“上层 Agent 可直接消费”的稳定结构。
+- 当前 `init / ingest / lint / query / answer-query / review-list / review-apply` 都会统一附带 `workspace_summary`。
+- `workspace_summary` 至少包含：
+  - `workspace_dir`：工作区绝对路径
+  - `workspace_name`：工作区目录名
+  - `entry_page_path`：`wiki/index.md` 的绝对路径
+  - `wiki_log_path`：`wiki/log.md` 的绝对路径
+  - `lint_report_path`：`reports/lint/lint_latest.md` 的绝对路径
+- 若该命令直接涉及外部原始资料目录，还应额外附带 `raw_dir`。
+- 纯文本模式也应优先打印这一层路径摘要，避免 UI 或上层 Agent 只保留目录名时误导用户。
+
 ### 初始化后的基线约束
 `init` 完成后，工作区应立即满足以下条件：
 - 具备完整目录骨架。
@@ -992,6 +1004,7 @@ V1 建议的 guardrail 推导规则：
 - `contract_version: answer_ready_query/v1`
 
 最小结构包含：
+- `workspace_summary`：工作区路径摘要，便于回答器或上层 Agent 在展示、跳转、恢复上下文时拿到绝对路径。
 - `selected_result`：当前回答锚点页、`ready_state`、页面状态与得分。
 - `alternatives`：次优候选页，供回答器在主锚点不稳时快速切换。
 - `agent_brief`：回答模式、推荐读序、必读证据路径、风险标记、降级动作。
@@ -1008,6 +1021,7 @@ V1 建议的 guardrail 推导规则：
 - answer-ready 层只做“为回答阶段整理上下文”，不替代底层 query 排序与证据选择。
 - 若顶层结果存在明显风险，answer-ready 层应优先输出 `answer_with_uncertainty` 或 `broaden_or_rephrase_query` 这类降级动作，而不是假装已有稳定答案。
 - `messages` / `chatml` / `prompt` 三种格式应共享同一套 handoff 语义，避免不同渲染格式各自漂移。
+- 即使在 `summary` 这种面向人读的文本渲染模式下，也应先显式给出工作区路径摘要，避免调用端把绝对路径压缩成仅剩目录名。
 
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。

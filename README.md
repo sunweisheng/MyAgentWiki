@@ -79,6 +79,12 @@ V1 已通过本地全量测试和端到端验证：
 - `python -m myagentwiki doctor --json`
   - 必需依赖检查通过
 
+当前 CLI 输出还有一条额外约定：
+
+- `init / ingest / lint / query / answer-query / review-list / review-apply` 的 JSON 输出会统一带 `workspace_summary`
+- `workspace_summary` 当前至少包含工作区绝对路径、入口页路径、lint 报告路径；涉及外部原始资料区的命令还会带 `raw_dir`
+- 纯文本模式也会显式打印这些绝对路径，避免 UI 或上层 Agent 只显示目录名时造成“好像跑错目录”的误解
+
 V1 不把这些当成必须前提：
 
 - LibreOffice
@@ -403,12 +409,15 @@ V1 已实现这些命令入口：
   - `deep` 模式会在保持 deterministic 的前提下返回更厚的 `reading_pack`，并额外给出按来源聚合的 `source_trail`
   - 当前输出候选页面、得分解释、命中字段与命中 token，并返回阅读包 `reading_pack`
   - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；`deep` 模式下还会附带 `source_trail`
+  - JSON 输出当前会统一附带 `workspace_summary`，便于上层 Agent 直接拿到工作区绝对路径、入口页和 lint 报告路径
+  - 纯文本输出当前也会先打印 `Workspace / Entry page / Lint report` 这类绝对路径摘要，再展开候选结果
   - `query --answer-ready` 和 `answer-query` 会把 `reading_pack.answer_handoff` 渲染成给上层 Agent 直接消费的回答就绪摘要，显式返回推荐读序、必读证据路径、风险标记与降级动作
   - `--format prompt` 会进一步把回答就绪摘要压成可直接喂给上层 LLM/Agent 的 prompt block；JSON 模式下也会附带 `prompt_text`
   - `--format messages` 会返回可直接传给聊天 API 的 messages 数组；`--format chatml` 会同时返回 messages 和 ChatML 文本
   - answer-ready 输出当前使用独立版本 `answer_ready_query/v1`，与底层 `query_answer_handoff/v1` 分层演进
 - `myagentwiki review-list`
   - 已实现 review 队列查看，可列出待处理项、候选 claim、推荐动作与允许动作
+  - JSON 输出当前会附带 `workspace_summary`，纯文本输出会先打印工作区绝对路径摘要，降低多工作区场景下的路径歧义
 - `myagentwiki review-apply`
   - 已实现最小人工裁决闭环，当前支持 `keep_both`、`archive_one`、`merge`、`edit_then_resume`、`assign_alias`、`remove_alias` 六种动作
   - `assign_alias` 当前用于 alias conflict review，可把冲突 alias 指定给某个页面并写入持久化覆盖层
@@ -416,6 +425,7 @@ V1 已实现这些命令入口：
   - review 动作会把被淘汰 claim 转入历史态，并保留 `original_claim_id` 便于追踪
   - `merge` / `archive_one` 执行后，会自动清理其他仍处于 `open` 状态的 review 中已经失效的候选 claim 引用
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑
+  - JSON 输出当前会附带 `workspace_summary`，纯文本输出会显式打印工作区绝对路径与当前处理的 review 标识
   - review 动作执行后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与页面检索索引
 
 ## Windows 兼容性 / Windows Compatibility

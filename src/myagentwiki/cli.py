@@ -355,6 +355,45 @@ def print_result(result: CommandResult, as_json: bool = False) -> int:
     return result.exit_code
 
 
+def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> dict:
+    # 给上层 Agent 和人类读者一份“可以直接复述”的路径摘要，避免只剩目录名。
+    summary = {
+        "workspace_dir": str(target_dir),
+        "workspace_name": target_dir.name,
+        "entry_page_path": str(target_dir / "wiki" / "index.md"),
+        "wiki_log_path": str(target_dir / "wiki" / "log.md"),
+        "lint_report_path": str(target_dir / "reports" / "lint" / "lint_latest.md"),
+    }
+    if raw_dir is not None:
+        summary["raw_dir"] = str(raw_dir)
+    return summary
+
+
+def render_workspace_summary_message(
+    action_label: str,
+    target_dir: Path,
+    raw_dir: Path | None = None,
+    extra_lines: list[str] | None = None,
+) -> str:
+    # 纯文本模式也显式带绝对路径，减少 UI 把链接文案压缩成目录名后的歧义。
+    summary = build_workspace_summary(target_dir, raw_dir)
+    lines = [
+        f"{action_label}",
+        f"Workspace: {summary['workspace_dir']}",
+    ]
+    if raw_dir is not None:
+        lines.append(f"Raw sibling: {summary['raw_dir']}")
+    lines.extend(
+        [
+            f"Entry page: {summary['entry_page_path']}",
+            f"Lint report: {summary['lint_report_path']}",
+        ]
+    )
+    if extra_lines:
+        lines.extend(extra_lines)
+    return "\n".join(lines)
+
+
 def compare_python_version(spec: str) -> bool:
     # 目前只需要支持 >= 这种最常见的版本约束，先不把比较器做复杂。
     if not spec.startswith(">="):
@@ -7063,6 +7102,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         "contract_version": ANSWER_READY_OUTPUT_VERSION,
         "query_contract_version": query_payload.get("contract_version"),
         "workspace": query_payload.get("workspace"),
+        "workspace_summary": query_payload.get("workspace_summary"),
         "query": query_payload.get("query"),
         "normalized_query": query_payload.get("normalized_query"),
         "expanded_query": query_payload.get("expanded_query"),
@@ -7565,6 +7605,7 @@ def build_query_payload(
     scored_results.sort(key=lambda item: (item["score"], item["title"]), reverse=True)
     return {
         "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
         "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
         "query": query_text,
         "normalized_query": normalized_query,
@@ -7623,7 +7664,23 @@ def command_query(args: argparse.Namespace) -> CommandResult:
             answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
             answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
         if args.json:
-            return CommandResult(payload=answer_ready_payload, message="Answer-ready query completed.")
+            return CommandResult(
+                payload=answer_ready_payload,
+                message=render_workspace_summary_message(
+                    "Answer-ready query completed.",
+                    target_dir=target,
+                    extra_lines=[
+                        f"Query: {payload['query']}",
+                        f"Intent: {payload['intent']}",
+                        (
+                            "Summary: "
+                            f"candidates={payload['summary']['candidate_page_count']}, "
+                            f"matched={payload['summary']['matched_page_count']}, "
+                            f"returned={payload['summary']['returned_page_count']}"
+                        ),
+                    ],
+                ),
+            )
         if answer_ready_format == "prompt":
             return CommandResult(
                 payload=answer_ready_payload,
@@ -7641,25 +7698,74 @@ def command_query(args: argparse.Namespace) -> CommandResult:
             )
         return CommandResult(
             payload=answer_ready_payload,
-            message=render_answer_ready_message(answer_ready_payload),
+            message=render_workspace_summary_message(
+                "Answer-ready query completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Query: {payload['query']}",
+                    f"Intent: {payload['intent']}",
+                    "",
+                    render_answer_ready_message(answer_ready_payload),
+                ],
+            ),
         )
 
     if args.json:
-        return CommandResult(payload=payload, message="Query completed.")
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Query completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Query: {payload['query']}",
+                    f"Intent: {payload['intent']}",
+                    (
+                        "Summary: "
+                        f"candidates={payload['summary']['candidate_page_count']}, "
+                        f"matched={payload['summary']['matched_page_count']}, "
+                        f"returned={payload['summary']['returned_page_count']}"
+                    ),
+                ],
+            ),
+        )
 
     if not payload["results"]:
         return CommandResult(
             payload=payload,
-            message=f"No wiki results matched query: {args.text}",
+            message=render_workspace_summary_message(
+                f"No wiki results matched query: {args.text}",
+                target_dir=target,
+                extra_lines=[
+                    f"Intent: {payload['intent']}",
+                    (
+                        "Summary: "
+                        f"candidates={payload['summary']['candidate_page_count']}, "
+                        f"matched={payload['summary']['matched_page_count']}, "
+                        f"returned={payload['summary']['returned_page_count']}"
+                    ),
+                ],
+            ),
         )
 
     lines = [
-        f'Query: {payload["query"]}',
-        f'Normalized: {payload["normalized_query"]}',
-        f'Expanded: {payload["expanded_query"]}',
-        f'Intent: {payload["intent"]}',
-        "",
-        "Top Results:",
+        render_workspace_summary_message(
+            "Query completed.",
+            target_dir=target,
+            extra_lines=[
+                f'Query: {payload["query"]}',
+                f'Normalized: {payload["normalized_query"]}',
+                f'Expanded: {payload["expanded_query"]}',
+                f'Intent: {payload["intent"]}',
+                (
+                    "Summary: "
+                    f"candidates={payload['summary']['candidate_page_count']}, "
+                    f"matched={payload['summary']['matched_page_count']}, "
+                    f"returned={payload['summary']['returned_page_count']}"
+                ),
+                "",
+                "Top Results:",
+            ],
+        )
     ]
     for index, result in enumerate(payload["results"], start=1):
         lines.append(
@@ -7747,7 +7853,23 @@ def command_answer_query(args: argparse.Namespace) -> CommandResult:
         answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
         answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
     if args.json:
-        return CommandResult(payload=answer_ready_payload, message="Answer-ready query completed.")
+        return CommandResult(
+            payload=answer_ready_payload,
+            message=render_workspace_summary_message(
+                "Answer-ready query completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Query: {query_payload['query']}",
+                    f"Intent: {query_payload['intent']}",
+                    (
+                        "Summary: "
+                        f"candidates={query_payload['summary']['candidate_page_count']}, "
+                        f"matched={query_payload['summary']['matched_page_count']}, "
+                        f"returned={query_payload['summary']['returned_page_count']}"
+                    ),
+                ],
+            ),
+        )
     if answer_ready_format == "prompt":
         return CommandResult(
             payload=answer_ready_payload,
@@ -7765,7 +7887,16 @@ def command_answer_query(args: argparse.Namespace) -> CommandResult:
         )
     return CommandResult(
         payload=answer_ready_payload,
-        message=render_answer_ready_message(answer_ready_payload),
+        message=render_workspace_summary_message(
+            "Answer-ready query completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Query: {query_payload['query']}",
+                f"Intent: {query_payload['intent']}",
+                "",
+                render_answer_ready_message(answer_ready_payload),
+            ],
+        ),
     )
 
 
@@ -7820,6 +7951,7 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
 
     return {
         "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
         "items": items,
         "summary": {
             "review_count": len(items),
@@ -7833,9 +7965,40 @@ def command_review_list(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     payload = build_review_list_payload(target, status_filter=args.status)
     if args.json:
-        return CommandResult(payload=payload, message="Review list completed.")
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Review list completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Status filter: {args.status or 'all'}",
+                    (
+                        "Summary: "
+                        f"reviews={payload['summary']['review_count']}, "
+                        f"live={payload['summary']['live_review_count']}, "
+                        f"historical={payload['summary']['historical_review_count']}"
+                    ),
+                ],
+            ),
+        )
 
-    lines = ["Review Items:"]
+    lines = [
+        render_workspace_summary_message(
+            "Review list completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Status filter: {args.status or 'all'}",
+                (
+                    "Summary: "
+                    f"reviews={payload['summary']['review_count']}, "
+                    f"live={payload['summary']['live_review_count']}, "
+                    f"historical={payload['summary']['historical_review_count']}"
+                ),
+                "",
+                "Review Items:",
+            ],
+        )
+    ]
     for index, item in enumerate(payload["items"], start=1):
         lines.append(
             f"{index}. {item['display_id']} [{item['kind']}, status={item['status']}, lifecycle={item['lifecycle_status']}]"
@@ -8571,11 +8734,23 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
 
     payload = {
         "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
         "review_id": review_record["review_id"],
         "display_id": review_display_id(review_record),
         **result,
     }
-    return CommandResult(payload=payload, message="Review action applied.")
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Review action applied.",
+            target_dir=target,
+            extra_lines=[
+                f"Review: {review_display_id(review_record)}",
+                f"Action: {result.get('action')}",
+                f"Review id: {review_record['review_id']}",
+            ],
+        ),
+    )
 
 
 def command_init(args: argparse.Namespace) -> CommandResult:
@@ -8682,6 +8857,7 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "source_dir": str(raw_dir),
         "raw_dir": str(raw_dir),
         "target_dir": str(target_dir),
+        "workspace_summary": build_workspace_summary(target_dir, raw_dir),
         "created_directories": [
             str(raw_dir),
             *[
@@ -8706,7 +8882,18 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "metadata_files": [str(path) for path in metadata_files],
         "git_steps": git_steps,
     }
-    return CommandResult(payload=payload, message="Workspace initialized.")
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Workspace initialized.",
+            target_dir=target_dir,
+            raw_dir=raw_dir,
+            extra_lines=[
+                f"Project name: {args.project_name}",
+                f"Raw directory existed before init: {'yes' if raw_dir_preexisting else 'no'}",
+            ],
+        ),
+    )
 
 
 def command_ingest(args: argparse.Namespace) -> CommandResult:
@@ -9298,6 +9485,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             "task_id": task_id,
             "workspace": str(target),
             "raw_dir": str(raw_dir),
+            "workspace_summary": build_workspace_summary(target, raw_dir),
             "created_sources": created_sources,
             "skipped_sources": skipped_sources,
             "normalized_sources": normalized_sources,
@@ -9323,7 +9511,14 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         }
         return CommandResult(
             payload=payload,
-            message="Ingest completed with no upstream changes; wiki regeneration was skipped.",
+            message=render_workspace_summary_message(
+                "Ingest completed with no upstream changes; wiki regeneration was skipped.",
+                target_dir=target,
+                raw_dir=raw_dir,
+                extra_lines=[
+                    f"Task id: {task_id}",
+                ],
+            ),
         )
 
     # 先生成来源摘要页，形成 source -> claim -> page 的第一层闭环。
@@ -9688,6 +9883,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         "task_id": task_id,
         "workspace": str(target),
         "raw_dir": str(raw_dir),
+        "workspace_summary": build_workspace_summary(target, raw_dir),
         "created_sources": created_sources,
         "skipped_sources": skipped_sources,
         "normalized_sources": normalized_sources,
@@ -9716,7 +9912,27 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             "warning_count": len([item for item in error_items if item["level"] == "warning"]),
         },
     }
-    return CommandResult(payload=payload, message="Ingest registration, normalization, chunking, claim drafting, and wiki generation completed.")
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Ingest registration, normalization, chunking, claim drafting, and wiki generation completed.",
+            target_dir=target,
+            raw_dir=raw_dir,
+            extra_lines=[
+                f"Task id: {task_id}",
+                (
+                    "Summary: "
+                    f"normalized={payload['summary']['normalized_count']}, "
+                    f"chunks={payload['summary']['chunked_count']}, "
+                    f"claims={payload['summary']['claimed_count']}, "
+                    f"changed_pages={payload['summary']['changed_page_count']}, "
+                    f"reviews={payload['summary']['review_count']}, "
+                    f"warnings={payload['summary']['warning_count']}, "
+                    f"errors={payload['summary']['error_count']}"
+                ),
+            ],
+        ),
+    )
 
 
 def command_stub(args: argparse.Namespace) -> CommandResult:
@@ -10096,6 +10312,7 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
     warnings = [check for check in checks if not check["ok"] and check["severity"] == "warning"]
     payload = {
         "target": str(target),
+        "workspace_summary": build_workspace_summary(target),
         "checks": checks,
         "summary": {
             "errors": len(errors),
@@ -10106,7 +10323,18 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
     return CommandResult(
         exit_code=0 if len(errors) == 0 else 1,
         payload=payload,
-        message="Lint completed." if len(errors) == 0 else "Lint found issues.",
+        message=render_workspace_summary_message(
+            "Lint completed." if len(errors) == 0 else "Lint found issues.",
+            target_dir=target,
+            extra_lines=[
+                (
+                    "Summary: "
+                    f"errors={payload['summary']['errors']}, "
+                    f"warnings={payload['summary']['warnings']}, "
+                    f"ok={'yes' if payload['summary']['ok'] else 'no'}"
+                ),
+            ],
+        ),
     )
 
 

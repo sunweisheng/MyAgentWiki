@@ -1544,6 +1544,62 @@ def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp
     )
 
 
+def test_review_apply_text_output_includes_absolute_workspace_path(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
+    (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReviewApplyTextOutput",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = [
+        json.loads(line)
+        for line in pages_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
+    shared_alias = "共享术语"
+    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
+    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    alias_review = next(item for item in reviews["items"] if item["kind"] == "alias_conflict")
+    primary_page_id = alias_review["candidate_page_ids"][0]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "myagentwiki.cli",
+            "review-apply",
+            alias_review["review_id"],
+            "assign_alias",
+            "--primary-page-id", primary_page_id,
+            "--alias-value", shared_alias,
+            "--target-dir", str(workspace_dir),
+        ],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert f"Workspace: {workspace_dir.resolve()}" in completed.stdout
+
+
 def test_remove_alias_persists_after_reingest(tmp_path: Path) -> None:
     # remove_alias 后再次 ingest，冲突 alias 不应重新回到人工覆盖层里。
     source_dir = tmp_path / "raw"
