@@ -24,6 +24,102 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     return json.loads(completed.stdout)
 
 
+def run_cli_expect_exit(*args: str, expected_exit_code: int, cwd: Path | None = None) -> dict:
+    command = [sys.executable, "-m", "myagentwiki.cli", *args, "--json"]
+    completed = subprocess.run(
+        command,
+        cwd=str(cwd or REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == expected_exit_code, completed.stdout or completed.stderr
+    return json.loads(completed.stdout)
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def configure_llm_assisted_readable_concept(workspace_dir: Path, script_path: Path) -> None:
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n"
+        + "rendering:\n"
+        + "  readable_concept:\n"
+        + '    mode: "llm_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{script_path}"\n'
+        + "    timeout_seconds: 20\n",
+        encoding="utf-8",
+    )
+
+
+def configure_llm_assisted_overview(workspace_dir: Path, script_path: Path) -> None:
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n"
+        + "rendering:\n"
+        + "  overview:\n"
+        + '    mode: "llm_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{script_path}"\n'
+        + "    timeout_seconds: 20\n",
+        encoding="utf-8",
+    )
+
+
+def create_workspace_with_two_concepts(tmp_path: Path, project_name: str) -> Path:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "claim.md").write_text(
+        "# Claim\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+    (source_dir / "chunk.md").write_text(
+        "# Chunk\n\n"
+        "Chunk 是用于承载局部原文切片的证据单元。\n\n"
+        "Chunk 用于把原始资料拆成可追踪、可回链的阅读片段。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", project_name,
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim_ids = [
+        record["claim_id"]
+        for record in claim_records
+        if record.get("claim_type") == "definition"
+    ]
+    assert len(definition_claim_ids) >= 2
+    for claim_id in definition_claim_ids:
+        run_cli(
+            "claim-set-status",
+            claim_id,
+            "stable",
+            "--target-dir", str(workspace_dir),
+        )
+    return workspace_dir
+
+
 def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     # 这条回归验证 query_normalizer 已经真正接入：
     # 用 alias 命中时，不只返回页面，还要回传 alias/canonical 线索。
@@ -81,6 +177,91 @@ def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Pat
     assert result["results"]
     assert result["results"][0]["type"] == "concept-summary"
     assert result["results"][0]["intent_boost"] >= 1.0
+
+
+def test_claim_set_status_stable_generates_readable_concept_page(tmp_path: Path) -> None:
+    # 第二阶段里，stable claim 应额外生成更适合人阅读的 concept 页，
+    # 同时保留原来的 concept-summary 证据页。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadableConceptGeneration",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    concept_summary_page = next(record for record in page_records if record.get("type") == "concept-summary")
+    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
+
+    assert readable_concept_page["canonical_id"] == concept_summary_page["canonical_id"]
+    assert readable_concept_page["status"] == "stable"
+    assert readable_concept_page["page_path"].endswith("/index.md")
+    assert readable_concept_page["claim_ids"] == [definition_claim["claim_id"]]
+
+    page_text = (workspace_dir / readable_concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "# 知识声明层" in page_text
+    assert "## 摘要 / Summary" in page_text
+    assert "## 关键要点 / Key Points" in page_text
+    assert "当前版本基于 1 条稳定 Claim、1 个来源整理。" in page_text
+
+
+def test_query_definition_prefers_readable_concept_once_stable_page_exists(tmp_path: Path) -> None:
+    # 一旦 stable claim 产出了 concept 页，定义类问题应优先命中可读页，而不是证据摘要页。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadableConceptQueryPreference",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir))
+
+    assert result["intent"] == "definition"
+    assert result["results"]
+    assert result["results"][0]["type"] == "concept"
+    assert result["results"][0]["status"] == "stable"
+    assert result["results"][0]["intent_boost_reason"] == "intent_definition_prefers_readable_concept"
+    assert any(item["type"] == "concept-summary" for item in result["results"])
 
 
 def test_concept_page_title_and_path_are_human_readable_for_question_headings(tmp_path: Path) -> None:
@@ -238,6 +419,44 @@ def test_concept_page_prefers_standalone_definition_over_dependent_clause(tmp_pa
     assert "## 核心陈述 / Canonical Claim" in page_text
     assert "旨在复制粘贴到你自己的 LLM Agent 中" in page_text
     assert "具体细节由你的 Agent 与你共同构建" in page_text
+
+
+def test_concept_page_prefers_claim_aligned_with_section_topic(tmp_path: Path) -> None:
+    # 同一来源里即使出现共享词汇的其他陈述，概念页代表陈述也应优先贴合当前 section 主题。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# BM25 和向量检索的差异\n\n"
+        "BM25 和向量检索的差异在于，BM25 主要依赖关键词匹配和词频统计。\n\n"
+        "向量检索主要依赖语义相似度，因此更适合补充语义召回。\n\n"
+        "这句话语义上仍然是在问 raw/wiki 分离，但字面词不完全一样。这时向量检索可以补充召回。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ConceptTopicAlignmentRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_page = next(
+        record
+        for record in page_records
+        if record.get("type") == "concept-summary" and record.get("canonical_id") == "concept:bm25_和向量检索的差异"
+    )
+
+    page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
+    assert "# BM25 和向量检索的差异" in page_text
+    assert "代表陈述: BM25 和向量检索的差异在于，BM25 主要依赖关键词匹配和词频统计" in page_text
+    assert "代表陈述: 这句话语义上仍然是在问 raw/wiki 分离" not in page_text
 
 
 def test_concept_page_claim_type_label_is_not_rendered_as_markdown_link(tmp_path: Path) -> None:
@@ -428,6 +647,503 @@ def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path)
     report_text = report_path.read_text(encoding="utf-8")
     assert "Lint Report" in report_text
     assert "search_index_covers_live_pages" in report_text
+
+
+def test_lint_allows_concept_and_concept_summary_to_share_canonical_id(tmp_path: Path) -> None:
+    # 第二阶段会让 concept 与 concept-summary 同时在线；
+    # lint 应认可这种“同 canonical、不同页型”的页面家族结构。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "CanonicalPageFamilyRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    shared_canonical_pages = [
+        record
+        for record in page_records
+        if record.get("canonical_id") == "concept:知识声明层"
+    ]
+    assert {record["type"] for record in shared_canonical_pages} == {"concept", "concept-summary"}
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in result["checks"]}
+
+    assert result["summary"]["ok"] is True
+    assert checks["canonical_page_family_valid"]["ok"] is True
+
+
+def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(tmp_path: Path) -> None:
+    # 第三阶段允许对 concept 阅读页做 LLM 辅助润色，
+    # 但只应在显式开启配置后生效，而且改写内容必须仍然绑在 stable claim 上。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "LLMAssistedReadableConcept",
+        "--target-dir", str(workspace_dir),
+    )
+
+    rewriter_script = tmp_path / "rewrite_readable_concept.py"
+    rewriter_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "payload = json.load(sys.stdin)\n"
+        "canonical = payload['canonical_claim']\n"
+        "claim_id = canonical['claim_id']\n"
+        "title = payload['title']\n"
+        "practical_claim_id = next(\n"
+        "    (\n"
+        "        item['claim_id']\n"
+        "        for item in payload['stable_claims']\n"
+        "        if '用于承载可追踪、可合并、可审计的结论' in item['text']\n"
+        "    ),\n"
+        "    claim_id,\n"
+        ")\n"
+        "json.dump({\n"
+        "    'summary': f'{title} 是位于 chunk 与 wiki 之间的独立知识声明层，可作为知识沉淀的稳定阅读入口。',\n"
+        "    'key_points': [\n"
+        "        {\n"
+        "            'claim_id': claim_id,\n"
+        "            'text': f'{title} 是位于 chunk 与 wiki 之间的独立知识声明层。',\n"
+        "        }\n"
+        "    ],\n"
+        "    'practical_notes': [\n"
+        "        {\n"
+        "            'claim_id': practical_claim_id,\n"
+        "            'text': f'{title} 用于承载可追踪、可合并、可审计的结论。',\n"
+        "        }\n"
+        "    ],\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+    configure_llm_assisted_readable_concept(workspace_dir, rewriter_script)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    stable_claim_ids = [record["claim_id"] for record in claim_records]
+    for claim_id in stable_claim_ids:
+        run_cli(
+            "claim-set-status",
+            claim_id,
+            "stable",
+            "--target-dir", str(workspace_dir),
+        )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
+    page_text = (workspace_dir / readable_concept_page["page_path"]).read_text(encoding="utf-8")
+
+    assert readable_concept_page["summary"] == "知识声明层 是位于 chunk 与 wiki 之间的独立知识声明层，可作为知识沉淀的稳定阅读入口。"
+    assert "知识声明层 是位于 chunk 与 wiki 之间的独立知识声明层，可作为知识沉淀的稳定阅读入口。" in page_text
+    assert "- 知识声明层 是位于 chunk 与 wiki 之间的独立知识声明层。" in page_text
+    assert "- 知识声明层 用于承载可追踪、可合并、可审计的结论。" in page_text
+
+
+def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounded(tmp_path: Path) -> None:
+    # 如果 LLM 输出没有绑定到允许的 claim 或内容明显跑偏，应自动回退到第二阶段的确定性模板。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "LLMAssistedFallback",
+        "--target-dir", str(workspace_dir),
+    )
+
+    rewriter_script = tmp_path / "rewrite_readable_concept_bad.py"
+    rewriter_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "json.load(sys.stdin)\n"
+        "json.dump({\n"
+        "    'summary': '这是一个完全脱离 claim 的新说法。',\n"
+        "    'key_points': [\n"
+        "        {'claim_id': 'claim_fake', 'text': '这个系统主要依赖向量数据库。'}\n"
+        "    ],\n"
+        "    'practical_notes': [\n"
+        "        {'claim_id': 'claim_fake', 'text': '应该直接跳过证据页。'}\n"
+        "    ],\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+    configure_llm_assisted_readable_concept(workspace_dir, rewriter_script)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
+    page_text = (workspace_dir / readable_concept_page["page_path"]).read_text(encoding="utf-8")
+
+    assert readable_concept_page["summary"] == "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 1 条稳定 Claim、1 个来源整理。"
+    assert "这是一个完全脱离 claim 的新说法。" not in page_text
+    assert "这个系统主要依赖向量数据库。" not in page_text
+    assert "## 关键要点 / Key Points" in page_text
+
+
+def test_render_readable_concept_command_returns_render_metadata_and_page_text(tmp_path: Path) -> None:
+    # 第四/五阶段把 readable concept 渲染收口成正式 CLI 命令，
+    # 并进一步抽成通用 render-page 入口，便于后续接更多页面类型。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadableConceptRenderCommand",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
+
+    result = run_cli(
+        "render-readable-concept",
+        "--page-id", readable_concept_page["page_id"],
+        "--target-dir", str(workspace_dir),
+    )
+
+    assert result["summary"]["page_count"] == 1
+    assert result["pages"][0]["page_id"] == readable_concept_page["page_id"]
+    assert result["pages"][0]["render_target"] == "readable_concept"
+    assert result["pages"][0]["render_mode"] == "llm_assisted"
+    assert result["pages"][0]["render_status"] == "deterministic_fallback"
+    assert "# 知识声明层" in result["page_text"]
+    assert "## 摘要 / Summary" in result["page_text"]
+
+
+def test_render_page_command_supports_generic_render_target_selector(tmp_path: Path) -> None:
+    # 第五阶段开始，通用 render-page 应能按 render_target 统一查看页面，
+    # 而不是每种页面类型都各开一个平行命令。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "GenericRenderPageCommand",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    result = run_cli(
+        "render-page",
+        "--render-target", "readable_concept",
+        "--claim-id", definition_claim["claim_id"],
+        "--target-dir", str(workspace_dir),
+    )
+
+    assert result["render_target"] == "readable_concept"
+    assert result["summary"]["page_count"] == 1
+    assert result["pages"][0]["render_target"] == "readable_concept"
+    assert result["pages"][0]["canonical_id"] == "concept:知识声明层"
+    assert "# 知识声明层" in result["page_text"]
+
+
+def test_stable_multi_concept_workspace_generates_overview_page(tmp_path: Path) -> None:
+    # 第六阶段引入 overview，先验证当工作区里已有多个稳定可读概念页时，
+    # 系统会自动补出一个工作区级综述入口。
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "WorkspaceOverviewGeneration")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    overview_page = next(record for record in page_records if record.get("type") == "overview")
+
+    assert overview_page["render_target"] == "overview"
+    assert overview_page["status"] == "stable"
+    assert overview_page["canonical_id"] == "overview:workspace"
+    assert overview_page["page_path"] == "wiki/overview/index.md"
+    assert len(overview_page["claim_ids"]) >= 2
+
+    page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
+    assert "## 工作区综述 / Workspace Overview" in page_text
+    assert "## 主题导览 / Theme Map" in page_text
+    assert "## 推荐阅读路径 / Suggested Reading Path" in page_text
+    assert "## 来源覆盖 / Source Coverage" in page_text
+    assert "来源页:" in page_text
+    assert "Claim" in page_text
+    assert "Chunk" in page_text
+
+
+def test_render_page_command_supports_overview_render_target(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "WorkspaceOverviewRender")
+
+    result = run_cli(
+        "render-page",
+        "--render-target", "overview",
+        "--canonical-id", "overview:workspace",
+        "--target-dir", str(workspace_dir),
+    )
+
+    assert result["render_target"] == "overview"
+    assert result["summary"]["page_count"] == 1
+    assert result["pages"][0]["render_target"] == "overview"
+    assert result["pages"][0]["canonical_id"] == "overview:workspace"
+    assert "## 工作区综述 / Workspace Overview" in result["page_text"]
+
+
+def test_query_overview_intent_prefers_overview_page_for_macro_question(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "WorkspaceOverviewQuery")
+
+    result = run_cli("query", "这个工作区主要讲什么", "--target-dir", str(workspace_dir))
+
+    assert result["intent"] == "overview"
+    assert result["results"]
+    assert result["results"][0]["type"] == "overview"
+    assert result["results"][0]["canonical_id"] == "overview:workspace"
+    assert result["results"][0]["intent_boost_reason"] == "intent_overview_prefers_overview_page"
+    assert result["results"][0]["reading_pack"]["focus"] == "workspace_overview"
+
+
+def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverview")
+
+    rewriter_script = tmp_path / "rewrite_overview.py"
+    rewriter_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "payload = json.load(sys.stdin)\n"
+        "first_theme = payload['theme_rows'][0]\n"
+        "second_theme = payload['theme_rows'][1]\n"
+        "json.dump({\n"
+        "    'summary': '这个工作区主要围绕 Claim 和 Chunk 两个稳定主题展开。',\n"
+        "    'theme_rows': [\n"
+        "        {\n"
+        "            'page_id': first_theme['page_id'],\n"
+        "            'text': '这个主题解释了 Claim 作为独立知识声明层的定位。',\n"
+        "        },\n"
+        "        {\n"
+        "            'page_id': second_theme['page_id'],\n"
+        "            'text': '这个主题说明了 Chunk 作为证据切片单元的作用。',\n"
+        "        },\n"
+        "    ],\n"
+        "    'reading_path': [\n"
+        "        {\n"
+        "            'page_id': first_theme['page_id'],\n"
+        "            'text': '如果你想先建立全局认识，先读 Claim 主题。',\n"
+        "        },\n"
+        "        {\n"
+        "            'page_id': second_theme['page_id'],\n"
+        "            'text': '如果你想继续追证据结构，再看 Chunk 主题。',\n"
+        "        },\n"
+        "    ],\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+    configure_llm_assisted_overview(workspace_dir, rewriter_script)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    overview_page = next(record for record in page_records if record.get("type") == "overview")
+    page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
+
+    assert overview_page["render_status"] == "llm_assisted"
+    assert overview_page["summary"] == "这个工作区主要围绕 Claim 和 Chunk 两个稳定主题展开。"
+    assert "这个主题解释了 Claim 作为独立知识声明层的定位。" in page_text
+    assert "如果你想先建立全局认识，先读 Claim 主题。" in page_text
+    assert "## 改写回绑 / Rewrite Traceability" in page_text
+    assert "<summary>查看 overview 改写句与其回绑页面</summary>" in page_text
+    assert "主题导览句: `这个主题解释了 Claim 作为独立知识声明层的定位。`" in page_text
+    assert "推荐阅读句: `如果你想先建立全局认识，先读 Claim 主题。`" in page_text
+
+
+def test_llm_assisted_overview_page_falls_back_when_rewrite_is_ungrounded(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverviewFallback")
+
+    rewriter_script = tmp_path / "rewrite_overview_bad.py"
+    rewriter_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "json.load(sys.stdin)\n"
+        "json.dump({\n"
+        "    'summary': '这个工作区的核心是向量数据库和外部缓存。',\n"
+        "    'theme_rows': [\n"
+        "        {\n"
+        "            'page_id': 'page_fake',\n"
+        "            'text': '这个主题主要讲多代理调度系统。',\n"
+        "        }\n"
+        "    ],\n"
+        "    'reading_path': [\n"
+        "        {\n"
+        "            'page_id': 'page_fake',\n"
+        "            'text': '建议先读缓存系统设计。',\n"
+        "        }\n"
+        "    ],\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+    configure_llm_assisted_overview(workspace_dir, rewriter_script)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    overview_page = next(record for record in page_records if record.get("type") == "overview")
+    page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
+
+    assert overview_page["render_status"] == "deterministic_fallback"
+    assert "这个工作区的核心是向量数据库和外部缓存。" not in page_text
+    assert "建议先读缓存系统设计。" not in page_text
+    assert "## 推荐阅读路径 / Suggested Reading Path" in page_text
+
+
+def test_lint_accepts_generated_overview_page_render_metadata(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "WorkspaceOverviewLint")
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in result["checks"]}
+
+    assert result["summary"]["ok"] is True
+    assert checks["overview_render_metadata_present"]["ok"] is True
+    assert checks["overview_pages_grounded"]["ok"] is True
+    assert checks["alias_conflicts_absent"]["ok"] is True
+
+
+def test_lint_flags_overview_page_when_manual_edit_breaks_grounding(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "OverviewGroundingLint")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    overview_page = next(record for record in page_records if record.get("type") == "overview")
+    page_path = workspace_dir / overview_page["page_path"]
+    page_text = page_path.read_text(encoding="utf-8")
+    page_text = page_text.replace(
+        "Claim、Chunk 是当前工作区里已经沉淀出的稳定主题。",
+        "这份综述主要讲向量数据库、缓存和多代理调度。",
+    )
+    page_path.write_text(page_text, encoding="utf-8")
+
+    result = run_cli_expect_exit("lint", "--target-dir", str(workspace_dir), expected_exit_code=1)
+    checks = {item["name"]: item for item in result["checks"]}
+
+    assert result["summary"]["ok"] is False
+    assert checks["overview_pages_grounded"]["ok"] is False
+
+
+def test_lint_flags_readable_concept_page_when_manual_edit_breaks_grounding(tmp_path: Path) -> None:
+    # 第四阶段 lint 应能发现可读页被手工改坏、开始脱离其 claim 证据边界的情况。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识声明层\n\n"
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadableConceptGroundingLint",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    run_cli(
+        "claim-set-status",
+        definition_claim["claim_id"],
+        "stable",
+        "--target-dir", str(workspace_dir),
+    )
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
+    page_path = workspace_dir / readable_concept_page["page_path"]
+    page_text = page_path.read_text(encoding="utf-8")
+    page_text = page_text.replace(
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 1 条稳定 Claim、1 个来源整理。",
+        "这个页面现在主要讲向量数据库和外部缓存系统。",
+    )
+    page_path.write_text(page_text, encoding="utf-8")
+
+    result = run_cli_expect_exit("lint", "--target-dir", str(workspace_dir), expected_exit_code=1)
+    checks = {item["name"]: item for item in result["checks"]}
+
+    assert result["summary"]["ok"] is False
+    assert checks["readable_concept_pages_grounded"]["ok"] is False
+    assert "summary_not_grounded" in checks["readable_concept_pages_grounded"]["details"]
 
 
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
@@ -848,3 +1564,41 @@ def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
     reading_pack = timeline["results"][0]["reading_pack"]
     assert reading_pack["focus"] == "timeline_evidence"
     assert reading_pack["timeline_sources"]
+
+
+def test_query_reading_depth_deep_returns_thicker_reading_pack(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 知识沉淀流程\n\n"
+        "如何生成 wiki 页面：第一步先标准化原始资料。\n\n"
+        "第二步再切 chunk，确保来源可追踪。\n\n"
+        "第三步继续抽取 claim，沉淀稳定结论。\n\n"
+        "第四步最后生成 wiki 页面，并检查阅读入口。\n\n"
+        "补充说明：review 流程用于处理冲突与不确定项。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadingDepthRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    standard = run_cli("query", "如何生成 wiki 页面", "--target-dir", str(workspace_dir))
+    deep = run_cli("query", "如何生成 wiki 页面", "--target-dir", str(workspace_dir), "--reading-depth", "deep")
+
+    assert standard["reading_depth"] == "standard"
+    assert standard["reading_depth_limits"] == {"claim_limit": 3, "chunk_limit": 2}
+    assert standard["results"][0]["reading_pack"]["reading_depth"] == "standard"
+
+    assert deep["reading_depth"] == "deep"
+    assert deep["reading_depth_limits"] == {"claim_limit": 6, "chunk_limit": 5}
+    assert deep["results"][0]["reading_pack"]["reading_depth"] == "deep"
+    assert len(deep["results"][0]["reading_pack"]["matched_chunks"]) >= len(standard["results"][0]["reading_pack"]["matched_chunks"])
+    assert standard["results"][0]["reading_pack"]["source_trail"] == []
+    assert deep["results"][0]["reading_pack"]["source_trail"]
+    assert deep["results"][0]["reading_pack"]["source_trail"][0]["source_path"].endswith("topic.md")

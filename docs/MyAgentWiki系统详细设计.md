@@ -1,4 +1,4 @@
-# MyAgentWiki系统详细设计 V1
+# MyAgentWiki系统详细设计
 
 ## 概要 Summary
 
@@ -12,6 +12,11 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - 支持 Claim 到 Wiki 页面的反向引用统计与检索。
 - 使用多字段 BM25 打分，并叠加页面类型权重和页面状态权重。
 - 对冲突、近重复、替换稳定结论等高风险更新，进入结构化人工审核队列。
+
+当前实现采用 `deterministic first`：
+- 事实层、证据层、状态层优先由 Python 脚本和显式账本生成。
+- LLM 主要参与页面可读性改写、导览组织和表达优化。
+- LLM 产物不能成为新的事实来源；若改写无法 grounded 到既有 Claim/Page，则必须自动回退到 deterministic fallback。
 
 ## 系统结构 System Structure
 
@@ -857,10 +862,16 @@ V1 的 query 不只是返回排序结果，还必须返回一个足够驱动 Age
 - `previous_chunk`（前一切块）
 - `next_chunk`（后一切块）
 
+V1 当前实现说明：
+- `query` 当前支持 `reading_depth`，默认 `standard`，可显式切到 `deep`。
+- `standard` 适合先定位页面与核心证据；`deep` 会返回更厚的 `reading_pack`，并额外附带按来源聚合的 `source_trail`。
+- `source_trail` 的目标不是做新的摘要生成，而是把已命中的 Claim/Chunk 沿来源维度重新收束，帮助 Agent 在大上下文窗口下继续做 deterministic 的证据阅读。
+
 工程约束：
 - Agent 默认先读结果页和排序解释，再决定是否进入 `reading_pack.claims`。
 - 若问题涉及证据、冲突、时间线或引用，不能只消费页面摘要，必须继续下钻 `claims/chunks/source summaries`。
 - Query 输出的目标不是“直接替用户回答一切”，而是把正确阅读路径打包出来。
+- 即使在 `deep` 模式下，也优先扩充结构化证据路径，而不是直接让 LLM 重新总结合成。
 
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。
@@ -1023,6 +1034,10 @@ V1 当前实现说明：
   - 逐条展开的证据 chunk 链接，以及对应 `section_path`（章节路径）和行号
 - `page_id / source_id / chunk_id` 等内部标识仍然保留，但会降到次级信息，避免压过真正用于阅读和下钻的页面标题、原始路径与证据位置。
 - 当前来源摘要页中的 `Chunks`（证据切块）列表也会直接链接到 `chunks/<source_id>.jsonl`，方便从来源页继续下钻切块文件本体。
+- 当前已存在第二层可读页体系：`concept`（人类可读概念页）与 `overview`（工作区综述页）。
+- 当前这两类页面默认渲染模式都是 `llm_assisted`，但底座仍然是 deterministic：先由脚本计算 canonical claim、稳定主题、source coverage、推荐阅读路径等结构，再允许 LLM 在 grounded 约束下做可读性改写。
+- `concept` 与 `overview` 页面都必须记录 `render_target / render_mode / render_status`。
+- `overview` 在 `llm_assisted` 成功时，会额外生成折叠式 `Rewrite Traceability` 区块，显式展示改写句与其回绑页面，避免综述页长出新的“幻觉层”。
 
 ### 恢复机制
 - 自动流程写入 review item 后暂停危险动作。

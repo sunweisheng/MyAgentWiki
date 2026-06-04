@@ -41,5 +41,5 @@
 
 如果需要当前系统的正式规则、实现边界和工作流约定，应优先回到：
 
-- [../MyAgentWiki系统详细设计-V1.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计-V1.md)
+- [../MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
 - [../index.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/index.md)

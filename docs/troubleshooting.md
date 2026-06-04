@@ -102,6 +102,7 @@
 1. 先试短查询词
 2. 再试“什么是 X”“X 的来源证据”这类意图更明确的问法
 3. 查看 `indexes/aliases.json` 是否已有对应 alias / canonical
+4. 如果你已经命中到正确页面，但还想一次拿到更完整的 Claim / Chunk / 来源路径，改用 `--reading-depth deep`
 
 ## 7. 出现 alias conflict review
 

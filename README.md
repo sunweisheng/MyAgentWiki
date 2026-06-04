@@ -23,6 +23,12 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 - 高频、固定、适合确定性实现的动作优先交给 Python 脚本
 - 必须依赖大模型理解、抽取、比较、冲突判断、页面编写的动作交给 Agent
 
+当前版本采用 `deterministic first` 原则：
+
+- 事实层、证据层、状态层优先由脚本和显式数据结构生成
+- LLM 主要参与可读性改写、导览组织和表达优化
+- 一切 LLM 改写都必须 grounded，无法回绑时自动回退到 deterministic 文案
+
 ## 核心理念
 
 MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知识逐步编译成一个持续维护的 Wiki：
@@ -184,7 +190,7 @@ New-Item -ItemType Junction `
 
 - [docs/index.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/index.md)
   - 文档总入口，包含主设计、运行说明、排障文档和项目资料导航
-- [docs/MyAgentWiki系统详细设计-V1.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计-V1.md)
+- [docs/MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前版本的系统详细设计主文档
 
 ## 快速开始 / Quick Start
@@ -241,6 +247,7 @@ python -m myagentwiki lint --target-dir /path/to/MyNotesWiki
 
 ```bash
 python -m myagentwiki query "什么是知识声明层" --target-dir /path/to/MyNotesWiki
+python -m myagentwiki query "如何生成 wiki 页面" --reading-depth deep --target-dir /path/to/MyNotesWiki
 python -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
 ```
 
@@ -270,7 +277,7 @@ MyAgentWiki/
 ├── config/
 │   └── runtime_manifest.yml
 ├── docs/
-│   ├── MyAgentWiki系统详细设计-V1.md
+│   ├── MyAgentWiki系统详细设计.md
 │   ├── index.md
 │   ├── runtime-deps.md
 │   ├── troubleshooting.md
@@ -286,7 +293,7 @@ MyAgentWiki/
 
 主要文件说明：
 
-- `docs/MyAgentWiki系统详细设计-V1.md`
+- `docs/MyAgentWiki系统详细设计.md`
   - 当前版本的详细设计主文档
 
 - `Agent.md`
@@ -368,6 +375,9 @@ V1 已实现这些命令入口：
   - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
+  - 当前已自动生成人类可读 `concept` 页与工作区级 `overview` 页，且默认渲染模式为 `llm_assisted`
+  - `concept` 与 `overview` 的 LLM 改写都要求 grounded；不合格时会自动回退到 deterministic fallback
+  - `overview` 页当前支持 grounded overview rewrite，并在 `llm_assisted` 成功时显示折叠式 `Rewrite Traceability`
 - `myagentwiki lint`
   - 已实现仓库骨架 / 工作区结构检查，以及 `chunk_id` / `claim_id` / `page_id` 唯一性、Claim 溯源、页面记录完整性、`reviews.jsonl` / `error_log.jsonl` / `pages.jsonl` 存在性检查
   - 已补充 `canonical_id` 唯一性、alias registry 覆盖、search index 覆盖、lint 报告文件写回
@@ -379,8 +389,10 @@ V1 已实现这些命令入口：
   - `evidence` 类问题会更偏向 `source-summary`，并在阅读包里优先保留可回链的 claim/chunk 证据线索
   - `compare / timeline / how_to` 也会在阅读包中返回不同 focus，帮助 Agent 判断优先读声明、时间线证据还是步骤性 chunk
   - `timeline` 类问题会额外返回按来源分组的 `timeline_sources`
+  - 当前支持 `--reading-depth standard|deep`
+  - `deep` 模式会在保持 deterministic 的前提下返回更厚的 `reading_pack`，并额外给出按来源聚合的 `source_trail`
   - 当前输出候选页面、得分解释、命中字段与命中 token，并返回阅读包 `reading_pack`
-  - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索
+  - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；`deep` 模式下还会附带 `source_trail`
 - `myagentwiki review-list`
   - 已实现 review 队列查看，可列出待处理项、候选 claim、推荐动作与允许动作
 - `myagentwiki review-apply`
@@ -458,6 +470,10 @@ python scripts/validate_workflow.py --keep-workspace
   - 当前已加入一层轻量命名清洗，优先使用 `section_path` 和短主题短语生成更像 Wiki 的页面名
   - 当前概念页里的 `Source Pages / Source Evidence` 会分别展示来源摘要页入口、原始来源文件入口、覆盖范围，以及按条列出的证据切块链接
   - 页面文件名若包含空格等特殊字符，目录页与页面间链接会自动使用 URL 编码后的相对路径
+- `wiki/overview/index.md`
+  - 工作区级综述入口页，默认在有多个稳定可读概念页时自动生成
+  - 当前支持 grounded 的 `llm_assisted` 摘要、主题导览和推荐阅读路径改写
+  - 当 overview 改写成功时，会额外生成折叠式 `Rewrite Traceability` 区块，展示改写句与回绑页面
 - `state/*.jsonl`
   - 全局索引与状态账本，包括 `sources`、`normalized`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
   - 其中 `state/pages.jsonl` 会保留已被自动移除页面的历史记录，便于追踪页面演化；但 `removed` 页面不会继续进入在线检索与页面索引
@@ -481,15 +497,17 @@ python scripts/validate_workflow.py --keep-workspace
 - 冲突和重复风险会进入 `reviews/` 与 `state/reviews.jsonl`
 - 查询会优先命中高价值页面类型，并给出字段级打分解释
 - 查询结果已经可以附带第一版 claim/chunk/source 阅读包，方便 Agent 继续证据阅读
+- `deep` 查询模式当前还能返回按来源收束的 `source_trail`，帮助 Agent 用更大的上下文窗口继续追证据，但仍保持 deterministic first
 - query 已接入持久化页面检索索引，索引存在时优先读取 `indexes/search_pages.jsonl`
 - query 已接入 alias registry，alias 命中时会回传 canonical 目标
+- 可读 `concept` 页与 `overview` 页默认允许 `llm_assisted` 改写，但所有改写都要通过 grounded 校验，否则自动回退
 
 ## 文档说明
 
 如果你想快速理解项目，建议阅读顺序如下：
 
 1. `README.md`
-2. `docs/MyAgentWiki系统详细设计-V1.md`
+2. `docs/MyAgentWiki系统详细设计.md`
 3. `docs/runtime-deps.md`
 4. `docs/project-materials/` 中的学习与工程记录
 5. `docs/troubleshooting.md`

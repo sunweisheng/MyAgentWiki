@@ -51,6 +51,6 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 按需再读这些文件：
 
 - [README.md](README.md)：项目介绍、安装与使用说明
-- [MyAgentWiki系统详细设计-V1.md](docs/MyAgentWiki系统详细设计-V1.md)：详细设计与当前实现边界
+- [MyAgentWiki系统详细设计.md](docs/MyAgentWiki系统详细设计.md)：详细设计与当前实现边界
 - [docs/runtime-deps.md](docs/runtime-deps.md)：依赖与跨平台说明
 - [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障排查

@@ -11,8 +11,8 @@
 
 ## 核心文档
 
-- [MyAgentWiki系统详细设计-V1.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计-V1.md)
-  - 当前版本的主设计文档，适合先理解系统目标、数据模型、工作流和实现边界。
+- [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
+  - 当前版本的主设计文档，适合先理解系统目标、数据模型、工作流、`deterministic first` 原则，以及 `query / overview` 的最新实现边界。
 
 - [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
   - 运行依赖、平台差异、安装方式与降级能力说明。
@@ -39,7 +39,7 @@
 
 ## 建议阅读顺序
 
-1. [MyAgentWiki系统详细设计-V1.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计-V1.md)
+1. [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
 2. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
 3. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
 4. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
