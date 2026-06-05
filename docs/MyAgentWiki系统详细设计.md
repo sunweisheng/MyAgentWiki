@@ -1138,7 +1138,8 @@ V1 当前实现说明：
 - `assign_alias`：用于 alias conflict review，把冲突 alias 指定给目标页面，并写入持久化 alias 覆盖层。
 - `remove_alias`：用于 alias conflict review，把冲突 alias 从页面覆盖层中移除。
 - 当前 alias 覆盖层已经按“基于 live page 当前 alias 集合增删”的方式实现，避免人工处理单个 alias 时误伤该页原有其他 alias。
-- 当前 `assign_alias / remove_alias` 已补充“重复 ingest 后仍然保持人工裁决结果”的回归测试。
+- 当前 `assign_alias / remove_alias` 会先预演 alias 覆盖结果并重建 alias index，确认 alias 真正收敛后才写回账本，避免出现“命令成功但冲突仍存在”的假收敛。
+- 当前 `assign_alias / remove_alias` 已补充“重复 ingest 后仍然保持人工裁决结果”与“过期 alias review 自动收口”的回归测试。
 
 ### 自动化分级
 V1 引入四级自动化边界：
@@ -1199,6 +1200,7 @@ V1 当前实现说明：
 - 当前 `review-apply` 执行动作后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与 `indexes/search_pages.jsonl`。
 - `edit_then_resume` 当前已支持“人工先改 Claim 文件，再恢复页面和索引重建”。
 - 当前 `alias_conflict`（别名冲突）在 `review-apply` 后，若人工覆盖层已消除冲突，下一轮 ingest 不会重新打开同一条 open review。
+- 当前 `review-list` 与 `review-apply` 在读取 review 前，会先按最新 live pages 与 alias index 刷新 alias conflict 队列；若某条 alias review 已不再对应真实冲突，会自动从 active/open 视图转入历史态。
 
 ### Review 与状态一致性约束
 为保证 review 真正能成为恢复入口，V1 明确以下一致性规则：
@@ -1213,9 +1215,15 @@ V1 当前实现说明：
 
 3. 已失效候选不能继续留在 open review 中
 - 某个 Claim 被 merge 或 archive 后，其他 open review 对它的引用必须被重写、替换或收口。
+- 某个 alias_conflict review 若在最新 alias index 中已找不到对应冲突，也必须自动退出 active/open 集合，而不是继续作为待处理项展示。
 
 4. 人工编辑恢复必须显式走 `edit_then_resume`
 - 避免 Agent 静默把磁盘上的人工改动和内存中的旧状态混用。
+
+5. alias 类裁决必须以“真实收敛”作为成功条件
+- `assign_alias` 只有在目标 alias 最终只归属于目标页面时才应返回成功。
+- `remove_alias` 只有在目标 alias 最终不再归属于候选页面集时才应返回成功。
+- 若预演后的 alias index 仍显示冲突或残留归属，CLI 应直接报错，而不是把 review 标记为已解决。
 
 这部分是 V1 最重要的可维护性保障之一，因为系统不是一次性流水线，而是长期可恢复系统。
 

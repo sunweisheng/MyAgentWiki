@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import importlib.util
 import os
@@ -1032,6 +1033,28 @@ def remove_alias_from_overrides(
     return overrides
 
 
+def apply_alias_override_action(
+    overrides: dict,
+    live_aliases_by_page_id: dict[str, list[str]],
+    candidate_page_ids: list[str],
+    primary_page_id: str,
+    alias_value: str,
+    action: str,
+) -> dict:
+    updated_overrides = copy.deepcopy(overrides)
+    page_aliases = updated_overrides.setdefault("page_aliases", {})
+    normalized_alias = normalize_alias_value(alias_value)
+
+    for page_id in candidate_page_ids:
+        page_override = page_aliases.setdefault(page_id, {})
+        aliases = sorted(set(page_override.get("aliases", live_aliases_by_page_id.get(page_id, []))))
+        aliases = [alias for alias in aliases if normalize_alias_value(alias) != normalized_alias]
+        if action == "assign_alias" and page_id == primary_page_id and alias_value not in aliases:
+            aliases.append(alias_value)
+        page_override["aliases"] = sorted(set(aliases))
+    return updated_overrides
+
+
 def build_alias_index(page_records: list[dict]) -> dict:
     # alias registry 统一记录 canonical_id、title、aliases 的双向映射关系。
     # query、lint、Agent 约定都依赖它，避免各自维护一份别名世界观。
@@ -1207,6 +1230,63 @@ def build_alias_conflict_reviews(
         touched_review_ids.append(review_record["review_id"])
 
     return created_reviews, touched_review_ids
+
+
+def archive_stale_alias_conflict_reviews(
+    live_reviews_by_id: dict[str, dict],
+    historical_reviews_by_id: dict[str, dict],
+    active_alias_review_ids: set[str],
+) -> set[str]:
+    # alias 冲突一旦在当前 alias index 中消失，旧 review 就不该继续伪装成 active。
+    # 这里把“仍为 alias_conflict、但已不在当前冲突集合里”的记录自动转入历史态。
+    archived_review_ids: set[str] = set()
+    for review_id, review_record in list(live_reviews_by_id.items()):
+        if review_record.get("kind") != "alias_conflict":
+            continue
+        if review_id in active_alias_review_ids:
+            continue
+        archived_record = dict(review_record)
+        archived_record["status"] = "resolved"
+        archived_record["resolved_at"] = archived_record.get("resolved_at") or utc_now_iso()
+        archived_record["lifecycle_status"] = "superseded"
+        archived_record["archived_at"] = utc_now_iso()
+        live_reviews_by_id.pop(review_id, None)
+        historical_record = convert_review_record_to_historical(archived_record)
+        historical_reviews_by_id[historical_record["review_id"]] = historical_record
+        archived_review_ids.add(review_id)
+    return archived_review_ids
+
+
+def refresh_alias_conflict_reviews(
+    target: Path,
+    live_reviews_by_id: dict[str, dict],
+    historical_reviews_by_id: dict[str, dict],
+    page_records: list[dict] | None = None,
+) -> tuple[dict, set[str], set[str]]:
+    # 把 alias index 与 review 账本在一个入口里重新对齐：
+    # 1. 基于当前 live pages 重建 alias index
+    # 2. 刷新仍存在的 alias_conflict review
+    # 3. 将已消失的 alias_conflict review 转成历史态
+    if page_records is None:
+        page_records = [
+            ensure_page_lifecycle_defaults(record)
+            for record in load_jsonl(target / "state" / "pages.jsonl")
+        ]
+    alias_index = write_alias_index(target, page_records)
+    created_reviews, touched_review_ids = build_alias_conflict_reviews(alias_index, live_reviews_by_id)
+    for review_record in created_reviews:
+        live_reviews_by_id[review_record["review_id"]] = review_record
+    archived_review_ids = archive_stale_alias_conflict_reviews(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+        active_alias_review_ids=set(touched_review_ids),
+    )
+    return alias_index, set(touched_review_ids), archived_review_ids
+
+
+def alias_index_matches_for_value(alias_index: dict, alias_value: str) -> list[dict]:
+    normalized_alias = normalize_alias_value(alias_value)
+    return list(alias_index.get("alias_map", {}).get(normalized_alias, []))
 
 
 def replace_jsonl_record(path: Path, key_field: str, key_value: str, new_record: dict) -> None:
@@ -7910,6 +7990,23 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
     live_reviews_by_id, historical_reviews_by_id, all_review_records = load_review_state_maps(target)
     live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
     claim_lookup = build_claim_lookup_by_any_id(live_claims_by_id, historical_claims_by_id)
+    refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    all_review_records = build_ordered_review_state_records(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    write_jsonl(target / "state" / "reviews.jsonl", all_review_records)
+    for review_record in all_review_records:
+        write_review_file(target, review_record)
+    cleanup_superseded_record_files(
+        target=target,
+        historical_claims_by_id=historical_claims_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
 
     review_records = all_review_records
     if status_filter:
@@ -8261,39 +8358,43 @@ def rebuild_review_affected_pages(
     for claim_record in load_jsonl(target / "state" / "claims.jsonl"):
         write_claim_file(target, claim_record)
 
-    write_jsonl(
-        target / "state" / "reviews.jsonl",
-        build_ordered_review_state_records(
-            live_reviews_by_id=live_reviews_by_id,
-            historical_reviews_by_id={
-                record["review_id"]: record
-                for record in load_jsonl(target / "state" / "reviews.jsonl")
-                if not is_live_review_record(ensure_review_lifecycle_defaults(record))
-            },
-        ),
+    existing_historical_reviews_by_id = {
+        record["review_id"]: ensure_review_lifecycle_defaults(record)
+        for record in load_jsonl(target / "state" / "reviews.jsonl")
+        if not is_live_review_record(ensure_review_lifecycle_defaults(record))
+    }
+    review_state_records = build_ordered_review_state_records(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=existing_historical_reviews_by_id,
     )
-    for review_record in load_jsonl(target / "state" / "reviews.jsonl"):
+    write_jsonl(target / "state" / "reviews.jsonl", review_state_records)
+    for review_record in review_state_records:
         write_review_file(target, review_record)
 
     write_jsonl(pages_path, list(page_records_by_id.values()))
     rebuild_wiki_index(target, list(page_records_by_id.values()))
-    alias_index = write_alias_index(target, list(page_records_by_id.values()))
-    alias_conflict_reviews, _ = build_alias_conflict_reviews(alias_index, live_reviews_by_id)
-    if alias_conflict_reviews:
-        for review_record in alias_conflict_reviews:
-            live_reviews_by_id[review_record["review_id"]] = review_record
-            review_record["review_file_path"] = write_review_file(target, review_record)
-        write_jsonl(
-            target / "state" / "reviews.jsonl",
-            build_ordered_review_state_records(
-                live_reviews_by_id=live_reviews_by_id,
-                historical_reviews_by_id={
-                    record["review_id"]: record
-                    for record in load_jsonl(target / "state" / "reviews.jsonl")
-                    if not is_live_review_record(ensure_review_lifecycle_defaults(record))
-                },
-            ),
-        )
+    refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=existing_historical_reviews_by_id,
+        page_records=list(page_records_by_id.values()),
+    )
+    updated_review_state_records = build_ordered_review_state_records(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=existing_historical_reviews_by_id,
+    )
+    write_jsonl(target / "state" / "reviews.jsonl", updated_review_state_records)
+    for review_record in updated_review_state_records:
+        write_review_file(target, review_record)
+    cleanup_superseded_record_files(
+        target=target,
+        historical_claims_by_id={
+            record["claim_id"]: ensure_claim_lifecycle_defaults(record)
+            for record in load_jsonl(target / "state" / "claims.jsonl")
+            if ensure_claim_lifecycle_defaults(record).get("lifecycle_status") != "active"
+        },
+        historical_reviews_by_id=existing_historical_reviews_by_id,
+    )
     previous_search_index_records = load_search_pages_index(target)
     write_search_pages_index(
         target=target,
@@ -8535,23 +8636,42 @@ def apply_review_action(
         if not alias_to_assign:
             raise ValueError(f"{action} requires alias value from review evidence or --alias-value.")
 
+        existing_overrides = load_page_alias_overrides(target)
+        live_aliases_by_page_id = load_live_page_aliases_by_id(target)
+        updated_overrides = apply_alias_override_action(
+            overrides=existing_overrides,
+            live_aliases_by_page_id=live_aliases_by_page_id,
+            candidate_page_ids=candidate_page_ids,
+            primary_page_id=primary_page_id,
+            alias_value=alias_to_assign,
+            action=action,
+        )
+        page_records = [
+            apply_page_alias_overrides(target, ensure_page_lifecycle_defaults(record))
+            for record in load_jsonl(target / "state" / "pages.jsonl")
+        ]
+        for page_record in page_records:
+            page_id = page_record.get("page_id")
+            override = updated_overrides.get("page_aliases", {}).get(page_id, {})
+            if "aliases" in override:
+                page_record["aliases"] = sorted(set(override.get("aliases", [])))
+        projected_alias_index = build_alias_index(page_records)
+        projected_matches = alias_index_matches_for_value(projected_alias_index, alias_to_assign)
+        projected_page_ids = sorted({match.get("page_id") for match in projected_matches if match.get("page_id")})
+
         if action == "assign_alias":
-            overrides = load_page_alias_overrides(target)
-            page_aliases = overrides.setdefault("page_aliases", {})
-            live_aliases_by_page_id = load_live_page_aliases_by_id(target)
-            normalized_alias = normalize_alias_value(alias_to_assign)
+            if projected_page_ids != [primary_page_id]:
+                raise ValueError(
+                    "assign_alias did not converge alias ownership. "
+                    f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
+                )
+        elif projected_page_ids:
+            raise ValueError(
+                "remove_alias did not fully clear alias ownership. "
+                f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
+            )
 
-            for page_id in candidate_page_ids:
-                page_override = page_aliases.setdefault(page_id, {})
-                aliases = sorted(set(page_override.get("aliases", live_aliases_by_page_id.get(page_id, []))))
-                aliases = [alias for alias in aliases if normalize_alias_value(alias) != normalized_alias]
-                if page_id == primary_page_id and alias_to_assign not in aliases:
-                    aliases.append(alias_to_assign)
-                page_override["aliases"] = sorted(set(aliases))
-
-            write_page_alias_overrides(target, overrides)
-        else:
-            remove_alias_from_overrides(target, candidate_page_ids, alias_to_assign)
+        write_page_alias_overrides(target, updated_overrides)
 
         review_record["status"] = "resolved"
         review_record["resolved_at"] = utc_now_iso()
@@ -8685,6 +8805,24 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
 
     live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
     live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    if archived_alias_review_ids:
+        refreshed_review_state_records = build_ordered_review_state_records(
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+        write_jsonl(reviews_path, refreshed_review_state_records)
+        for review_state_record in refreshed_review_state_records:
+            write_review_file(target, review_state_record)
+        cleanup_superseded_record_files(
+            target=target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
 
     review_record = live_reviews_by_id.get(args.review_id) or historical_reviews_by_id.get(args.review_id)
     if review_record is None:
@@ -8737,6 +8875,26 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
         live_claims_by_id=live_claims_by_id,
         live_reviews_by_id=live_reviews_by_id,
     )
+    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    if archived_alias_review_ids:
+        write_jsonl(
+            reviews_path,
+            build_ordered_review_state_records(
+                live_reviews_by_id=live_reviews_by_id,
+                historical_reviews_by_id=historical_reviews_by_id,
+            ),
+        )
+        for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
+            write_review_file(target, review_state_record)
+        cleanup_superseded_record_files(
+            target=target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
 
     payload = {
         "workspace": str(target),

@@ -1547,6 +1547,127 @@ def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp
     )
 
 
+def test_review_list_archives_stale_alias_conflict_reviews(tmp_path: Path) -> None:
+    # 当 alias 冲突已经在当前 pages/alias index 中消失时，review-list 应自动收掉过期 alias review。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
+    (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ArchiveStaleAliasReviews",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
+    shared_alias = "共享术语"
+    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
+    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    initial_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    alias_review = next(item for item in initial_reviews["items"] if item["kind"] == "alias_conflict")
+
+    refreshed_pages = load_jsonl(pages_path)
+    for record in refreshed_pages:
+        aliases = [alias for alias in record.get("aliases", []) if alias != shared_alias]
+        record["aliases"] = aliases
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in refreshed_pages) + "\n",
+        encoding="utf-8",
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert not any(
+        item["review_id"] == alias_review["review_id"] and item["kind"] == "alias_conflict"
+        for item in refreshed_reviews["items"]
+    )
+
+    review_records = load_jsonl(workspace_dir / "state" / "reviews.jsonl")
+    historical_alias_reviews = [
+        record for record in review_records
+        if record.get("kind") == "alias_conflict"
+        and record.get("original_review_id") == alias_review["review_id"]
+    ]
+    assert historical_alias_reviews
+    assert all(record.get("lifecycle_status") == "superseded" for record in historical_alias_reviews)
+
+
+def test_assign_alias_rejects_stale_alias_review_target(tmp_path: Path) -> None:
+    # 如果 review 已经过期，assign_alias 不应假成功，而应明确提示 alias 当前已不属于该候选集。
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
+    (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "RejectStaleAliasReview",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
+    shared_alias = "共享术语"
+    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
+    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    alias_review = next(item for item in reviews["items"] if item["kind"] == "alias_conflict")
+
+    refreshed_pages = load_jsonl(pages_path)
+    for record in refreshed_pages:
+        aliases = [alias for alias in record.get("aliases", []) if alias != shared_alias]
+        record["aliases"] = aliases
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in refreshed_pages) + "\n",
+        encoding="utf-8",
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "myagentwiki.cli",
+            "review-apply",
+            alias_review["review_id"],
+            "assign_alias",
+            "--primary-page-id", alias_review["candidate_page_ids"][0],
+            "--alias-value", shared_alias,
+            "--target-dir", str(workspace_dir),
+            "--json",
+        ],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "Unknown review_id" in completed.stderr or "only supports active review items" in completed.stderr
+
+
 def test_review_apply_text_output_includes_absolute_workspace_path(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()

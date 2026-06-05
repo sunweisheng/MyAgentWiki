@@ -476,10 +476,12 @@ V1 已实现这些命令入口：
 - `myagentwiki review-list`
   - 已实现 review 队列查看，可列出待处理项、候选 claim、推荐动作与允许动作
   - JSON 输出当前会附带 `workspace_summary`，纯文本输出会先打印工作区绝对路径摘要，降低多工作区场景下的路径歧义
+  - 当前会先按最新 `state/pages.jsonl + indexes/aliases.json` 真实状态刷新 alias conflict 队列；已不再存在的 alias 冲突会自动从 active/open 视图收口到历史态，避免过期记录误导人工判断
 - `myagentwiki review-apply`
   - 已实现最小人工裁决闭环，当前支持 `keep_both`、`archive_one`、`merge`、`edit_then_resume`、`assign_alias`、`remove_alias` 六种动作
   - `assign_alias` 当前用于 alias conflict review，可把冲突 alias 指定给某个页面并写入持久化覆盖层
   - `remove_alias` 当前用于 alias conflict review，可把冲突 alias 从覆盖层中移除
+  - `assign_alias / remove_alias` 当前会先在内存里预演 alias 覆盖结果并重建 alias index；只有确认 alias 真正完成唯一归属或被完全清除时，命令才会成功，避免“命令成功但冲突仍存在”
   - review 动作会把被淘汰 claim 转入历史态，并保留 `original_claim_id` 便于追踪
   - `merge` / `archive_one` 执行后，会自动清理其他仍处于 `open` 状态的 review 中已经失效的候选 claim 引用
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑
@@ -569,6 +571,7 @@ python scripts/validate_workflow.py --keep-workspace
   - 需要人工确认的冲突、重复、近似重复等审核项
   - 当前 V1 使用“前缀 bucket + token 倒排召回 + 否定极性 / 文本相似度复核”来生成审核候选，优先减少明显漏检
   - 当前 alias registry 检测到同一 alias 指向多个 canonical 页面时，也会自动生成 `alias_conflict` review
+  - 当前 alias conflict review 若已不再对应真实 alias 冲突，会在 `review-list / review-apply / ingest` 的收口过程中自动转入历史态，而不是继续保留为 active/open
 
 当前这版最重要的是把“可追踪链路”先打通：
 
@@ -626,7 +629,7 @@ V1.1 可以继续推进：
 
 - [tests/test_query_alias_and_lint.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/test_query_alias_and_lint.py)
   - 覆盖 alias/canonical 命中、intent focus、lint 报告写回
-  - 覆盖 alias conflict review、`assign_alias / remove_alias`、以及 re-ingest 后的持久化行为
+  - 覆盖 alias conflict review、`assign_alias / remove_alias`、re-ingest 后的持久化行为，以及过期 alias review 自动收口
 
 - [tests/test_e2e_workflow.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/test_e2e_workflow.py)
   - 覆盖 `init -> ingest -> query -> review -> lint` 主闭环
