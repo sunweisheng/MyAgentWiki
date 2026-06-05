@@ -571,6 +571,7 @@ V1 当前实现说明：
 - 当前别名注册表已落地为 `indexes/aliases.json`。
 - 当前人工 alias 修正独立持久化在 `state/page_alias_overrides.json`。
 - `assign_alias / remove_alias` 当前基于 live page 的 alias 集合增删，避免人工处理单个 alias 时误伤该页原有其他 alias。
+- `state/page_alias_overrides.json` 当前按进程级串行化方式更新，避免多个 `review-apply` 并发写入时发生后写覆盖前写。
 
 ## 标准化层 Normalization Layer
 
@@ -1080,7 +1081,7 @@ V1 不实现复杂动态预算器，但规则文件中必须明确轻量阅读�
 V1 的 ingest 必须被定义为“增量编译”，而不是每次都把整个工作区当作全新项目处理。
 
 来源级规则：
-- `raw/` 按递归路径扫描。
+- `raw/` 按递归路径扫描，但会跳过任意层级中所有 `.` 开头的文件和目录。
 - 同一路径来源的多次变化通过 `version_group` 归到同一演进链。
 - 新 `source_hash` 出现时，允许生成新的 source 版本记录。
 - 旧版本来源不直接物理删除，而是通过状态和引用关系退出 live 集合。

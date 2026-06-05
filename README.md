@@ -440,6 +440,7 @@ V1 已实现这些命令入口：
   - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md` / `CLAUDE.md`、以及 query/agent 基础配置
 - `myagentwiki ingest`
   - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、最小 chunk 流程、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
+  - 扫描 `raw/` 时当前会统一跳过所有 `.` 开头的文件和目录，例如 `.DS_Store`、`.obsidian/` 及其子内容，不把这些隐藏项纳入 ingest
   - 当前规则式 Claim 草稿抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再只把可独立理解的子句作为补充候选，避免把逗号后的半句话直接推进到 Claim 层
   - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
   - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失
@@ -482,6 +483,7 @@ V1 已实现这些命令入口：
   - `assign_alias` 当前用于 alias conflict review，可把冲突 alias 指定给某个页面并写入持久化覆盖层
   - `remove_alias` 当前用于 alias conflict review，可把冲突 alias 从覆盖层中移除
   - `assign_alias / remove_alias` 当前会先在内存里预演 alias 覆盖结果并重建 alias index；只有确认 alias 真正完成唯一归属或被完全清除时，命令才会成功，避免“命令成功但冲突仍存在”
+  - `assign_alias / remove_alias` 写入 `state/page_alias_overrides.json` 时当前会做进程级串行化，避免多个 `review-apply` 并发时后写覆盖前写
   - review 动作会把被淘汰 claim 转入历史态，并保留 `original_claim_id` 便于追踪
   - `merge` / `archive_one` 执行后，会自动清理其他仍处于 `open` 状态的 review 中已经失效的候选 claim 引用
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑
@@ -496,6 +498,7 @@ V1 已实现这些命令入口：
 - 子进程调用不依赖 `bash` / `zsh`
 - `bootstrap` 直接复用当前 Python 解释器
 - `raw/` 扫描支持子目录递归
+- `raw/` 扫描会跳过所有 `.` 开头的文件和目录
 - 核心标准化主路径优先采用纯 Python
 
 当前真实边界也要说明白：

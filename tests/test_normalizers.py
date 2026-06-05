@@ -5,9 +5,12 @@ from unittest import mock
 from pathlib import Path
 
 from myagentwiki.cli import (
+    apply_alias_override_action,
     convert_image_to_markdown,
     convert_legacy_doc_to_markdown,
     convert_legacy_xls_to_markdown,
+    load_page_alias_overrides,
+    update_page_alias_overrides_with_lock,
 )
 
 
@@ -102,3 +105,35 @@ def test_convert_image_to_markdown_with_ocr_text_includes_ocr_section(tmp_path: 
     assert metadata["location_map"]["ocr"]["used"] is True
     assert metadata["location_map"]["ocr"]["ok"] is True
     assert metadata["location_map"]["ocr"]["char_count"] > 0
+
+
+def test_update_page_alias_overrides_with_lock_preserves_sequential_alias_updates(tmp_path: Path) -> None:
+    # 覆盖层更新应基于锁内最新状态叠加，避免后一轮把前一轮 alias 写丢。
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "state").mkdir(parents=True)
+    live_aliases_by_page_id = {
+        "page-a": ["原有别名A"],
+        "page-b": ["原有别名B"],
+    }
+
+    def assign_alias(alias_value: str, primary_page_id: str) -> None:
+        def updater(overrides: dict) -> dict:
+            return apply_alias_override_action(
+                overrides=overrides,
+                live_aliases_by_page_id=live_aliases_by_page_id,
+                candidate_page_ids=["page-a", "page-b"],
+                primary_page_id=primary_page_id,
+                alias_value=alias_value,
+                action="assign_alias",
+            )
+
+        update_page_alias_overrides_with_lock(workspace_dir, updater)
+
+    assign_alias("共享术语一", "page-a")
+    assign_alias("共享术语二", "page-b")
+
+    overrides = load_page_alias_overrides(workspace_dir)
+    assert "共享术语一" in overrides["page_aliases"]["page-a"]["aliases"]
+    assert "共享术语二" in overrides["page_aliases"]["page-b"]["aliases"]
+    assert "原有别名A" in overrides["page_aliases"]["page-a"]["aliases"]
+    assert "原有别名B" in overrides["page_aliases"]["page-b"]["aliases"]

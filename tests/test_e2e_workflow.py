@@ -243,3 +243,40 @@ def test_wiki_index_escapes_paths_with_spaces(tmp_path: Path) -> None:
     index_text = (workspace_dir / "wiki" / "index.md").read_text(encoding="utf-8")
     assert "wiki/concepts/" in index_text
     assert "Chunk%20Lint.md" in index_text
+
+
+def test_ingest_skips_hidden_files_and_hidden_directories_in_raw(tmp_path: Path) -> None:
+    # raw 下所有 . 开头的文件和目录都不应进入 ingest。
+    source_dir = tmp_path / "raw"
+    visible_nested_dir = source_dir / "notes"
+    hidden_dir = source_dir / ".obsidian"
+    hidden_nested_dir = source_dir / "topic" / ".drafts"
+    visible_nested_dir.mkdir(parents=True)
+    hidden_dir.mkdir(parents=True)
+    hidden_nested_dir.mkdir(parents=True)
+
+    (source_dir / "visible.md").write_text("# 可见资料\n\n这条资料应该被摄取。\n", encoding="utf-8")
+    (source_dir / ".DS_Store").write_text("ignore me", encoding="utf-8")
+    (visible_nested_dir / ".secret.md").write_text("# 隐藏资料\n\n这条不应被摄取。\n", encoding="utf-8")
+    (hidden_dir / "workspace.json").write_text("{}", encoding="utf-8")
+    (hidden_nested_dir / "draft.md").write_text("# 草稿\n\n这条也不应被摄取。\n", encoding="utf-8")
+    (visible_nested_dir / "kept.md").write_text("# 保留资料\n\n这条也应该被摄取。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "SkipHiddenRawEntries",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    ingested_paths = {
+        record["source_path"]
+        for record in load_jsonl(workspace_dir / "state" / "sources.jsonl")
+    }
+    assert ingested_paths == {"../raw/notes/kept.md", "../raw/visible.md"}
+    assert ingest_result["summary"]["created_count"] == 2

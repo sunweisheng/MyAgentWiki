@@ -25,6 +25,7 @@ from string import Template
 import ast
 import tomllib
 import tempfile
+import fcntl
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
@@ -66,6 +67,7 @@ QUERY_READING_DEPTH_LIMITS = {
 }
 ALIAS_INDEX_REL_PATH = Path("indexes") / "aliases.json"
 PAGE_ALIAS_OVERRIDES_REL_PATH = Path("state") / "page_alias_overrides.json"
+PAGE_ALIAS_OVERRIDES_LOCK_REL_PATH = Path("state") / ".page_alias_overrides.lock"
 NEGATION_MARKERS = ("不", "不是", "没有", "无法", "不能", "未", "无", "禁止", "不要", "not ", "no ", "never ", "cannot ")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
@@ -825,7 +827,11 @@ def build_latest_source_record_by_path(records: list[dict]) -> dict[str, dict]:
 
 def collect_files(root: Path) -> list[Path]:
     # 递归遍历 raw 下所有文件，允许用户按主题、来源、年份自由分子目录管理原始资料。
-    return sorted(path for path in root.rglob("*") if path.is_file())
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(root).parts)
+    )
 
 
 def infer_source_type(path: Path) -> str:
@@ -964,6 +970,11 @@ def page_alias_overrides_path(target: Path) -> Path:
     return target / PAGE_ALIAS_OVERRIDES_REL_PATH
 
 
+def page_alias_overrides_lock_path(target: Path) -> Path:
+    # review-apply 可能被多个 Agent/进程同时触发，覆盖层更新要串行化。
+    return target / PAGE_ALIAS_OVERRIDES_LOCK_REL_PATH
+
+
 def normalize_alias_value(text: str) -> str:
     # alias / canonical 查询归一化尽量沿用 claim 文本清洗逻辑，
     # 这样页面标题、别名、查询词之间更容易对齐。
@@ -992,6 +1003,41 @@ def load_page_alias_overrides(target: Path) -> dict:
 
 def write_page_alias_overrides(target: Path, payload: dict) -> None:
     write_json(page_alias_overrides_path(target), payload)
+
+
+@dataclass
+class FileLockHandle:
+    path: Path
+    file_handle: object
+
+
+def acquire_file_lock(path: Path) -> FileLockHandle:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_handle = path.open("w", encoding="utf-8")
+    fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
+    return FileLockHandle(path=path, file_handle=file_handle)
+
+
+def release_file_lock(lock_handle: FileLockHandle | None) -> None:
+    if lock_handle is None:
+        return
+    fcntl.flock(lock_handle.file_handle.fileno(), fcntl.LOCK_UN)
+    lock_handle.file_handle.close()
+
+
+def apply_page_alias_overrides_payload(page_record: dict, overrides: dict) -> dict:
+    page_aliases = overrides.get("page_aliases", {})
+    override = page_aliases.get(page_record.get("page_id"), {})
+    if not override:
+        return page_record
+
+    updated_record = dict(page_record)
+    if "aliases" in override:
+        updated_record["aliases"] = sorted(set(override.get("aliases", [])))
+    if "title" in override and override.get("title"):
+        updated_record["title"] = override["title"]
+    updated_record["updated"] = utc_now_iso()
+    return updated_record
 
 
 def load_live_page_aliases_by_id(target: Path) -> dict[str, list[str]]:
@@ -1053,6 +1099,20 @@ def apply_alias_override_action(
             aliases.append(alias_value)
         page_override["aliases"] = sorted(set(aliases))
     return updated_overrides
+
+
+def update_page_alias_overrides_with_lock(
+    target: Path,
+    updater,
+) -> dict:
+    lock_handle = acquire_file_lock(page_alias_overrides_lock_path(target))
+    try:
+        overrides = load_page_alias_overrides(target)
+        updated_overrides = updater(overrides)
+        write_page_alias_overrides(target, updated_overrides)
+        return updated_overrides
+    finally:
+        release_file_lock(lock_handle)
 
 
 def build_alias_index(page_records: list[dict]) -> dict:
@@ -1171,18 +1231,7 @@ def write_alias_index(target: Path, page_records: list[dict]) -> dict:
 def apply_page_alias_overrides(target: Path, page_record: dict) -> dict:
     # 自动页面重建前先叠加人工 alias 覆盖层。
     overrides = load_page_alias_overrides(target)
-    page_aliases = overrides.get("page_aliases", {})
-    override = page_aliases.get(page_record.get("page_id"), {})
-    if not override:
-        return page_record
-
-    updated_record = dict(page_record)
-    if "aliases" in override:
-        updated_record["aliases"] = sorted(set(override.get("aliases", [])))
-    if "title" in override and override.get("title"):
-        updated_record["title"] = override["title"]
-    updated_record["updated"] = utc_now_iso()
-    return updated_record
+    return apply_page_alias_overrides_payload(page_record, overrides)
 
 
 def build_alias_conflict_reviews(
@@ -8636,42 +8685,44 @@ def apply_review_action(
         if not alias_to_assign:
             raise ValueError(f"{action} requires alias value from review evidence or --alias-value.")
 
-        existing_overrides = load_page_alias_overrides(target)
         live_aliases_by_page_id = load_live_page_aliases_by_id(target)
-        updated_overrides = apply_alias_override_action(
-            overrides=existing_overrides,
-            live_aliases_by_page_id=live_aliases_by_page_id,
-            candidate_page_ids=candidate_page_ids,
-            primary_page_id=primary_page_id,
-            alias_value=alias_to_assign,
-            action=action,
-        )
-        page_records = [
-            apply_page_alias_overrides(target, ensure_page_lifecycle_defaults(record))
+        page_state_records = [
+            ensure_page_lifecycle_defaults(record)
             for record in load_jsonl(target / "state" / "pages.jsonl")
         ]
-        for page_record in page_records:
-            page_id = page_record.get("page_id")
-            override = updated_overrides.get("page_aliases", {}).get(page_id, {})
-            if "aliases" in override:
-                page_record["aliases"] = sorted(set(override.get("aliases", [])))
-        projected_alias_index = build_alias_index(page_records)
-        projected_matches = alias_index_matches_for_value(projected_alias_index, alias_to_assign)
-        projected_page_ids = sorted({match.get("page_id") for match in projected_matches if match.get("page_id")})
 
-        if action == "assign_alias":
-            if projected_page_ids != [primary_page_id]:
+        def update_and_validate(overrides: dict) -> dict:
+            updated_overrides = apply_alias_override_action(
+                overrides=overrides,
+                live_aliases_by_page_id=live_aliases_by_page_id,
+                candidate_page_ids=candidate_page_ids,
+                primary_page_id=primary_page_id,
+                alias_value=alias_to_assign,
+                action=action,
+            )
+            page_records = [
+                apply_page_alias_overrides_payload(record, updated_overrides)
+                for record in page_state_records
+            ]
+            projected_alias_index = build_alias_index(page_records)
+            projected_matches = alias_index_matches_for_value(projected_alias_index, alias_to_assign)
+            projected_page_ids = sorted({match.get("page_id") for match in projected_matches if match.get("page_id")})
+
+            if action == "assign_alias":
+                if projected_page_ids != [primary_page_id]:
+                    raise ValueError(
+                        "assign_alias did not converge alias ownership. "
+                        f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
+                    )
+            elif projected_page_ids:
                 raise ValueError(
-                    "assign_alias did not converge alias ownership. "
+                    "remove_alias did not fully clear alias ownership. "
                     f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
                 )
-        elif projected_page_ids:
-            raise ValueError(
-                "remove_alias did not fully clear alias ownership. "
-                f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
-            )
 
-        write_page_alias_overrides(target, updated_overrides)
+            return updated_overrides
+
+        update_page_alias_overrides_with_lock(target, update_and_validate)
 
         review_record["status"] = "resolved"
         review_record["resolved_at"] = utc_now_iso()
