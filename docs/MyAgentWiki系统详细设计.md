@@ -490,6 +490,7 @@ CLI 输出约定：
   - `entry_page_path`：`wiki/index.md` 的绝对路径
   - `wiki_log_path`：`wiki/log.md` 的绝对路径
   - `lint_report_path`：`reports/lint/lint_latest.md` 的绝对路径
+  - `lint_report_exists`：最近一次 lint 报告是否已经实际生成
 - 若该命令直接涉及外部原始资料目录，还应额外附带 `raw_dir`。
 - 纯文本模式也应优先打印这一层路径摘要，避免 UI 或上层 Agent 只保留目录名时误导用户。
 
@@ -1262,7 +1263,7 @@ V1 当前实现说明：
 V1 最小持久化文件：
 - `state/ingest_state.jsonl`（流程账本）：记录 ingest 每个来源或任务的阶段、失败点和恢复线索。
 - `state/error_log.jsonl`（错误账本）：记录转换失败、降级处理、warning 和 error。
-- `reports/lint/lint_latest.md`（最新巡检报告）：保存最近一次 lint 的人类可读报告。
+- `reports/lint/lint_latest.md`（最新巡检报告）：仅在实际执行 `lint` 后生成，保存最近一次 lint 的人类可读报告。
 
 ### 账本真相与展开视图
 前文已经把 `state/*.jsonl` 定义为账本。这里进一步明确：哪些文件属于账本真相，哪些文件只是便于阅读、编辑、查询或展示的展开视图。
@@ -1365,7 +1366,7 @@ V1 当前实现说明：
 - 能生成模板。
 - 能自动初始化 Git 并首提。
 - 能生成依赖清单、运行环境说明和 `doctor/bootstrap` 所需配置。
-- 能初始化 `wiki/index.md`、`wiki/log.md`、`config/project.yml`、`config/runtime_manifest.yml`、`reports/lint/lint_latest.md`。
+- 能初始化 `wiki/index.md`、`wiki/log.md`、`config/project.yml`、`config/runtime_manifest.yml`。
 
 ### 标准化
 - 五类输入都至少有一条可运行路径。

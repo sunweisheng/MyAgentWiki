@@ -780,7 +780,7 @@ def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
 
 
 def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path) -> None:
-    # lint 现在除了返回 JSON，还应把最新报告写到 reports/lint/lint_latest.md。
+    # lint_latest.md 应只代表“最近一次真实 lint 结果”，不应在 init 阶段先写占位文件。
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
@@ -796,12 +796,15 @@ def test_lint_passes_and_writes_report_for_initialized_workspace(tmp_path: Path)
         "--project-name", "LintRegression",
         "--target-dir", str(workspace_dir),
     )
+    report_path = workspace_dir / "reports" / "lint" / "lint_latest.md"
+    assert not report_path.exists()
+
     run_cli("ingest", "--target-dir", str(workspace_dir))
+    assert not report_path.exists()
 
     result = run_cli("lint", "--target-dir", str(workspace_dir))
 
     assert result["summary"]["ok"] is True
-    report_path = workspace_dir / "reports" / "lint" / "lint_latest.md"
     assert report_path.exists()
     report_text = report_path.read_text(encoding="utf-8")
     assert "Lint Report" in report_text

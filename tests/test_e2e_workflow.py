@@ -91,6 +91,7 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert init_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
     assert init_result["workspace_summary"]["raw_dir"] == str(source_dir.resolve())
     assert init_result["workspace_summary"]["entry_page_path"] == str((workspace_dir / "wiki" / "index.md").resolve())
+    assert init_result["workspace_summary"]["lint_report_exists"] is False
     assert not (workspace_dir / "raw").exists()
     tracked_files = set(run_git(workspace_dir, "ls-files").splitlines())
     assert not any(path.startswith("raw/") for path in tracked_files)
@@ -150,6 +151,7 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert lint_result["workspace_summary"]["lint_report_path"] == str(
         (workspace_dir / "reports" / "lint" / "lint_latest.md").resolve()
     )
+    assert lint_result["workspace_summary"]["lint_report_exists"] is True
 
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
@@ -193,6 +195,10 @@ def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> No
     assert f"Workspace: {workspace_dir.resolve()}" in init_stdout
     assert f"Raw sibling: {source_dir.resolve()}" in init_stdout
     assert f"Entry page: {(workspace_dir / 'wiki' / 'index.md').resolve()}" in init_stdout
+    assert (
+        f"Lint report: {(workspace_dir / 'reports' / 'lint' / 'lint_latest.md').resolve()} "
+        "(will be created after the first lint run)"
+    ) in init_stdout
 
     ingest_stdout = run_cli_text("ingest", "--target-dir", str(workspace_dir))
     assert f"Workspace: {workspace_dir.resolve()}" in ingest_stdout

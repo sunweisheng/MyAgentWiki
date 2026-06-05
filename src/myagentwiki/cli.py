@@ -357,12 +357,14 @@ def print_result(result: CommandResult, as_json: bool = False) -> int:
 
 def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> dict:
     # 给上层 Agent 和人类读者一份“可以直接复述”的路径摘要，避免只剩目录名。
+    lint_report_path = target_dir / "reports" / "lint" / "lint_latest.md"
     summary = {
         "workspace_dir": str(target_dir),
         "workspace_name": target_dir.name,
         "entry_page_path": str(target_dir / "wiki" / "index.md"),
         "wiki_log_path": str(target_dir / "wiki" / "log.md"),
-        "lint_report_path": str(target_dir / "reports" / "lint" / "lint_latest.md"),
+        "lint_report_path": str(lint_report_path),
+        "lint_report_exists": lint_report_path.exists(),
     }
     if raw_dir is not None:
         summary["raw_dir"] = str(raw_dir)
@@ -386,7 +388,11 @@ def render_workspace_summary_message(
     lines.extend(
         [
             f"Entry page: {summary['entry_page_path']}",
-            f"Lint report: {summary['lint_report_path']}",
+            (
+                f"Lint report: {summary['lint_report_path']}"
+                if summary["lint_report_exists"]
+                else f"Lint report: {summary['lint_report_path']} (will be created after the first lint run)"
+            ),
         ]
     )
     if extra_lines:
@@ -8842,10 +8848,6 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         # 这些状态文件先创建成空 JSONL，后面脚本就不用额外判“文件是否存在”。
         write_jsonl(path, records)
 
-    (target_dir / "reports" / "lint" / "lint_latest.md").write_text(
-        "# Lint Report\n\nNo lint runs yet.\n",
-        encoding="utf-8",
-    )
     write_alias_index(target_dir, [])
 
     git_steps: list[str] = []
