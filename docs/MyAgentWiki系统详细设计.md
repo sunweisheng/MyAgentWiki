@@ -3,6 +3,7 @@
 ## 概要 Summary
 
 本设计将 `MyAgentWiki` 定义为一个由 Python 脚本和 Agent 协同驱动的本地 LLM Wiki 系统，服务于 Codex 和 Claude Code 两类 Agent。  
+本文中的 `MyAgentWiki` 统一指母仓库 / 产品名；若需要举用户初始化后的工作区目录名示例，统一使用 `MyNotesWiki`。  
 V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条链路打通，其中 `raw -> normalized` 为最高优先级，并优先用 `Python 3.12+` 脚本完成文档格式转换；只有脚本无法稳定提取时，才允许 Agent 作为补充。
 
 系统的关键能力是：
@@ -85,6 +86,8 @@ V1.1 的推荐推进方式：
 - `scripts/`：验证脚本与辅助工具。
 
 ### 初始化后的用户工程目录
+若需要举具体目录名示例，统一使用 `MyNotesWiki/` 表示用户工作区，使用其同级 `raw/` 表示原始资料目录。
+
 - `../raw/`：与工作区平级的原始资料目录。
 - `normalized/`：标准化后的 Markdown 文本。
 - `chunks/`：按来源展开的切块结果。
@@ -464,7 +467,7 @@ V1 统一规则：
 
 `init` 的行为固定如下：
 1. 接收原始知识目录路径与项目名。
-2. 在原始目录同级创建新的 Wiki 工程目录。
+2. 在原始目录同级创建新的 Wiki 工程目录；例如项目名为 `MyNotesWiki` 时，生成的工作区目录即为 `MyNotesWiki/`。
 3. 若同级 `raw/` 已存在则直接复用；若不存在则创建空的 `raw/`。
 4. 生成全部模板目录和配置文件。
 5. 写入 `AGENTS.md`、`CLAUDE.md`、`wiki/index.md`、`wiki/log.md`。
@@ -486,7 +489,7 @@ CLI 输出约定：
 - 当前 `init / ingest / lint / query / answer-query / review-list / review-apply` 都会统一附带 `workspace_summary`。
 - `workspace_summary` 至少包含：
   - `workspace_dir`：工作区绝对路径
-  - `workspace_name`：工作区目录名
+  - `workspace_name`：工作区目录名，例如 `MyNotesWiki`
   - `entry_page_path`：`wiki/index.md` 的绝对路径
   - `wiki_log_path`：`wiki/log.md` 的绝对路径
   - `lint_report_path`：`reports/lint/lint_latest.md` 的绝对路径
