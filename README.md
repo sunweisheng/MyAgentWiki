@@ -267,6 +267,64 @@ python -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
 - 想直接把结果交给上层回答器或 API 时，用 `answer-query`
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 
+如果你主要是在 Codex 或 Claude 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
+
+用户通常不需要重复说明查询规则。像“先看候选页面”“需要时继续回读证据”“有风险就明确提示不确定性”这些行为，本来就应该由 Agent 按 MyAgentWiki 约定自动完成。
+
+可以直接这样说：
+
+```text
+请用 MyAgentWiki 帮我查一下：什么是知识声明层？
+如果有不确定或待确认的地方，直接告诉我。
+```
+
+```text
+请用 MyAgentWiki 帮我回答：这个结论的来源证据是什么？
+回答时把证据链一起整理出来。
+```
+
+```text
+请帮我看看当前有哪些待处理审核项，
+按“是什么问题、为什么需要我判断、你建议怎么处理”给我总结一下。
+```
+
+```text
+请处理这条审核单：review_id=...
+如果你已经能判断怎么处理，就直接给我一个简单建议；
+如果需要我决定，就用白话告诉我几个选项分别代表什么。
+```
+
+如果你想自己参与审核判断，也可以直接用白话说：
+
+```text
+这两条看起来像是在说同一件事，帮我合并成一条更清楚的结论。
+```
+
+```text
+这两条虽然相似，但我觉得都应该保留，请帮我都保留下来。
+```
+
+```text
+这两条里有一条应该淘汰，请帮我保留更准确的那条，并把另一条归档。
+```
+
+```text
+我想先手工改一下这条 claim，改完之后你再继续把审核流程收口。
+```
+
+上面几句话在系统里大致对应这些处理方式：
+- “合并成一条更清楚的结论” = `merge`
+- “两条都保留” = `keep_both`
+- “保留一条，另一条归档” = `archive_one`
+- “我先手工改，再继续流程” = `edit_then_resume`
+
+Agent 使用约定：
+- 用户只需要表达目标，不需要记 `reading_pack`、`state/*.jsonl`、`review-apply` 这些内部结构
+- 查询时，Agent 应先读页面摘要、命中解释和 `reading_pack`，不要把首条命中直接当最终答案
+- 需要给上层回答器准备输入时，Agent 应优先使用 `answer-query` 或 `query --answer-ready`
+- 审核前，Agent 应先读取 `state/reviews.jsonl` 与 `reviews/*.json`，再整理成适合人判断的白话说明
+- 不直接批量手改 `state/*.jsonl`，统一通过 `review-apply`、`ingest`、`lint` 收敛状态
+
 ## 推荐使用流程 / Recommended Workflow
 
 推荐给最终用户和 Agent 的稳定顺序是：

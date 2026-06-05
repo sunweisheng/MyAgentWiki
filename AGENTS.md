@@ -11,6 +11,9 @@
 - 优先使用 `python -m myagentwiki ...` 或 `myagentwiki ...` 执行固定流程
 - 在 review / state 恢复场景里，先读当前工作区的 `state/*.jsonl` 与 `reviews/*.json`
 - 不直接跳过 CLI 去批量改写账本文件
+- 用户通常只需要表达目标，不需要主动描述 `reading_pack`、`state/*.jsonl`、`review-apply` 这类内部结构
+- 查询时，Agent 应自动完成“先看候选页面，再按需回读证据，有风险就明确提示不确定性”的流程
+- 审核时，Agent 应先整理问题、风险和建议，再用白话向用户解释可选处理方式
 
 ## 用户工程初始化约定 / Workspace Initialization
 
@@ -22,6 +25,11 @@
 ## review / state 恢复约定 / Review and State Recovery
 
 - `merge / archive_one / keep_both / edit_then_resume` 统一通过 `review-apply`
+- 对用户解释时优先用白话：
+  - `merge` = 把两条看作同一件事，合并成一条更清楚的结论
+  - `keep_both` = 两条都保留，因为它们虽然相似但不应强行合并
+  - `archive_one` = 保留更准确的一条，把另一条归档
+  - `edit_then_resume` = 用户先手工修改 claim，Agent 再继续把审核流程收口
 - 人工改 claim 后恢复流程，使用 `edit_then_resume`
 - 需要解释查询结果时，优先使用 `query` 的 `reading_pack`
 - 若目标是给上层回答器准备输入，优先使用 `answer-query` 或 `query --answer-ready`

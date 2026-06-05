@@ -11,6 +11,9 @@
 - 优先调用 MyAgentWiki CLI，而不是手工改写 `state/*.jsonl`
 - 固定流程优先使用脚本：`init / ingest / query / lint / review-list / review-apply`
 - 必须依赖语义理解、冲突裁决、页面重写的步骤，再交给 Agent
+- 用户通常只需要表达目标，不需要主动描述 `reading_pack`、`state/*.jsonl`、`review-apply` 这类内部结构
+- 查询时，Agent 应自动完成“先看候选页面，再按需回读证据，有风险就明确提示不确定性”的流程
+- 审核时，Agent 应先整理问题、风险和建议，再用白话向用户解释可选处理方式
 
 ## 推荐命令顺序
 
@@ -23,6 +26,11 @@
 ## review / state 恢复约定
 
 - 处理 review 前先读取 `reviews/*.json` 与 `state/reviews.jsonl`
+- 对用户解释时优先用白话：
+  - `merge` = 把两条看作同一件事，合并成一条更清楚的结论
+  - `keep_both` = 两条都保留，因为它们虽然相似但不应强行合并
+  - `archive_one` = 保留更准确的一条，把另一条归档
+  - `edit_then_resume` = 用户先手工修改 claim，Agent 再继续把审核流程收口
 - 需要人工修改 Claim 时，优先编辑 `claims/*.json`，然后执行 `review-apply ... edit_then_resume`
 - 不直接删除历史态 claim / review / page 记录，保留可追踪链路
 
