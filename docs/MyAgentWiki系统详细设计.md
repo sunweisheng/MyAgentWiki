@@ -292,6 +292,8 @@ V1 当前实现说明：
 - `state/reviews.jsonl` 保存审核队列的总账，方便 CLI 快速列出、筛选和恢复处理流程。
 - 已解决的审核项不会立即删除，而是保留 `status=resolved`，这样后面还能追溯当时为什么合并、保留或归档。
 - `alias_conflict` 属于页面别名冲突，有时只涉及页面，不涉及 Claim，所以这类 review 可以只填写 `candidate_page_ids`。
+- 当前已补一条保守自动审核路径 `review-auto`：先读取 live review 与页面/claim 现状，自动应用高把握动作，再把剩余需要人判断的项保留为 escalated handoff，而不是强行替用户做主。
+- 当前 `review-auto` 默认只覆盖保守场景，例如“恰好两条候选 Claim 的 duplicate merge”与“可安全收敛的 alias remove/单归属 assign”；超出这层把握的 review 仍保持为 `open`，等待人工或 Agent 进一步解释后裁决。
 
 ### 状态、等级与关键术语说明
 
@@ -482,11 +484,12 @@ CLI 入口固定为：
 - `python -m myagentwiki doctor`：检查运行环境。
 - `python -m myagentwiki bootstrap`：安装或修复 Python 依赖。
 - `python -m myagentwiki review-list`：列出审核队列。
+- `python -m myagentwiki review-auto`：保守地自动处理高把握审核项，并把剩余需要人判断的项整理成 handoff。
 - `python -m myagentwiki review-apply`：应用审核决策并恢复后续流程。
 
 CLI 输出约定：
 - 这些主命令的 JSON 输出应优先保持“上层 Agent 可直接消费”的稳定结构。
-- 当前 `init / ingest / lint / query / answer-query / review-list / review-apply` 都会统一附带 `workspace_summary`。
+- 当前 `init / ingest / lint / query / answer-query / review-list / review-auto / review-apply` 都会统一附带 `workspace_summary`。
 - `workspace_summary` 至少包含：
   - `workspace_dir`：工作区绝对路径
   - `workspace_name`：工作区目录名，例如 `MyNotesWiki`
@@ -1028,6 +1031,39 @@ V1 建议的 guardrail 推导规则：
 - `messages` / `chatml` / `prompt` 三种格式应共享同一套 handoff 语义，避免不同渲染格式各自漂移。
 - 即使在 `summary` 这种面向人读的文本渲染模式下，也应先显式给出工作区路径摘要，避免调用端把绝对路径压缩成仅剩目录名。
 
+### Review-Auto Handoff Layer
+在 `review-list / review-apply` 之上，当前实现又补了一层面向上层 Agent 的审核自动处理输出。
+
+当前入口为：
+- `python -m myagentwiki review-auto`
+
+这层输出的目标不是替用户完成所有审核判断，而是先自动处理高把握审核项，再把剩余需要人判断的部分稳定交给上层 Agent 或对话层。
+
+当前 review-auto payload 使用独立版本：
+- `contract_version: review_auto_handoff/v1`
+
+最小结构包含：
+- `workspace_summary`：工作区路径摘要，便于 Agent 在多工作区或恢复场景中保持定位一致。
+- `planned_actions`：本轮 review-auto 对每条 open review 的计划判断，区分 `auto_apply` 与 `escalate`。
+- `applied_actions`：已自动执行的审核动作及其影响对象。
+- `promoted_claims`：自动审核后，被保守提升为 `stable` 的 claim。
+- `escalated_reviews`：仍需要人判断的 review 计划摘要。
+- `escalation_handoff`：给上层 Agent 或对话层直接消费的升级人工条目，包含 `issue_summary`、`why_human_needed`、`choice_options` 与 `suggested_user_prompt`。
+- `agent_brief`：是否应继续追问用户、下一步应该继续工作还是进入人工选择。
+- `agent_summary`：给上层 Agent 直接阅读的一段紧凑摘要。
+
+当前支持四种渲染格式：
+- `summary`：审核自动处理摘要，适合人读或轻量 Agent 直接消费。
+- `prompt`：把整轮审核自动处理结果压成可直接喂给上层 LLM/Agent 的 prompt。
+- `messages`：聊天 API 可直接消费的 messages 数组。
+- `chatml`：messages 的 ChatML 文本表示，同时保留结构化 messages。
+
+工程约束：
+- review-auto 层只做“先自动、再升级人工”的保守收口，不替代底层 review 账本、页面重建与状态恢复逻辑。
+- 若 `agent_brief.should_ask_user=false`，上层 Agent 应继续后续工作，而不是重新要求用户裁决已被安全自动收口的 review。
+- 若 `agent_brief.should_ask_user=true`，上层 Agent 应只围绕 `escalation_handoff` 中列出的审核项追问用户，并优先使用 `choice_options` 的白话标签解释选项。
+- `messages` / `chatml` / `prompt` 三种格式应共享同一套 handoff 语义，避免不同渲染格式各自漂移。
+
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。
 - 命中相关页面后，再读取相关 `section`（章节）、`claim`（知识声明）、`chunk`（证据切块）。
@@ -1202,6 +1238,7 @@ V1 当前实现说明：
 
 V1 当前实现说明：
 - 当前 `review-apply` 执行动作后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与 `indexes/search_pages.jsonl`。
+- 当前 `review-auto` 会优先读取 live review、live claim 与 alias/index 现状，先自动执行高把握动作，再复用既有页面重建与状态写回流程收口，而不是单独维护第二套恢复链。
 - `edit_then_resume` 当前已支持“人工先改 Claim 文件，再恢复页面和索引重建”。
 - 当前 `alias_conflict`（别名冲突）在 `review-apply` 后，若人工覆盖层已消除冲突，下一轮 ingest 不会重新打开同一条 open review。
 - 当前 `review-list` 与 `review-apply` 在读取 review 前，会先按最新 live pages 与 alias index 刷新 alias conflict 队列；若某条 alias review 已不再对应真实冲突，会自动从 active/open 视图转入历史态。
@@ -1416,6 +1453,7 @@ V1 当前实现说明：
 V1 当前实现说明：
 - 当前已实现相似 Claim 和相反结论两类基础 review 触发。
 - 六种审核动作当前已落地并已有回归测试，其中包含 alias conflict 的 `assign_alias / remove_alias`。
+- 当前已补一条保守自动审核入口 `review-auto`，用于先自动收口高把握 review，再把剩余需要人判断的项以 handoff 形式升级给上层 Agent。
 - `qa-note` 提升正式页当前尚未实现具体页面工作流。
 
 ### 巡检与恢复 Lint And Recovery
