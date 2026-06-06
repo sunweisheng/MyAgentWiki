@@ -28,6 +28,7 @@
 ## review / state 恢复约定 / Review and State Recovery
 
 - `merge / archive_one / keep_both / edit_then_resume` 统一通过 `review-apply`
+- 若目标是让 Agent 先自动处理高把握审核项，再把剩余需要人判断的部分整理成可继续对话的输入，优先使用 `review-auto`
 - 对用户解释时优先用白话：
   - `merge` = 把两条看作同一件事，合并成一条更清楚的结论
   - `keep_both` = 两条都保留，因为它们虽然相似但不应强行合并
@@ -36,9 +37,11 @@
 - 人工改 claim 后恢复流程，使用 `edit_then_resume`
 - 需要解释查询结果时，优先使用 `query` 的 `reading_pack`
 - 若目标是给上层回答器准备输入，优先使用 `answer-query` 或 `query --answer-ready`
+- 若目标是给上层 Agent 准备“审核自动处理 + 剩余人工判断”的输入，优先使用 `review-auto --format prompt|messages|chatml`
 - 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，不要只根据页面摘要直接作答
 - 回答前优先遵循 `reading_pack.answer_handoff.recommended_read_order`
 - 若 `reading_pack.answer_guardrails.risk_flags` 非空，回答中必须显式表达不确定性或待确认点
+- 若 `review-auto` 的 `agent_brief.should_ask_user` 为 `true`，应只追问 `escalation_handoff` 中列出的审核项，并用白话解释 `choice_options`
 
 ## 当前状态 / Current Status
 

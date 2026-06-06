@@ -260,12 +260,17 @@ python -m myagentwiki answer-query "这个结论的来源证据是什么" --targ
 python -m myagentwiki answer-query "什么是知识声明层" --format prompt --target-dir /path/to/MyNotesWiki
 python -m myagentwiki answer-query "什么是知识声明层" --format messages --target-dir /path/to/MyNotesWiki
 python -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
+python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki
+python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --dry-run
+python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format prompt
+python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format messages
 ```
 
 推荐用法：
 - 想先看检索候选页和证据包时，用 `query`
 - 想直接把结果交给上层回答器或 API 时，用 `answer-query`
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
+- 想让 Agent 先自动收口高把握审核项，再把剩余需要你判断的部分整理成继续对话的输入时，用 `review-auto`
 
 如果你主要是在 Codex 或 Claude 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
 
@@ -322,7 +327,9 @@ Agent 使用约定：
 - 用户只需要表达目标，不需要记 `reading_pack`、`state/*.jsonl`、`review-apply` 这些内部结构
 - 查询时，Agent 应先读页面摘要、命中解释和 `reading_pack`，不要把首条命中直接当最终答案
 - 需要给上层回答器准备输入时，Agent 应优先使用 `answer-query` 或 `query --answer-ready`
+- 需要给上层 Agent 准备“审核自动处理 + 剩余人工判断”的输入时，Agent 应优先使用 `review-auto --format prompt|messages|chatml`
 - 审核前，Agent 应先读取 `state/reviews.jsonl` 与 `reviews/*.json`，再整理成适合人判断的白话说明
+- 若希望先自动处理高把握审核项，Agent 应优先尝试 `review-auto`；只有 `agent_brief.should_ask_user=true` 时，再围绕 `escalation_handoff` 向用户追问
 - 不直接批量手改 `state/*.jsonl`，统一通过 `review-apply`、`ingest`、`lint` 收敛状态
 
 ## 推荐使用流程 / Recommended Workflow
@@ -484,6 +491,12 @@ V1 已实现这些命令入口：
   - `remove_alias` 当前用于 alias conflict review，可把冲突 alias 从覆盖层中移除
   - `assign_alias / remove_alias` 当前会先在内存里预演 alias 覆盖结果并重建 alias index；只有确认 alias 真正完成唯一归属或被完全清除时，命令才会成功，避免“命令成功但冲突仍存在”
   - `assign_alias / remove_alias` 写入 `state/page_alias_overrides.json` 时当前会做进程级串行化，避免多个 `review-apply` 并发时后写覆盖前写
+- `myagentwiki review-auto`
+  - 已实现一条保守自动审核路径：优先自动收口高把握 review，并把剩余需要人判断的项整理成可继续对话的 handoff
+  - 当前会复用既有 `review-apply`、页面重建和状态账本收敛逻辑，不单独维护第二套审核状态机
+  - 当前支持 `--dry-run`，可先看计划中的自动动作与升级人工项，再决定是否执行
+  - 当前支持 `--format prompt|messages|chatml`，可直接生成给上层 Agent 使用的 handoff；JSON 模式下会附带 `prompt_text`、`messages` 或 `chatml_text`
+  - 当前会额外返回 `agent_brief`、`agent_summary` 和 `escalation_handoff`，帮助 Agent 判断“是否需要追问用户”以及“应该如何用白话解释选项”
   - review 动作会把被淘汰 claim 转入历史态，并保留 `original_claim_id` 便于追踪
   - `merge` / `archive_one` 执行后，会自动清理其他仍处于 `open` 状态的 review 中已经失效的候选 claim 引用
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑

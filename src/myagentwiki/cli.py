@@ -145,6 +145,7 @@ SEARCH_PAGES_INDEX_REL_PATH = Path("indexes") / "search_pages.jsonl"
 SEARCH_PAGES_INDEX_VERSION = "search_pages_v1"
 ALIAS_INDEX_VERSION = "aliases_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
+REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 QUERY_INTENT_MARKERS = {
     "overview": (
@@ -8167,6 +8168,604 @@ def command_review_list(args: argparse.Namespace) -> CommandResult:
     return CommandResult(payload=payload, message="\n".join(lines))
 
 
+def choose_auto_merge_primary_claim_id(candidate_claim_ids: list[str], live_claims_by_id: dict[str, dict]) -> str | None:
+    live_candidates = [live_claims_by_id[claim_id] for claim_id in candidate_claim_ids if claim_id in live_claims_by_id]
+    if len(live_candidates) != len(candidate_claim_ids):
+        return None
+    if len(live_candidates) != 2:
+        return None
+    ranked = sorted(
+        live_candidates,
+        key=lambda item: (
+            len(item.get("source_ids", [])),
+            item.get("confidence", 0.0),
+            len(clean_claim_candidate_text(item.get("text", ""))),
+            item.get("created_at", ""),
+            item["claim_id"],
+        ),
+        reverse=True,
+    )
+    return ranked[0]["claim_id"] if ranked else None
+
+
+def review_action_plain_label(action: str) -> str:
+    labels = {
+        "merge": "合并成一条更清楚的结论",
+        "keep_both": "两条都保留",
+        "archive_one": "保留一条并归档另一条",
+        "edit_then_resume": "先手工修改再继续",
+        "assign_alias": "把别名指定给某个页面",
+        "remove_alias": "移除这个别名",
+    }
+    return labels.get(action, action)
+
+
+def claim_record_is_safe_auto_stable_candidate(claim_record: dict, live_reviews_by_id: dict[str, dict]) -> tuple[bool, str | None]:
+    if claim_record.get("lifecycle_status") != "active":
+        return False, "claim_not_active"
+    if claim_record.get("status") != "draft":
+        return False, f"claim_status_is_{claim_record.get('status')}"
+    if not claim_record.get("source_ids") or not claim_record.get("source_refs"):
+        return False, "claim_missing_source_traceability"
+    active_review_ids = [
+        review_record["review_id"]
+        for review_record in live_reviews_by_id.values()
+        if is_actionable_review_record(review_record)
+        and claim_record["claim_id"] in review_record.get("candidate_claim_ids", [])
+    ]
+    if active_review_ids:
+        return False, "claim_still_attached_to_open_review"
+    if claim_record.get("duplicate_candidates"):
+        return False, "claim_still_has_duplicate_candidates"
+    if claim_record.get("conflict_group"):
+        return False, "claim_still_has_conflict_group"
+    if claim_record.get("claim_type") == "definition":
+        cleaned_text = clean_claim_candidate_text(claim_record.get("text", ""))
+        if len(cleaned_text) >= 14:
+            return True, None
+    if len(set(claim_record.get("source_ids", []))) >= 2:
+        return True, None
+    return False, "claim_not_stable_enough_for_safe_auto"
+
+
+def build_review_auto_escalation_entry(
+    review_record: dict,
+    plan: dict,
+    live_claims_by_id: dict[str, dict],
+) -> dict:
+    candidate_claims = []
+    for claim_id in review_record.get("candidate_claim_ids", [])[:3]:
+        claim_record = live_claims_by_id.get(claim_id)
+        if claim_record is None:
+            continue
+        candidate_claims.append({
+            "claim_id": claim_id,
+            "text": claim_record.get("text", ""),
+            "status": claim_record.get("status"),
+            "source_count": len(claim_record.get("source_ids", [])),
+        })
+
+    choice_options = [
+        {
+            "action": action,
+            "label": review_action_plain_label(action),
+            "is_recommended": action == review_record.get("recommended_action"),
+        }
+        for action in review_record.get("allowed_actions", [])
+    ]
+
+    if review_record.get("kind") == "alias_conflict":
+        evidence = review_record.get("evidence", [])
+        alias_value = evidence[0].get("alias") if evidence else None
+        issue_summary = (
+            f"别名 `{alias_value}` 同时指向多个页面，当前还不能安全地自动决定归属。"
+            if alias_value
+            else "有一个别名同时指向多个页面，当前还不能安全地自动决定归属。"
+        )
+    elif review_record.get("kind") == "claim_duplicate":
+        issue_summary = "这组 claim 可能在说同一件事，但当前仍需要人确认是否真的该合并。"
+    else:
+        issue_summary = "这条 review 超出了当前保守自动规则，需要人进一步判断。"
+
+    if plan.get("reason") == "alias_conflict_needs_human_owner_choice":
+        why_human_needed = "多个页面都可能拥有这个 alias，自动分配存在误伤风险。"
+    elif plan.get("reason") == "duplicate_review_needs_human_merge_choice":
+        why_human_needed = "候选 claim 不止两条，或主次关系不够明确，自动合并风险偏高。"
+    else:
+        why_human_needed = "当前证据还不足以支持保守自动裁决。"
+
+    return {
+        "review_id": review_record["review_id"],
+        "display_id": review_display_id(review_record),
+        "kind": review_record.get("kind"),
+        "issue_summary": issue_summary,
+        "why_human_needed": why_human_needed,
+        "recommended_action": review_record.get("recommended_action"),
+        "choice_options": choice_options,
+        "candidate_claims": candidate_claims,
+        "candidate_page_ids": review_record.get("candidate_page_ids", []),
+        "suggested_user_prompt": (
+            f"请帮我判断审核单 {review_display_id(review_record)}。"
+            "如果你已经知道怎么处理，可以直接告诉我保留、合并、归档，或先手工修改再继续。"
+        ),
+    }
+
+
+def build_review_auto_agent_handoff(
+    auto_apply_plans: list[dict],
+    escalated_entries: list[dict],
+    promoted_claims: list[dict],
+) -> tuple[dict, str]:
+    should_ask_user = bool(escalated_entries)
+    next_action = (
+        "ask_user_to_decide_escalated_reviews"
+        if should_ask_user
+        else "continue_with_normal_workflow"
+    )
+    agent_brief = {
+        "mode": "needs_user_decision" if should_ask_user else "auto_resolved_all_safe_reviews",
+        "should_ask_user": should_ask_user,
+        "next_action": next_action,
+        "auto_apply_review_count": len(auto_apply_plans),
+        "escalated_review_count": len(escalated_entries),
+        "promoted_claim_count": len(promoted_claims),
+    }
+    if should_ask_user:
+        first_item = escalated_entries[0]
+        agent_summary = (
+            f"已自动处理 {len(auto_apply_plans)} 条高把握 review，"
+            f"但还有 {len(escalated_entries)} 条需要用户判断。"
+            f"优先向用户解释 `{first_item['display_id']}`：{first_item['issue_summary']}"
+        )
+    else:
+        agent_summary = (
+            f"本轮高把握 review 已全部自动收口，共处理 {len(auto_apply_plans)} 条，"
+            f"并额外提升了 {len(promoted_claims)} 条 claim 为 stable。"
+        )
+    return agent_brief, agent_summary
+
+
+def render_review_auto_message(review_auto_payload: dict) -> str:
+    lines = [
+        "Review Auto Summary:",
+        f"  dry_run: {review_auto_payload.get('dry_run')}",
+        (
+            "  counts: "
+            f"planned={review_auto_payload['summary']['planned_review_count']}, "
+            f"auto_apply={review_auto_payload['summary']['auto_apply_count']}, "
+            f"escalated={review_auto_payload['summary']['escalated_count']}, "
+            f"applied={review_auto_payload['summary']['applied_count']}, "
+            f"promoted_claims={review_auto_payload['summary']['promoted_claim_count']}"
+        ),
+        f"  next_action: {review_auto_payload.get('agent_brief', {}).get('next_action')}",
+        f"  agent_summary: {review_auto_payload.get('agent_summary', '')}",
+    ]
+    applied_actions = review_auto_payload.get("applied_actions", [])
+    if applied_actions:
+        lines.append("  applied_actions:")
+        for item in applied_actions[:5]:
+            lines.append(
+                f"    - {item.get('display_id')} [{item.get('kind')}] action={item.get('action')} reason={item.get('reason')}"
+            )
+    escalations = review_auto_payload.get("escalation_handoff", [])
+    if escalations:
+        lines.append("  escalations:")
+        for item in escalations[:5]:
+            lines.append(
+                f"    - {item.get('display_id')} [{item.get('kind')}] {item.get('issue_summary')}"
+            )
+            lines.append(f"      why_human_needed: {item.get('why_human_needed')}")
+    return "\n".join(lines)
+
+
+def render_review_auto_prompt(review_auto_payload: dict) -> str:
+    agent_brief = review_auto_payload.get("agent_brief", {})
+    lines = [
+        "You are the workflow layer for a MyAgentWiki review-auto handoff.",
+        "Use the handoff below to decide whether to continue automatically or ask the user for a focused review decision.",
+        "Do not invent review outcomes that are not supported by the handoff.",
+        "",
+        "## Review Auto Run",
+        f"- contract_version: {review_auto_payload.get('contract_version', '')}",
+        f"- dry_run: {review_auto_payload.get('dry_run')}",
+        f"- workspace: {review_auto_payload.get('workspace', '')}",
+        f"- planned_review_count: {review_auto_payload.get('summary', {}).get('planned_review_count')}",
+        f"- auto_apply_count: {review_auto_payload.get('summary', {}).get('auto_apply_count')}",
+        f"- escalated_count: {review_auto_payload.get('summary', {}).get('escalated_count')}",
+        f"- applied_count: {review_auto_payload.get('summary', {}).get('applied_count')}",
+        f"- promoted_claim_count: {review_auto_payload.get('summary', {}).get('promoted_claim_count')}",
+        "",
+        "## Agent Brief",
+        f"- mode: {agent_brief.get('mode')}",
+        f"- should_ask_user: {agent_brief.get('should_ask_user')}",
+        f"- next_action: {agent_brief.get('next_action')}",
+        f"- agent_summary: {review_auto_payload.get('agent_summary', '')}",
+        "",
+        "## Applied Actions",
+    ]
+    applied_actions = review_auto_payload.get("applied_actions", [])
+    if applied_actions:
+        for item in applied_actions:
+            lines.append(
+                f"- {item.get('display_id')}: kind={item.get('kind')} action={item.get('action')} "
+                f"reason={item.get('reason')} changed_claim_ids={','.join(item.get('changed_claim_ids', [])) or 'none'} "
+                f"changed_page_ids={','.join(item.get('changed_page_ids', [])) or 'none'}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Escalations",
+    ])
+    escalations = review_auto_payload.get("escalation_handoff", [])
+    if escalations:
+        for item in escalations:
+            lines.append(
+                f"- {item.get('display_id')}: kind={item.get('kind')} issue={item.get('issue_summary')} "
+                f"why_human_needed={item.get('why_human_needed')} recommended_action={item.get('recommended_action')}"
+            )
+            if item.get("candidate_claims"):
+                for claim in item["candidate_claims"]:
+                    lines.append(
+                        f"  candidate_claim: {claim.get('claim_id')} status={claim.get('status')} "
+                        f"sources={claim.get('source_count')} text={claim.get('text')}"
+                    )
+            if item.get("candidate_page_ids"):
+                lines.append(f"  candidate_page_ids: {', '.join(item['candidate_page_ids'])}")
+            if item.get("choice_options"):
+                for option in item["choice_options"]:
+                    lines.append(
+                        f"  option: action={option.get('action')} label={option.get('label')} "
+                        f"recommended={option.get('is_recommended')}"
+                    )
+            lines.append(f"  suggested_user_prompt: {item.get('suggested_user_prompt')}")
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Instruction",
+        "If `should_ask_user` is false, continue the broader workflow without asking the user to re-judge already resolved reviews.",
+        "If `should_ask_user` is true, ask only about the escalated reviews and explain the options in plain language.",
+        "Prefer the recommended action when presenting options, but make uncertainty explicit when the handoff says human judgment is needed.",
+    ])
+    return "\n".join(lines)
+
+
+def build_review_auto_messages(review_auto_payload: dict) -> list[dict]:
+    prompt_text = render_review_auto_prompt(review_auto_payload)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the workflow layer for a MyAgentWiki review-auto handoff. "
+                "Continue automatically when the handoff says it is safe, and ask the user only for escalated decisions."
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt_text,
+        },
+    ]
+
+
+def render_review_auto_chatml(review_auto_payload: dict) -> str:
+    messages = build_review_auto_messages(review_auto_payload)
+    blocks = []
+    for message in messages:
+        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
+    return "\n".join(blocks)
+
+
+def propose_review_auto_action(review_record: dict, live_claims_by_id: dict[str, dict]) -> dict:
+    review_id = review_record["review_id"]
+    kind = review_record.get("kind")
+    recommended_action = review_record.get("recommended_action")
+    allowed_actions = set(review_record.get("allowed_actions", []))
+
+    plan = {
+        "review_id": review_id,
+        "display_id": review_display_id(review_record),
+        "kind": kind,
+        "recommended_action": recommended_action,
+        "decision": "escalate",
+        "reason": "review_requires_human_judgment",
+        "action": None,
+        "primary_claim_id": None,
+        "secondary_claim_id": None,
+        "primary_page_id": None,
+        "alias_value": None,
+    }
+
+    if not is_actionable_review_record(review_record):
+        plan["reason"] = "review_not_actionable"
+        return plan
+
+    if kind == "alias_conflict":
+        evidence = review_record.get("evidence", [])
+        alias_value = evidence[0].get("alias") if evidence else None
+        candidate_page_ids = list(review_record.get("candidate_page_ids", []))
+        if (
+            recommended_action == "remove_alias"
+            and "remove_alias" in allowed_actions
+            and alias_value
+            and len(candidate_page_ids) >= 1
+        ):
+            plan.update({
+                "decision": "auto_apply",
+                "reason": "alias_conflict_can_safely_remove_shared_alias",
+                "action": "remove_alias",
+                "primary_page_id": candidate_page_ids[0],
+                "alias_value": alias_value,
+            })
+            return plan
+        if (
+            recommended_action == "assign_alias"
+            and "assign_alias" in allowed_actions
+            and alias_value
+            and len(candidate_page_ids) == 1
+        ):
+            plan.update({
+                "decision": "auto_apply",
+                "reason": "alias_conflict_has_single_candidate_owner",
+                "action": "assign_alias",
+                "primary_page_id": candidate_page_ids[0],
+                "alias_value": alias_value,
+            })
+            return plan
+        plan["reason"] = "alias_conflict_needs_human_owner_choice"
+        return plan
+
+    if kind == "claim_duplicate" and recommended_action == "merge" and "merge" in allowed_actions:
+        candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
+        primary_claim_id = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
+        if primary_claim_id is None:
+            plan["reason"] = "duplicate_review_needs_human_merge_choice"
+            return plan
+        secondary_claim_id = next(
+            claim_id for claim_id in candidate_claim_ids
+            if claim_id != primary_claim_id
+        )
+        plan.update({
+            "decision": "auto_apply",
+            "reason": "duplicate_review_has_safe_two_claim_merge",
+            "action": "merge",
+            "primary_claim_id": primary_claim_id,
+            "secondary_claim_id": secondary_claim_id,
+        })
+        return plan
+
+    plan["reason"] = "review_kind_or_action_not_in_safe_auto_rules"
+    return plan
+
+
+def command_review_auto(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    claims_path = target / "state" / "claims.jsonl"
+    reviews_path = target / "state" / "reviews.jsonl"
+
+    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
+    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    if archived_alias_review_ids:
+        refreshed_review_state_records = build_ordered_review_state_records(
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+        write_jsonl(reviews_path, refreshed_review_state_records)
+        for review_state_record in refreshed_review_state_records:
+            write_review_file(target, review_state_record)
+        cleanup_superseded_record_files(
+            target=target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+
+    planned_actions = [
+        propose_review_auto_action(review_record, live_claims_by_id)
+        for review_record in sorted(
+            live_reviews_by_id.values(),
+            key=lambda item: (item.get("created_at", ""), review_display_id(item)),
+        )
+        if is_actionable_review_record(review_record)
+    ]
+
+    auto_apply_plans = [item for item in planned_actions if item["decision"] == "auto_apply"]
+    escalated_plans = [item for item in planned_actions if item["decision"] != "auto_apply"]
+    applied_actions: list[dict] = []
+    promoted_claims: list[dict] = []
+
+    if not args.dry_run:
+        for plan in auto_apply_plans:
+            review_record = live_reviews_by_id.get(plan["review_id"])
+            if review_record is None:
+                continue
+            result = apply_review_action(
+                target=target,
+                review_record=review_record,
+                action=plan["action"],
+                primary_claim_id=plan["primary_claim_id"],
+                secondary_claim_id=plan["secondary_claim_id"],
+                primary_page_id=plan["primary_page_id"],
+                alias_value=plan["alias_value"],
+                live_claims_by_id=live_claims_by_id,
+                historical_claims_by_id=historical_claims_by_id,
+                live_reviews_by_id=live_reviews_by_id,
+                historical_reviews_by_id=historical_reviews_by_id,
+            )
+            live_reviews_by_id[review_record["review_id"]] = review_record
+            applied_actions.append({
+                "review_id": plan["review_id"],
+                "display_id": plan["display_id"],
+                "kind": plan["kind"],
+                "reason": plan["reason"],
+                "action": result.get("action"),
+                "changed_claim_ids": result.get("changed_claim_ids", []),
+                "changed_page_ids": result.get("changed_page_ids", []),
+            })
+
+        for claim_record in sorted(live_claims_by_id.values(), key=lambda item: item["claim_id"]):
+            is_safe, reason = claim_record_is_safe_auto_stable_candidate(claim_record, live_reviews_by_id)
+            if not is_safe:
+                continue
+            claim_record["status"] = "stable"
+            claim_record["review_reason"] = None
+            claim_record["updated_at"] = utc_now_iso()
+            promoted_claims.append({
+                "claim_id": claim_record["claim_id"],
+                "reason": "safe_auto_promoted_to_stable",
+            })
+
+        write_jsonl(
+            claims_path,
+            build_ordered_claim_state_records(
+                live_claims_by_id=live_claims_by_id,
+                historical_claims_by_id=historical_claims_by_id,
+            ),
+        )
+        for claim_record in [*live_claims_by_id.values(), *historical_claims_by_id.values()]:
+            write_claim_file(target, claim_record)
+
+        write_jsonl(
+            reviews_path,
+            build_ordered_review_state_records(
+                live_reviews_by_id=live_reviews_by_id,
+                historical_reviews_by_id=historical_reviews_by_id,
+            ),
+        )
+        for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
+            write_review_file(target, review_state_record)
+        cleanup_superseded_record_files(
+            target=target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+
+        rebuild_review_affected_pages(
+            target=target,
+            live_claims_by_id=live_claims_by_id,
+            live_reviews_by_id=live_reviews_by_id,
+        )
+        _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
+            target=target,
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+        if archived_alias_review_ids:
+            write_jsonl(
+                reviews_path,
+                build_ordered_review_state_records(
+                    live_reviews_by_id=live_reviews_by_id,
+                    historical_reviews_by_id=historical_reviews_by_id,
+                ),
+            )
+            for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
+                write_review_file(target, review_state_record)
+            cleanup_superseded_record_files(
+                target=target,
+                historical_claims_by_id=historical_claims_by_id,
+                historical_reviews_by_id=historical_reviews_by_id,
+            )
+
+    escalated_entries = [
+        build_review_auto_escalation_entry(
+            review_record=live_reviews_by_id[plan["review_id"]],
+            plan=plan,
+            live_claims_by_id=live_claims_by_id,
+        )
+        for plan in escalated_plans
+        if plan["review_id"] in live_reviews_by_id
+    ]
+    agent_brief, agent_summary = build_review_auto_agent_handoff(
+        auto_apply_plans=auto_apply_plans,
+        escalated_entries=escalated_entries,
+        promoted_claims=promoted_claims,
+    )
+
+    payload = {
+        "contract_version": REVIEW_AUTO_HANDOFF_CONTRACT_VERSION,
+        "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
+        "dry_run": bool(args.dry_run),
+        "planned_actions": planned_actions,
+        "applied_actions": applied_actions,
+        "escalated_reviews": escalated_plans,
+        "escalation_handoff": escalated_entries,
+        "promoted_claims": promoted_claims,
+        "agent_brief": agent_brief,
+        "agent_summary": agent_summary,
+        "summary": {
+            "planned_review_count": len(planned_actions),
+            "auto_apply_count": len(auto_apply_plans),
+            "escalated_count": len(escalated_plans),
+            "applied_count": len(applied_actions),
+            "promoted_claim_count": len(promoted_claims),
+        },
+    }
+    handoff_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
+    if handoff_format == "prompt":
+        payload["prompt_text"] = render_review_auto_prompt(payload)
+    elif handoff_format == "messages":
+        payload["messages"] = build_review_auto_messages(payload)
+    elif handoff_format == "chatml":
+        payload["messages"] = build_review_auto_messages(payload)
+        payload["chatml_text"] = render_review_auto_chatml(payload)
+
+    if args.json:
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Review auto pass completed." if not args.dry_run else "Review auto dry-run completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Dry run: {bool(args.dry_run)}",
+                    f"Format: {handoff_format}",
+                    (
+                        "Summary: "
+                        f"planned={payload['summary']['planned_review_count']}, "
+                        f"auto_apply={payload['summary']['auto_apply_count']}, "
+                        f"escalated={payload['summary']['escalated_count']}, "
+                        f"applied={payload['summary']['applied_count']}, "
+                        f"promoted_claims={payload['summary']['promoted_claim_count']}"
+                    ),
+                ],
+            ),
+        )
+    if handoff_format == "prompt":
+        return CommandResult(payload=payload, message=payload["prompt_text"])
+    if handoff_format == "messages":
+        return CommandResult(
+            payload=payload,
+            message=json.dumps(payload["messages"], ensure_ascii=False, indent=2),
+        )
+    if handoff_format == "chatml":
+        return CommandResult(payload=payload, message=payload["chatml_text"])
+
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Review auto pass completed." if not args.dry_run else "Review auto dry-run completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Dry run: {bool(args.dry_run)}",
+                (
+                    "Summary: "
+                    f"planned={payload['summary']['planned_review_count']}, "
+                    f"auto_apply={payload['summary']['auto_apply_count']}, "
+                    f"escalated={payload['summary']['escalated_count']}, "
+                    f"applied={payload['summary']['applied_count']}, "
+                    f"promoted_claims={payload['summary']['promoted_claim_count']}"
+                ),
+                "",
+                render_review_auto_message(payload),
+            ],
+        ),
+    )
+
+
 def rebuild_review_affected_pages(
     target: Path,
     live_claims_by_id: dict[str, dict],
@@ -10801,6 +11400,21 @@ def build_parser() -> argparse.ArgumentParser:
     review_list_parser.add_argument("--status", choices=("open", "resolved"), help="Optional review status filter.")
     review_list_parser.add_argument("--json", action="store_true", help="Output JSON.")
     review_list_parser.set_defaults(handler=command_review_list)
+
+    review_auto_parser = subparsers.add_parser(
+        "review-auto",
+        help="Conservatively auto-resolve high-confidence review items and escalate the rest.",
+    )
+    review_auto_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    review_auto_parser.add_argument("--dry-run", action="store_true", help="Plan auto actions without mutating workspace state.")
+    review_auto_parser.add_argument(
+        "--format",
+        choices=("summary", "prompt", "messages", "chatml"),
+        default="summary",
+        help="Choose summary view or direct Agent handoff format.",
+    )
+    review_auto_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    review_auto_parser.set_defaults(handler=command_review_auto)
 
     # review-apply: 对单条 review 执行人工裁决动作。
     review_apply_parser = subparsers.add_parser("review-apply", help="Apply an action to a review item.")
