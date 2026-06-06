@@ -4,6 +4,7 @@ project:
   source_dir_path: "${source_dir_path}"
   default_language: "zh"
   write_policy: "normal_auto_write"
+  positioning: "agent_driven_local_llm_wiki"
 
 paths:
   raw: "${raw_dir_relative_path}"
@@ -22,14 +23,42 @@ query:
   canonical_resolution: true
   preferred_language: "zh"
 
+automation:
+  mode: "safe_auto"
+  philosophy: "prefer_agent_automation_until_human_judgment_is_required"
+  post_ingest:
+    review_auto: true
+  review_auto:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.8
+  stable_promotion:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.85
+
 rendering:
   readable_concept:
     mode: "llm_assisted"
-    command: []
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
     timeout_seconds: 20
   overview:
     mode: "llm_assisted"
-    command: []
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
     timeout_seconds: 20
   qa_note:
     mode: "llm_assisted"

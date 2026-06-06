@@ -29,6 +29,13 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 - LLM 主要参与可读性改写、导览组织和表达优化
 - 一切 LLM 改写都必须 grounded，无法回绑时自动回退到 deterministic 文案
 
+同时，项目的运行定位是：
+
+- 默认假设它会运行在 Codex 或 Claude Code 这样的 Agent 环境里
+- 固定流程由 CLI 保证可重复和可回滚
+- 需要语义判断的步骤优先交给 Agent / LLM hook 自动推进
+- 只有在高风险冲突、归属不清或 hook 没给出高置信结论时，才升级为人工判断
+
 ## 核心理念
 
 MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知识逐步编译成一个持续维护的 Wiki：
@@ -272,6 +279,88 @@ python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format mes
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 - 想让 Agent 先自动收口高把握审核项，再把剩余需要你判断的部分整理成继续对话的输入时，用 `review-auto`
 
+当前新初始化工作区默认就会把审核、stable 提升、可读概念页和综述页统一接到包内 Agent hook：
+
+```yaml
+automation:
+  mode: "safe_auto"
+  post_ingest:
+    review_auto: true
+  review_auto:
+    strategy: "agent_assisted"
+    command:
+      - "/absolute/path/to/python"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.8
+  stable_promotion:
+    strategy: "agent_assisted"
+    command:
+      - "/absolute/path/to/python"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.85
+
+rendering:
+  readable_concept:
+    mode: "llm_assisted"
+    command:
+      - "/absolute/path/to/python"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 20
+  overview:
+    mode: "llm_assisted"
+    command:
+      - "/absolute/path/to/python"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 20
+```
+
+如果你希望改成自己的 Agent / LLM hook，也可以在工作区 `config/project.yml` 里覆盖：
+
+```yaml
+automation:
+  mode: "safe_auto"
+  post_ingest:
+    review_auto: true
+  review_auto:
+    strategy: "agent_assisted"
+    command:
+      - "python3"
+      - "/absolute/path/to/review_hook.py"
+    timeout_seconds: 45
+    min_confidence: 0.9
+  stable_promotion:
+    strategy: "agent_assisted"
+    command:
+      - "python3"
+      - "/absolute/path/to/stable_hook.py"
+    timeout_seconds: 45
+    min_confidence: 0.9
+```
+
+约定很简单：
+- hook 从标准输入接收 JSON payload
+- 成功时向标准输出返回 JSON
+- `review_auto` hook 可返回 `decision=auto_apply`，并附带 `action`、`primary_claim_id`、`secondary_claim_id`、`primary_page_id`、`alias_value`、`confidence`
+- `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
+- `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
+- `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
+- 若 hook 失败、超时、低于置信阈值，系统会自动回退到现有的保守自动策略，而不是中断整个流程
+
+如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
+这意味着默认推荐流程会变成：
+- `ingest` 负责发现新 claim、重建页面、刷新索引
+- `review-auto` 负责自动收口高把握 review，并自动提升可安全稳定化的 claim
+- 当 claim 被自动提升为 `stable` 后，系统会继续自动生成或刷新可读 `concept` 页
+- 当工作区里已有多个稳定可读概念页时，系统会继续自动生成或刷新工作区级 `overview` 页
+- `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写，不通过校验时自动回退到 deterministic fallback
+- 只有仍然 escalated 的 review 才需要人工判断
+
 如果你主要是在 Codex 或 Claude 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
 
 用户通常不需要重复说明查询规则。像“先看候选页面”“需要时继续回读证据”“有风险就明确提示不确定性”这些行为，本来就应该由 Agent 按 MyAgentWiki 约定自动完成。
@@ -458,6 +547,7 @@ V1 已实现这些命令入口：
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
   - 当前已自动生成人类可读 `concept` 页与工作区级 `overview` 页，且默认渲染模式为 `llm_assisted`
+  - 当前新初始化工作区默认已经接上统一包内 Agent hook；因此 `ingest -> review-auto -> stable -> concept/overview` 会作为一条连续自动化链默认运行，而不需要用户再手工补配置
   - `concept` 与 `overview` 的 LLM 改写都要求 grounded；不合格时会自动回退到 deterministic fallback
   - `overview` 页当前支持 grounded overview rewrite，并在 `llm_assisted` 成功时显示折叠式 `Rewrite Traceability`
 - `myagentwiki lint`

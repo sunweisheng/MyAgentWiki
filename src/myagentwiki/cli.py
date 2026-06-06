@@ -147,6 +147,7 @@ ALIAS_INDEX_VERSION = "aliases_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
+AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
 QUERY_INTENT_MARKERS = {
     "overview": (
         "概览", "概况", "总览", "总述", "整体", "全局", "框架", "脉络", "overview",
@@ -400,7 +401,7 @@ def render_workspace_summary_message(
         ]
     )
     if extra_lines:
-        lines.extend(extra_lines)
+        lines.extend(line for line in extra_lines if line)
     return "\n".join(lines)
 
 
@@ -872,6 +873,18 @@ def coerce_int(value, default: int) -> int:
     return default
 
 
+def coerce_float(value, default: float) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return float(stripped)
+        except ValueError:
+            return default
+    return default
+
+
 def normalize_command_config(value) -> list[str]:
     if isinstance(value, str):
         stripped = value.strip()
@@ -884,6 +897,82 @@ def normalize_command_config(value) -> list[str]:
                 normalized.append(text)
         return normalized
     return []
+
+
+def load_automation_target_config(config: dict, target_name: str) -> dict:
+    automation_config = config.get("automation", {})
+    if not isinstance(automation_config, dict):
+        automation_config = {}
+
+    target_config = automation_config.get(target_name, {})
+    if not isinstance(target_config, dict):
+        target_config = {}
+
+    inherited_strategy = str(automation_config.get("mode", "safe_auto")).strip() or "safe_auto"
+    strategy = str(target_config.get("strategy", inherited_strategy)).strip() or inherited_strategy
+    if strategy not in AUTOMATION_STRATEGIES:
+        strategy = "safe_auto"
+
+    command = normalize_command_config(target_config.get("command", []))
+    timeout_seconds = max(coerce_int(target_config.get("timeout_seconds", 45), 45), 5)
+    min_confidence = min(max(coerce_float(target_config.get("min_confidence", 0.8), 0.8), 0.0), 1.0)
+    return {
+        "strategy": strategy,
+        "command": command,
+        "timeout_seconds": timeout_seconds,
+        "min_confidence": min_confidence,
+        "enabled": strategy == "agent_assisted" and bool(command),
+    }
+
+
+def load_post_ingest_review_auto_config(config: dict) -> dict:
+    automation_config = config.get("automation", {})
+    if not isinstance(automation_config, dict):
+        automation_config = {}
+
+    post_ingest_config = automation_config.get("post_ingest", {})
+    if not isinstance(post_ingest_config, dict):
+        post_ingest_config = {}
+
+    review_auto_enabled = post_ingest_config.get("review_auto", True)
+    return {
+        "review_auto": bool(review_auto_enabled),
+    }
+
+
+def run_json_automation_command(
+    target: Path,
+    command: list[str],
+    payload: dict,
+    timeout_seconds: int,
+) -> dict | None:
+    if not command:
+        return None
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=target,
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        return None
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def supported_page_render_targets() -> tuple[str, ...]:
@@ -1124,6 +1213,10 @@ def build_alias_index(page_records: list[dict]) -> dict:
     live_page_records = filter_live_page_records(page_records)
     pages_by_canonical_id: dict[str, list[dict]] = {}
     title_owners_by_alias: dict[str, list[dict]] = {}
+    noisy_title_alias_values = {
+        normalize_alias_value("一句话总结"),
+        normalize_alias_value("注意"),
+    }
 
     def canonical_page_rank_key(page_record: dict) -> tuple:
         page_type = page_record.get("type", "")
@@ -1144,6 +1237,12 @@ def build_alias_index(page_records: list[dict]) -> dict:
             title_owners_by_alias.setdefault(normalized_title, []).append(page_record)
 
     def should_register_title_alias(page_record: dict, normalized_title: str) -> bool:
+        if normalized_title in noisy_title_alias_values:
+            owners = title_owners_by_alias.get(normalized_title, [])
+            return len({
+                owner.get("canonical_id") or owner.get("page_id")
+                for owner in owners
+            }) <= 1
         # source-summary 的标题常常只是原文文件名或章节名，
         # 如果它与概念/综述页重名，再把它注册成 alias 只会制造噪声和伪冲突。
         # 这里保留 source-summary 的正文/标题检索能力，但在 alias registry 里更保守。
@@ -8188,6 +8287,162 @@ def choose_auto_merge_primary_claim_id(candidate_claim_ids: list[str], live_clai
     return ranked[0]["claim_id"] if ranked else None
 
 
+def build_review_auto_decision_payload(
+    review_record: dict,
+    live_claims_by_id: dict[str, dict],
+    target: Path,
+) -> dict:
+    candidate_claims = []
+    for claim_id in review_record.get("candidate_claim_ids", []):
+        claim_record = live_claims_by_id.get(claim_id)
+        if claim_record is None:
+            continue
+        candidate_claims.append({
+            "claim_id": claim_id,
+            "text": claim_record.get("text", ""),
+            "status": claim_record.get("status"),
+            "claim_type": claim_record.get("claim_type"),
+            "source_count": len(set(claim_record.get("source_ids", []))),
+            "source_ref_count": len(claim_record.get("source_refs", [])),
+            "confidence": claim_record.get("confidence"),
+            "duplicate_candidates": claim_record.get("duplicate_candidates", []),
+            "conflict_group": claim_record.get("conflict_group"),
+        })
+    payload = {
+        "task": "review_auto_decision",
+        "review": {
+            "review_id": review_record.get("review_id"),
+            "kind": review_record.get("kind"),
+            "reason": review_record.get("reason"),
+            "recommended_action": review_record.get("recommended_action"),
+            "allowed_actions": review_record.get("allowed_actions", []),
+            "candidate_claim_ids": review_record.get("candidate_claim_ids", []),
+            "candidate_page_ids": review_record.get("candidate_page_ids", []),
+            "evidence": review_record.get("evidence", []),
+        },
+        "candidate_claims": candidate_claims,
+        "candidate_pages": [],
+    }
+    candidate_page_ids = review_record.get("candidate_page_ids", [])
+    if candidate_page_ids:
+        pages_path = target / "state" / "pages.jsonl"
+        if pages_path.exists():
+            page_records = [
+                ensure_page_lifecycle_defaults(record)
+                for record in load_jsonl(pages_path)
+            ]
+            page_lookup = {record.get("page_id"): record for record in page_records}
+            for page_id in candidate_page_ids:
+                page_record = page_lookup.get(page_id)
+                if page_record is None:
+                    continue
+                payload["candidate_pages"].append({
+                    "page_id": page_id,
+                    "canonical_id": page_record.get("canonical_id") or page_id,
+                    "title": page_record.get("title", ""),
+                    "aliases": page_record.get("aliases", []),
+                    "type": page_record.get("type"),
+                    "status": page_record.get("status"),
+                })
+    return payload
+
+
+def normalize_review_auto_hook_plan(
+    hook_result: dict,
+    review_record: dict,
+    base_plan: dict,
+    live_claims_by_id: dict[str, dict],
+    min_confidence: float,
+) -> dict | None:
+    decision = str(hook_result.get("decision", "")).strip().lower()
+    if decision != "auto_apply":
+        return None
+
+    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
+    if confidence < min_confidence:
+        return None
+
+    action = str(hook_result.get("action", "")).strip()
+    allowed_actions = set(review_record.get("allowed_actions", []))
+    if action not in allowed_actions:
+        return None
+
+    candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
+    candidate_page_ids = list(review_record.get("candidate_page_ids", []))
+    plan = dict(base_plan)
+    plan.update({
+        "decision": "auto_apply",
+        "action": action,
+        "reason": str(hook_result.get("reason", "agent_hook_auto_apply")).strip() or "agent_hook_auto_apply",
+        "confidence": confidence,
+    })
+
+    if action in {"merge", "archive_one"}:
+        primary_claim_id = str(hook_result.get("primary_claim_id", "")).strip()
+        if primary_claim_id not in candidate_claim_ids:
+            return None
+        plan["primary_claim_id"] = primary_claim_id
+        if action == "merge":
+            secondary_claim_id = str(hook_result.get("secondary_claim_id", "")).strip()
+            if secondary_claim_id not in candidate_claim_ids or secondary_claim_id == primary_claim_id:
+                ranked_primary = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
+                if ranked_primary is None:
+                    return None
+                primary_claim_id = ranked_primary
+                secondary_claim_id = next(
+                    claim_id for claim_id in candidate_claim_ids
+                    if claim_id != primary_claim_id
+                )
+                plan["primary_claim_id"] = primary_claim_id
+            plan["secondary_claim_id"] = secondary_claim_id
+    elif action in {"assign_alias", "remove_alias"}:
+        primary_page_id = str(hook_result.get("primary_page_id", "")).strip()
+        if primary_page_id not in candidate_page_ids:
+            return None
+        alias_value = str(hook_result.get("alias_value", "")).strip()
+        if not alias_value:
+            evidence = review_record.get("evidence", [])
+            alias_value = str(evidence[0].get("alias", "")).strip() if evidence else ""
+        if not alias_value:
+            return None
+        plan["primary_page_id"] = primary_page_id
+        plan["alias_value"] = alias_value
+    return plan
+
+
+def maybe_get_agent_assisted_review_plan(
+    target: Path,
+    review_record: dict,
+    live_claims_by_id: dict[str, dict],
+    automation_config: dict,
+    base_plan: dict,
+) -> dict | None:
+    if not automation_config.get("enabled"):
+        return None
+
+    payload = build_review_auto_decision_payload(
+        review_record=review_record,
+        live_claims_by_id=live_claims_by_id,
+        target=target,
+    )
+    hook_result = run_json_automation_command(
+        target=target,
+        command=automation_config.get("command", []),
+        payload=payload,
+        timeout_seconds=automation_config.get("timeout_seconds", 45),
+    )
+    if hook_result is None:
+        return None
+
+    return normalize_review_auto_hook_plan(
+        hook_result=hook_result,
+        review_record=review_record,
+        base_plan=base_plan,
+        live_claims_by_id=live_claims_by_id,
+        min_confidence=automation_config.get("min_confidence", 0.8),
+    )
+
+
 def review_action_plain_label(action: str) -> str:
     labels = {
         "merge": "合并成一条更清楚的结论",
@@ -8200,7 +8455,10 @@ def review_action_plain_label(action: str) -> str:
     return labels.get(action, action)
 
 
-def claim_record_is_safe_auto_stable_candidate(claim_record: dict, live_reviews_by_id: dict[str, dict]) -> tuple[bool, str | None]:
+def claim_record_is_safe_auto_stable_candidate(
+    claim_record: dict,
+    live_reviews_by_id: dict[str, dict],
+) -> tuple[bool, str | None]:
     if claim_record.get("lifecycle_status") != "active":
         return False, "claim_not_active"
     if claim_record.get("status") != "draft":
@@ -8226,6 +8484,49 @@ def claim_record_is_safe_auto_stable_candidate(claim_record: dict, live_reviews_
     if len(set(claim_record.get("source_ids", []))) >= 2:
         return True, None
     return False, "claim_not_stable_enough_for_safe_auto"
+
+
+def build_stable_promotion_payload(claim_record: dict) -> dict:
+    return {
+        "task": "claim_stable_promotion",
+        "claim": {
+            "claim_id": claim_record.get("claim_id"),
+            "text": claim_record.get("text", ""),
+            "status": claim_record.get("status"),
+            "claim_type": claim_record.get("claim_type"),
+            "confidence": claim_record.get("confidence"),
+            "source_ids": claim_record.get("source_ids", []),
+            "source_refs": claim_record.get("source_refs", []),
+            "duplicate_candidates": claim_record.get("duplicate_candidates", []),
+            "conflict_group": claim_record.get("conflict_group"),
+            "page_ids": claim_record.get("page_ids", []),
+        },
+    }
+
+
+def maybe_get_agent_assisted_stable_promotion(
+    target: Path,
+    claim_record: dict,
+    automation_config: dict,
+) -> tuple[bool, str | None]:
+    if not automation_config.get("enabled"):
+        return False, None
+
+    hook_result = run_json_automation_command(
+        target=target,
+        command=automation_config.get("command", []),
+        payload=build_stable_promotion_payload(claim_record),
+        timeout_seconds=automation_config.get("timeout_seconds", 45),
+    )
+    if hook_result is None:
+        return False, None
+
+    decision = str(hook_result.get("decision", "")).strip().lower()
+    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
+    if decision != "promote" or confidence < automation_config.get("min_confidence", 0.8):
+        return False, None
+    reason = str(hook_result.get("reason", "agent_hook_promoted_to_stable")).strip() or "agent_hook_promoted_to_stable"
+    return True, reason
 
 
 def build_review_auto_escalation_entry(
@@ -8295,6 +8596,8 @@ def build_review_auto_agent_handoff(
     auto_apply_plans: list[dict],
     escalated_entries: list[dict],
     promoted_claims: list[dict],
+    review_automation_config: dict,
+    stable_automation_config: dict,
 ) -> tuple[dict, str]:
     should_ask_user = bool(escalated_entries)
     next_action = (
@@ -8309,18 +8612,22 @@ def build_review_auto_agent_handoff(
         "auto_apply_review_count": len(auto_apply_plans),
         "escalated_review_count": len(escalated_entries),
         "promoted_claim_count": len(promoted_claims),
+        "review_auto_strategy": review_automation_config.get("strategy"),
+        "stable_promotion_strategy": stable_automation_config.get("strategy"),
     }
     if should_ask_user:
         first_item = escalated_entries[0]
         agent_summary = (
-            f"已自动处理 {len(auto_apply_plans)} 条高把握 review，"
+            f"已自动处理 {len(auto_apply_plans)} 条高把握 review"
+            f"（review_auto={review_automation_config.get('strategy')}），"
             f"但还有 {len(escalated_entries)} 条需要用户判断。"
             f"优先向用户解释 `{first_item['display_id']}`：{first_item['issue_summary']}"
         )
     else:
         agent_summary = (
             f"本轮高把握 review 已全部自动收口，共处理 {len(auto_apply_plans)} 条，"
-            f"并额外提升了 {len(promoted_claims)} 条 claim 为 stable。"
+            f"并额外提升了 {len(promoted_claims)} 条 claim 为 stable"
+            f"（stable_promotion={stable_automation_config.get('strategy')}）。"
         )
     return agent_brief, agent_summary
 
@@ -8456,7 +8763,36 @@ def render_review_auto_chatml(review_auto_payload: dict) -> str:
     return "\n".join(blocks)
 
 
-def propose_review_auto_action(review_record: dict, live_claims_by_id: dict[str, dict]) -> dict:
+def run_post_ingest_review_auto(target: Path) -> dict:
+    review_auto_result = command_review_auto(argparse.Namespace(
+        target_dir=str(target),
+        dry_run=False,
+        format="summary",
+        json=True,
+    ))
+    return review_auto_result.payload
+
+
+def render_post_ingest_review_auto_summary(review_auto_payload: dict | None) -> str | None:
+    if not review_auto_payload:
+        return None
+    summary = review_auto_payload.get("summary", {})
+    agent_brief = review_auto_payload.get("agent_brief", {})
+    return (
+        "Auto review: "
+        f"applied={summary.get('applied_count', 0)}, "
+        f"escalated={summary.get('escalated_count', 0)}, "
+        f"promoted_claims={summary.get('promoted_claim_count', 0)}, "
+        f"next_action={agent_brief.get('next_action', 'continue_with_normal_workflow')}"
+    )
+
+
+def propose_review_auto_action(
+    target: Path,
+    review_record: dict,
+    live_claims_by_id: dict[str, dict],
+    automation_config: dict,
+) -> dict:
     review_id = review_record["review_id"]
     kind = review_record.get("kind")
     recommended_action = review_record.get("recommended_action")
@@ -8474,6 +8810,7 @@ def propose_review_auto_action(review_record: dict, live_claims_by_id: dict[str,
         "secondary_claim_id": None,
         "primary_page_id": None,
         "alias_value": None,
+        "confidence": None,
     }
 
     if not is_actionable_review_record(review_record):
@@ -8513,14 +8850,28 @@ def propose_review_auto_action(review_record: dict, live_claims_by_id: dict[str,
             })
             return plan
         plan["reason"] = "alias_conflict_needs_human_owner_choice"
-        return plan
+        agent_plan = maybe_get_agent_assisted_review_plan(
+            target=target,
+            review_record=review_record,
+            live_claims_by_id=live_claims_by_id,
+            automation_config=automation_config,
+            base_plan=plan,
+        )
+        return agent_plan or plan
 
     if kind == "claim_duplicate" and recommended_action == "merge" and "merge" in allowed_actions:
         candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
         primary_claim_id = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
         if primary_claim_id is None:
             plan["reason"] = "duplicate_review_needs_human_merge_choice"
-            return plan
+            agent_plan = maybe_get_agent_assisted_review_plan(
+                target=target,
+                review_record=review_record,
+                live_claims_by_id=live_claims_by_id,
+                automation_config=automation_config,
+                base_plan=plan,
+            )
+            return agent_plan or plan
         secondary_claim_id = next(
             claim_id for claim_id in candidate_claim_ids
             if claim_id != primary_claim_id
@@ -8534,6 +8885,25 @@ def propose_review_auto_action(review_record: dict, live_claims_by_id: dict[str,
         })
         return plan
 
+    if kind == "claim_conflict":
+        agent_plan = maybe_get_agent_assisted_review_plan(
+            target=target,
+            review_record=review_record,
+            live_claims_by_id=live_claims_by_id,
+            automation_config=automation_config,
+            base_plan=plan,
+        )
+        return agent_plan or plan
+
+    agent_plan = maybe_get_agent_assisted_review_plan(
+        target=target,
+        review_record=review_record,
+        live_claims_by_id=live_claims_by_id,
+        automation_config=automation_config,
+        base_plan=plan,
+    )
+    if agent_plan is not None:
+        return agent_plan
     plan["reason"] = "review_kind_or_action_not_in_safe_auto_rules"
     return plan
 
@@ -8542,6 +8912,9 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     claims_path = target / "state" / "claims.jsonl"
     reviews_path = target / "state" / "reviews.jsonl"
+    config = load_workspace_config(target)
+    review_automation_config = load_automation_target_config(config, "review_auto")
+    stable_automation_config = load_automation_target_config(config, "stable_promotion")
 
     live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
     live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
@@ -8565,7 +8938,12 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
         )
 
     planned_actions = [
-        propose_review_auto_action(review_record, live_claims_by_id)
+        propose_review_auto_action(
+            target=target,
+            review_record=review_record,
+            live_claims_by_id=live_claims_by_id,
+            automation_config=review_automation_config,
+        )
         for review_record in sorted(
             live_reviews_by_id.values(),
             key=lambda item: (item.get("created_at", ""), review_display_id(item)),
@@ -8583,14 +8961,22 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
             review_record = live_reviews_by_id.get(plan["review_id"])
             if review_record is None:
                 continue
+            current_plan = propose_review_auto_action(
+                target=target,
+                review_record=review_record,
+                live_claims_by_id=live_claims_by_id,
+                automation_config=review_automation_config,
+            )
+            if current_plan.get("decision") != "auto_apply":
+                continue
             result = apply_review_action(
                 target=target,
                 review_record=review_record,
-                action=plan["action"],
-                primary_claim_id=plan["primary_claim_id"],
-                secondary_claim_id=plan["secondary_claim_id"],
-                primary_page_id=plan["primary_page_id"],
-                alias_value=plan["alias_value"],
+                action=current_plan["action"],
+                primary_claim_id=current_plan["primary_claim_id"],
+                secondary_claim_id=current_plan["secondary_claim_id"],
+                primary_page_id=current_plan["primary_page_id"],
+                alias_value=current_plan["alias_value"],
                 live_claims_by_id=live_claims_by_id,
                 historical_claims_by_id=historical_claims_by_id,
                 live_reviews_by_id=live_reviews_by_id,
@@ -8598,10 +8984,10 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
             )
             live_reviews_by_id[review_record["review_id"]] = review_record
             applied_actions.append({
-                "review_id": plan["review_id"],
-                "display_id": plan["display_id"],
-                "kind": plan["kind"],
-                "reason": plan["reason"],
+                "review_id": current_plan["review_id"],
+                "display_id": current_plan["display_id"],
+                "kind": current_plan["kind"],
+                "reason": current_plan["reason"],
                 "action": result.get("action"),
                 "changed_claim_ids": result.get("changed_claim_ids", []),
                 "changed_page_ids": result.get("changed_page_ids", []),
@@ -8610,13 +8996,20 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
         for claim_record in sorted(live_claims_by_id.values(), key=lambda item: item["claim_id"]):
             is_safe, reason = claim_record_is_safe_auto_stable_candidate(claim_record, live_reviews_by_id)
             if not is_safe:
-                continue
+                promoted_by_hook, hook_reason = maybe_get_agent_assisted_stable_promotion(
+                    target=target,
+                    claim_record=claim_record,
+                    automation_config=stable_automation_config,
+                )
+                if not promoted_by_hook:
+                    continue
+                reason = hook_reason
             claim_record["status"] = "stable"
             claim_record["review_reason"] = None
             claim_record["updated_at"] = utc_now_iso()
             promoted_claims.append({
                 "claim_id": claim_record["claim_id"],
-                "reason": "safe_auto_promoted_to_stable",
+                "reason": reason or "safe_auto_promoted_to_stable",
             })
 
         write_jsonl(
@@ -8683,6 +9076,8 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
         auto_apply_plans=auto_apply_plans,
         escalated_entries=escalated_entries,
         promoted_claims=promoted_claims,
+        review_automation_config=review_automation_config,
+        stable_automation_config=stable_automation_config,
     )
 
     payload = {
@@ -8703,6 +9098,18 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
             "escalated_count": len(escalated_plans),
             "applied_count": len(applied_actions),
             "promoted_claim_count": len(promoted_claims),
+        },
+        "automation": {
+            "review_auto": {
+                "strategy": review_automation_config.get("strategy"),
+                "enabled": review_automation_config.get("enabled"),
+                "min_confidence": review_automation_config.get("min_confidence"),
+            },
+            "stable_promotion": {
+                "strategy": stable_automation_config.get("strategy"),
+                "enabled": stable_automation_config.get("enabled"),
+                "min_confidence": stable_automation_config.get("min_confidence"),
+            },
         },
     }
     handoff_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
@@ -9021,6 +9428,7 @@ def rebuild_review_affected_pages(
 
     write_jsonl(pages_path, list(page_records_by_id.values()))
     rebuild_wiki_index(target, list(page_records_by_id.values()))
+    write_alias_index(target, list(page_records_by_id.values()))
     refresh_alias_conflict_reviews(
         target=target,
         live_reviews_by_id=live_reviews_by_id,
@@ -9306,12 +9714,27 @@ def apply_review_action(
             projected_alias_index = build_alias_index(page_records)
             projected_matches = alias_index_matches_for_value(projected_alias_index, alias_to_assign)
             projected_page_ids = sorted({match.get("page_id") for match in projected_matches if match.get("page_id")})
+            projected_canonical_ids = sorted({
+                match.get("canonical_id") or match.get("page_id")
+                for match in projected_matches
+                if match.get("canonical_id") or match.get("page_id")
+            })
+            primary_canonical_id = next(
+                (
+                    record.get("canonical_id") or record.get("page_id")
+                    for record in page_state_records
+                    if record.get("page_id") == primary_page_id
+                ),
+                primary_page_id,
+            )
 
             if action == "assign_alias":
-                if projected_page_ids != [primary_page_id]:
+                if projected_canonical_ids != [primary_canonical_id]:
                     raise ValueError(
                         "assign_alias did not converge alias ownership. "
-                        f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
+                        "Alias "
+                        f"`{alias_to_assign}` would remain on canonical_ids={projected_canonical_ids} "
+                        f"(page_ids={projected_page_ids})."
                     )
             elif projected_page_ids:
                 raise ValueError(
@@ -9606,6 +10029,7 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "raw_dir_name": raw_dir.name,
         "raw_dir_path": str(raw_dir),
         "raw_dir_relative_path": raw_dir_relative_path,
+        "python_executable": sys.executable,
     }
 
     for directory in (
@@ -9711,6 +10135,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     # 它现在包含五步：来源登记、标准化、切块、Claim 草稿抽取、Wiki 页面生成。
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     config = load_workspace_config(target)
+    post_ingest_config = load_post_ingest_review_auto_config(config)
     readable_concept_render_config = load_readable_concept_render_config(config)
     overview_render_config = load_page_render_config(config, "overview")
     raw_dir = resolve_workspace_path(target, config["paths"]["raw"])
@@ -10280,6 +10705,8 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         ):
             can_skip_page_regeneration = False
 
+    post_ingest_review_auto_payload = None
+
     if can_skip_page_regeneration:
         previous_search_index_records = load_search_pages_index(target)
         search_index = {
@@ -10319,6 +10746,9 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
                 "tracked_page_count": len(existing_pages),
             },
         }
+        if post_ingest_config.get("review_auto"):
+            post_ingest_review_auto_payload = run_post_ingest_review_auto(target)
+            payload["post_ingest_review_auto"] = post_ingest_review_auto_payload
         return CommandResult(
             payload=payload,
             message=render_workspace_summary_message(
@@ -10327,6 +10757,20 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
                 raw_dir=raw_dir,
                 extra_lines=[
                     f"Task id: {task_id}",
+                    (
+                        "Ingest: "
+                        f"normalized={payload['summary']['normalized_count']}, "
+                        f"chunks={payload['summary']['chunked_count']}, "
+                        f"claims={payload['summary']['claimed_count']}, "
+                        f"changed_pages={payload['summary']['changed_page_count']}, "
+                        f"reviews_detected={payload['summary']['review_count']}, "
+                        f"warnings={payload['summary']['warning_count']}, "
+                        f"errors={payload['summary']['error_count']}"
+                    ),
+                    (
+                        render_post_ingest_review_auto_summary(post_ingest_review_auto_payload)
+                    )
+                    if post_ingest_review_auto_payload is not None else None,
                 ],
             ),
         )
@@ -10722,6 +11166,9 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             "warning_count": len([item for item in error_items if item["level"] == "warning"]),
         },
     }
+    if post_ingest_config.get("review_auto"):
+        post_ingest_review_auto_payload = run_post_ingest_review_auto(target)
+        payload["post_ingest_review_auto"] = post_ingest_review_auto_payload
     return CommandResult(
         payload=payload,
         message=render_workspace_summary_message(
@@ -10731,15 +11178,20 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             extra_lines=[
                 f"Task id: {task_id}",
                 (
-                    "Summary: "
+                    "Ingest: "
                     f"normalized={payload['summary']['normalized_count']}, "
                     f"chunks={payload['summary']['chunked_count']}, "
                     f"claims={payload['summary']['claimed_count']}, "
                     f"changed_pages={payload['summary']['changed_page_count']}, "
-                    f"reviews={payload['summary']['review_count']}, "
+                    f"reviews_detected={payload['summary']['review_count']}, "
                     f"warnings={payload['summary']['warning_count']}, "
                     f"errors={payload['summary']['error_count']}"
                 ),
+                (
+                    render_post_ingest_review_auto_summary(post_ingest_review_auto_payload)
+                )
+                if post_ingest_review_auto_payload is not None
+                else None,
             ],
         ),
     )

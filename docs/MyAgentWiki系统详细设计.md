@@ -4,7 +4,7 @@
 
 本设计将 `MyAgentWiki` 定义为一个由 Python 脚本和 Agent 协同驱动的本地 LLM Wiki 系统，服务于 Codex 和 Claude Code 两类 Agent。  
 本文中的 `MyAgentWiki` 统一指母仓库 / 产品名；若需要举用户初始化后的工作区目录名示例，统一使用 `MyNotesWiki`。  
-V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条链路打通，其中 `raw -> normalized` 为最高优先级，并优先用 `Python 3.12+` 脚本完成文档格式转换；只有脚本无法稳定提取时，才允许 Agent 作为补充。
+V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条链路打通，其中 `raw -> normalized` 为最高优先级，并优先用 `Python 3.12+` 脚本完成文档格式转换；只有脚本无法稳定提取时，才允许 Agent 作为补充。当前产品定位已经进一步明确为 `agent_driven_local_llm_wiki`：默认假设系统运行在 Codex 或 Claude Code 这类 Agent 环境中，由脚本负责可重复、可回滚的确定性流水线，由 Agent / LLM hook 负责语义判断、审核裁决、stable 提升、概念页和综述页的 grounded 改写。
 
 系统的关键能力是：
 - 从用户原始知识目录同级初始化一个新的 Wiki 工程。
@@ -16,8 +16,18 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 
 当前实现采用 `deterministic first`：
 - 事实层、证据层、状态层优先由 Python 脚本和显式账本生成。
-- LLM 主要参与页面可读性改写、导览组织和表达优化。
-- LLM 产物不能成为新的事实来源；若改写无法 grounded 到既有 Claim/Page，则必须自动回退到 deterministic fallback。
+- LLM 主要参与页面可读性改写、导览组织、审核自动裁决和 stable 提升判断。
+- LLM 产物不能成为新的事实来源；若改写或裁决无法 grounded 到既有 Claim/Page/Review，则必须自动回退到 deterministic fallback 或升级人工判断。
+
+当前自动化哲学已经固定为：
+- scripts own deterministic pipeline：扫描、标准化、切块、账本更新、索引重建、页面落盘、状态恢复都由 CLI 收口。
+- Agent hooks own semantic judgment：冲突是否可保守自动处理、Claim 是否可提升为 `stable`、概念页/综述页如何在 grounded 前提下改写，由 Agent hook 提供高置信判断。
+- human only for irreducible ambiguity：只有高风险冲突、归属不清、hook 未达置信阈值，或涉及敏感边界时才升级人工。
+
+当前默认工程策略进一步固定为：
+- `init` 生成的新工作区会默认把 `review_auto`、`stable_promotion`、`readable_concept` 与 `overview` 四类任务统一接到包内 Agent hook。
+- 因而“自动审核 -> 自动提稳 -> 自动生成概念页 -> 自动生成综述页”不再只是可选能力，而是默认推荐工作流的一部分。
+- 默认 hook 本身也遵守 grounded-first：只做可读性重写和保守裁决；一旦输出不通过校验，就回退到 deterministic 产物或升级人工。
 
 ## 系统结构 System Structure
 
@@ -293,7 +303,7 @@ V1 当前实现说明：
 - 已解决的审核项不会立即删除，而是保留 `status=resolved`，这样后面还能追溯当时为什么合并、保留或归档。
 - `alias_conflict` 属于页面别名冲突，有时只涉及页面，不涉及 Claim，所以这类 review 可以只填写 `candidate_page_ids`。
 - 当前已补一条保守自动审核路径 `review-auto`：先读取 live review 与页面/claim 现状，自动应用高把握动作，再把剩余需要人判断的项保留为 escalated handoff，而不是强行替用户做主。
-- 当前 `review-auto` 默认只覆盖保守场景，例如“恰好两条候选 Claim 的 duplicate merge”与“可安全收敛的 alias remove/单归属 assign”；超出这层把握的 review 仍保持为 `open`，等待人工或 Agent 进一步解释后裁决。
+- 当前 `review-auto` 已扩展到一组更完整、但仍然保守的自动场景，包括片段化/被包含的 conflict claim 归档、互补或问题型 claim 的 `keep_both`、以及噪声 alias 的唯一归属或移除；超出这层把握的 review 仍保持为 `open`，等待人工或 Agent 进一步解释后裁决。
 
 ### 状态、等级与关键术语说明
 
@@ -486,6 +496,20 @@ CLI 入口固定为：
 - `python -m myagentwiki review-list`：列出审核队列。
 - `python -m myagentwiki review-auto`：保守地自动处理高把握审核项，并把剩余需要人判断的项整理成 handoff。
 - `python -m myagentwiki review-apply`：应用审核决策并恢复后续流程。
+
+工作区配置当前默认会显式声明自动化定位：
+- `project.positioning: agent_driven_local_llm_wiki`
+- `automation.mode: safe_auto`
+- `automation.philosophy: prefer_agent_automation_until_human_judgment_is_required`
+- `automation.post_ingest.review_auto: true`
+- `automation.review_auto.*`：控制审核自动处理 hook 的策略、命令、超时和置信阈值
+- `automation.stable_promotion.*`：控制 Claim 提升为 `stable` 的 hook 策略、命令、超时和置信阈值
+- `rendering.readable_concept / overview / qa_note / concept_update`：控制概念页、综述页、问答沉淀页的 `llm_assisted` 渲染
+
+当前默认模板还会把这些任务统一指向包内入口：
+- `python -m myagentwiki.agent_hook`
+- 该统一入口会按 `task` 分发 `review_auto_decision`、`claim_stable_promotion`、`render_readable_concept_page`、`render_workspace_overview_page`
+- 用户若有更强的外部 Agent / LLM 编排器，仍可在工作区配置里覆盖成自己的命令
 
 CLI 输出约定：
 - 这些主命令的 JSON 输出应优先保持“上层 Agent 可直接消费”的稳定结构。
@@ -797,8 +821,9 @@ V1 允许：
 
 V1 当前实现说明：
 - 当前规则抽取出来的 Claim 主要落在 `draft` / `needs_review`。
-- `stable`、`disputed` 目前仍属于后续人工或 Agent 深化治理状态，尚未在自动流程中完整使用。
-- 原因是 `stable` 和 `disputed` 都需要比“抽取一句话”更强的判断：`stable` 需要确认来源可靠、语义清楚、没有被其他 Claim 明显反驳；`disputed` 需要确认候选 Claim 之间确实存在争议，而不是只是表达方式不同、上下文不同或抽取噪声。
+- `disputed` 目前仍更偏向后续人工或 Agent 深化治理状态，尚未在自动流程中完整展开使用。
+- `stable` 则已经进入受控自动流程：系统可在 `review-auto` 阶段通过 `stable_promotion` hook，对来源覆盖、证据强度和语义清晰度都较好的 Claim 做保守提升；若 hook 未给出高置信 promote，则仍保持原状态。
+- 原因是 `stable` 和 `disputed` 都需要比“抽取一句话”更强的判断：`stable` 需要确认来源可靠、语义清楚、没有被其他 Claim 明显反驳；`disputed` 则还需要确认候选 Claim 之间确实存在争议，而不是只是表达方式不同、上下文不同或抽取噪声。
 - V1 的自动流程主要负责把候选结论、来源和风险信号整理出来，不默认替用户做最终知识裁决。这样可以避免系统过早把不成熟 Claim 标成稳定结论，或把误报冲突标成争议事实。
 - 生命周期维度当前独立使用 `lifecycle_status` 表达 `active / superseded / archived`。
 - 简单理解：`status` 说明 Claim 的知识可信状态，`lifecycle_status` 说明这条 Claim 当前还是否参与主流程。
@@ -1064,6 +1089,38 @@ V1 建议的 guardrail 推导规则：
 - 若 `agent_brief.should_ask_user=true`，上层 Agent 应只围绕 `escalation_handoff` 中列出的审核项追问用户，并优先使用 `choice_options` 的白话标签解释选项。
 - `messages` / `chatml` / `prompt` 三种格式应共享同一套 handoff 语义，避免不同渲染格式各自漂移。
 
+当前实现边界已经比早期设计更进一步：
+- `review-auto` 不再只覆盖“恰好两条候选 Claim 的 duplicate merge”和最窄的 alias 修正。
+- 当前会优先读取 live review、live claim、live page 与 alias index 现状，再结合 deterministic 规则和可选 Agent hook 生成计划。
+- 当前已补充的保守自动收口场景包括：
+  - 片段化、明显过短或被更完整陈述包含的 `claim_conflict`，自动 `archive_one`
+  - 两条都像问题、但语义焦点明显不同的 `claim_conflict`，自动 `keep_both`
+  - 共享核心词但互补、且并非包含关系的两条非问句 Claim，自动 `keep_both`
+  - 噪声 alias（例如 `一句话总结`、`注意`）在唯一 canonical 归属下的自动 `assign_alias`
+  - 不适合作为检索入口、且不存在标题归属的噪声 alias，自动 `remove_alias`
+- 若配置了 `automation.review_auto` 的 Agent hook，系统会先把 review、候选 claim、候选页面、允许动作和证据摘要打包给 hook；只有 hook 返回 `decision=auto_apply` 且达到最小置信阈值时，CLI 才真正落地动作。
+- 自动动作执行完成后，系统会立即复用既有 `review-apply` 收口链，刷新相关 claim、review、页面、索引与 handoff 摘要，而不是只在内存里记一份临时决策。
+
+### Stable Promotion Hook
+除了审核自动处理，当前实现已经为 Claim 的 `stable` 提升补了一层 Agent-assisted hook。
+
+当前入口仍然挂在：
+- `python -m myagentwiki review-auto`
+
+它的职责不是单独暴露成另一条命令，而是在自动审核完成、需要判断某条 live claim 是否可以被保守提升为 `stable` 时，作为受控子步骤运行。
+
+当前约束：
+- `stable_promotion` hook 接收单条 claim 的文本、来源覆盖、证据数量、置信度、页面关联等结构化信息。
+- hook 只有返回 `decision=promote` 且 `confidence` 达到配置阈值时，CLI 才会把该 claim 提升为 `stable`。
+- 若 hook 未启用、未返回 promote、或置信度不足，则 claim 保持原状，不会因为自动流程“顺手”被提稳。
+- `review-auto` 的最终 payload 会把本轮自动提升为 `stable` 的 claim 汇总到 `promoted_claims`，供上层 Agent 判断后续是否继续生成概念页、综述页，或仍需人工确认。
+
+当前默认触发链已经进一步收口为：
+- `review-auto` 自动提升 claim 为 `stable` 后，不需要再等人工单独触发页面生成。
+- 页面重建链会立刻把这些稳定 claim 编译为可读 `concept` 页。
+- 当工作区里至少已有两个可读 `concept` 页时，同一条重建链会继续生成或刷新工作区级 `overview` 页。
+- 因此 `stable` 不只是状态标签，也直接成为更高层可读页面自动生成的触发条件。
+
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。
 - 命中相关页面后，再读取相关 `section`（章节）、`claim`（知识声明）、`chunk`（证据切块）。
@@ -1136,6 +1193,13 @@ V1 暂不承诺：
 - 不承诺跨任意版本的完美最小 diff。
 - 不承诺所有中间层文件都做对象级最细粒度复用。
 
+当前 `ingest` 已经可以被配置成复合自动化流程，而不只是“写完中间产物就结束”：
+- 当 `automation.post_ingest.review_auto: true` 时，每次 `ingest` 结束后，CLI 会自动继续执行一轮 `review-auto`。
+- 因此对 Codex / Claude Code 而言，默认应把 `ingest` 理解为 `ingest -> review-auto` 的复合收口流程；如果本轮 review-auto 又自动提升了部分 claim 为 `stable`，那后续概念页、综述页渲染就能直接消费更稳定的输入。
+- `ingest` 的 JSON 输出会额外附带 `post_ingest_review_auto`，纯文本输出也会单独打印一段 post-ingest auto-review 摘要，避免上层 Agent 误以为 ingest 已经完全结束。
+- 在默认模板下，这条复合流程还隐含了后续页面自动收口：`ingest -> review-auto -> stable promotion -> readable concept render -> workspace overview render`。
+- 其中后两步不需要上层 Agent 再单独补一条 `render-page` 命令；它们已经被纳入同一套页面重建链里。
+
 ### 更新模式
 页面更新策略与页面创建策略分离，V1 固定支持：
 - `append`（追加）：补充新证据或新段落，不改写旧结论。适用于新增来源只是在原有页面后面增加材料的情况。
@@ -1180,6 +1244,8 @@ V1 当前实现说明：
 - 当前 alias 覆盖层已经按“基于 live page 当前 alias 集合增删”的方式实现，避免人工处理单个 alias 时误伤该页原有其他 alias。
 - 当前 `assign_alias / remove_alias` 会先预演 alias 覆盖结果并重建 alias index，确认 alias 真正收敛后才写回账本，避免出现“命令成功但冲突仍存在”的假收敛。
 - 当前 `assign_alias / remove_alias` 已补充“重复 ingest 后仍然保持人工裁决结果”与“过期 alias review 自动收口”的回归测试。
+- 当前 `assign_alias` 的成功条件已经从“目标 alias 最终只落到某个 `page_id`”提升为“最终只收敛到目标 `canonical_id` 家族”。
+- 这意味着同一个规范主题下允许 `concept` 与 `concept-summary` 等页面类型共存；只要 alias 最终只归属于同一 canonical family，就应视为成功收敛，而不是误报冲突未解。
 
 ### 自动化分级
 V1 引入四级自动化边界：
@@ -1230,6 +1296,8 @@ V1 当前实现说明：
 - 当前这两类页面默认渲染模式都是 `llm_assisted`，但底座仍然是 deterministic：先由脚本计算 canonical claim、稳定主题、source coverage、推荐阅读路径等结构，再允许 LLM 在 grounded 约束下做可读性改写。
 - `concept` 与 `overview` 页面都必须记录 `render_target / render_mode / render_status`。
 - `overview` 在 `llm_assisted` 成功时，会额外生成折叠式 `Rewrite Traceability` 区块，显式展示改写句与其回绑页面，避免综述页长出新的“幻觉层”。
+- 因而当前页面生成的产品方向已经明确不是“只产出 source-summary + concept-summary 的中间草稿”，而是进一步支持 Agent 协同生成正式可读的概念页与工作区综述页；它们依旧由脚本先搭好 grounded 骨架，再由 LLM 做受控改写。
+- 当前默认模板也已经把这两类页面的 `command` 指向统一 Agent hook，因此对新工作区来说，“允许 LLM 辅助改写”已经不再是需要额外配置才能开启的能力，而是默认启用、按 grounded 校验自动回退的标准行为。
 
 ### 恢复机制
 - 自动流程写入 review item 后暂停危险动作。
@@ -1242,6 +1310,10 @@ V1 当前实现说明：
 - `edit_then_resume` 当前已支持“人工先改 Claim 文件，再恢复页面和索引重建”。
 - 当前 `alias_conflict`（别名冲突）在 `review-apply` 后，若人工覆盖层已消除冲突，下一轮 ingest 不会重新打开同一条 open review。
 - 当前 `review-list` 与 `review-apply` 在读取 review 前，会先按最新 live pages 与 alias index 刷新 alias conflict 队列；若某条 alias review 已不再对应真实冲突，会自动从 active/open 视图转入历史态。
+- 当前工作区模板中的 `AGENTS.md` 与 `CLAUDE.md` 也已经同步要求上层 Agent：
+  - 把 `ingest` 视作可能自动连跑 `review-auto` 的复合流程
+  - 优先尝试 `automation.review_auto` 与 `automation.stable_promotion` 对应的 Agent hook
+  - 除非确实需要人工判断，否则不应过早停止在“已发现 review”这一步
 
 ### Review 与状态一致性约束
 为保证 review 真正能成为恢复入口，V1 明确以下一致性规则：

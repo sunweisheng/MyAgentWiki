@@ -157,6 +157,127 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
 
 
+def test_init_enables_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "note.md").write_text("# 示例\n\n这是一条示例资料。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "PostIngestDefault",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
+    assert "post_ingest:" in config_text
+    assert "review_auto: true" in config_text
+
+
+def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Topic\n\n"
+        "为什么 LLM-Wiki 不等于没有检索。\n"
+        "为什么 LLM-Wiki 必须重视 Chunking。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "PostIngestReviewAuto",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    config_path = workspace_dir / "config" / "project.yml"
+    config_text = config_path.read_text(encoding="utf-8")
+    config_text = config_text.replace(
+        '  review_auto:\n'
+        '    strategy: "safe_auto"\n'
+        '    command: []\n'
+        '    timeout_seconds: 45\n'
+        '    min_confidence: 0.8\n',
+        '  review_auto:\n'
+        '    strategy: "agent_assisted"\n'
+        '    command:\n'
+        f'      - "{sys.executable}"\n'
+        f'      - "{REPO_ROOT / "scripts" / "agent_assisted_review_hook.py"}"\n'
+        '    timeout_seconds: 20\n'
+        '    min_confidence: 0.9\n',
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+
+    ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    assert "post_ingest_review_auto" in ingest_result
+    assert ingest_result["post_ingest_review_auto"]["summary"]["applied_count"] >= 1
+    review_list = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert not any(item["status"] == "open" for item in review_list["items"])
+
+
+def test_init_default_agent_hooks_auto_generate_concept_and_overview_pages(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "claim.md").write_text(
+        "# Claim\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+    (source_dir / "chunk.md").write_text(
+        "# Chunk\n\n"
+        "Chunk 是用于承载局部原文切片的证据单元。\n\n"
+        "Chunk 用于把原始资料拆成可追踪、可回链的阅读片段。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "DefaultAgentHooks",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
+    assert 'review_auto:\n    strategy: "agent_assisted"' in config_text
+    assert 'stable_promotion:\n    strategy: "agent_assisted"' in config_text
+    assert '- "-m"\n      - "myagentwiki.agent_hook"' in config_text
+
+    ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
+    assert ingest_result["post_ingest_review_auto"]["summary"]["promoted_claim_count"] >= 2
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    concept_pages = [record for record in page_records if record.get("type") == "concept"]
+    overview_pages = [record for record in page_records if record.get("type") == "overview"]
+
+    assert len(concept_pages) >= 2
+    assert len(overview_pages) == 1
+    assert all(record["render_mode"] == "llm_assisted" for record in concept_pages)
+    assert all(record["render_status"] == "llm_assisted" for record in concept_pages)
+    assert overview_pages[0]["render_mode"] == "llm_assisted"
+    assert overview_pages[0]["render_status"] == "llm_assisted"
+
+    concept_text = (workspace_dir / concept_pages[0]["page_path"]).read_text(encoding="utf-8")
+    overview_text = (workspace_dir / overview_pages[0]["page_path"]).read_text(encoding="utf-8")
+    assert "## 摘要 / Summary" in concept_text
+    assert "## 工作区综述 / Workspace Overview" in overview_text
+    assert "## 改写回绑 / Rewrite Traceability" in overview_text
+
+
 def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "LocalKnowledgeWiki"
 
@@ -204,6 +325,8 @@ def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> No
     assert f"Workspace: {workspace_dir.resolve()}" in ingest_stdout
     assert f"Raw sibling: {source_dir.resolve()}" in ingest_stdout
     assert f"Entry page: {(workspace_dir / 'wiki' / 'index.md').resolve()}" in ingest_stdout
+    assert "Ingest: normalized=" in ingest_stdout
+    assert "Auto review: applied=" in ingest_stdout
 
     query_stdout = run_cli_text("query", "示例", "--target-dir", str(workspace_dir))
     assert f"Workspace: {workspace_dir.resolve()}" in query_stdout
