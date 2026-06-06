@@ -294,6 +294,73 @@ def handle_stable_promotion(payload: dict) -> dict:
     return {"decision": "skip", "reason": "claim_not_confident_enough_for_promotion"}
 
 
+def handle_review_concept_candidate(payload: dict) -> dict:
+    candidate_title = normalize_text(payload.get("candidate_title", ""))
+    preferred_section_label = normalize_text(payload.get("preferred_section_label", ""))
+    canonical_claim = payload.get("canonical_claim", {}) or {}
+    supporting_claims = payload.get("supporting_claims", []) or []
+    merged_text = " ".join(
+        text for text in [
+            normalize_text(canonical_claim.get("text", "")),
+            *[normalize_text(item.get("text", "")) for item in supporting_claims[:4]],
+        ]
+        if text
+    )
+
+    generic_titles = {
+        "示例", "总结", "小结", "说明", "作用", "原因", "背景", "方法",
+        "流程", "步骤", "注意", "补充", "附录", "为什么", "如何", "怎么做",
+    }
+    if candidate_title in generic_titles:
+        if preferred_section_label and preferred_section_label not in generic_titles and len(preferred_section_label) >= 3:
+            return {
+                "decision": "rename",
+                "suggested_title": preferred_section_label,
+                "reason": "agent_hook_promoted_non_generic_section_label",
+                "confidence": 0.84,
+            }
+        if "bm25" in merged_text.lower():
+            return {
+                "decision": "rename",
+                "suggested_title": "BM25",
+                "reason": "agent_hook_detected_specific_technical_term",
+                "confidence": 0.82,
+            }
+        if "llm-wiki" in merged_text.lower():
+            return {
+                "decision": "rename",
+                "suggested_title": "LLM-Wiki",
+                "reason": "agent_hook_detected_specific_technical_term",
+                "confidence": 0.8,
+            }
+        return {
+            "decision": "reject",
+            "reason": "agent_hook_rejected_generic_structural_title",
+            "confidence": 0.95,
+        }
+
+    if len(candidate_title) <= 1 and candidate_title not in {"AI"}:
+        return {
+            "decision": "reject",
+            "reason": "agent_hook_rejected_too_short_title",
+            "confidence": 0.98,
+        }
+
+    if text_is_question_like(merged_text):
+        return {
+            "decision": "reject",
+            "reason": "agent_hook_rejected_question_like_candidate",
+            "confidence": 0.9,
+        }
+
+    return {
+        "decision": "accept",
+        "suggested_title": candidate_title,
+        "reason": "agent_hook_accepts_candidate_title",
+        "confidence": 0.72,
+    }
+
+
 def handle_render_readable_concept_page(payload: dict) -> dict:
     default_summary = normalize_text(payload.get("default_summary", ""))
     default_key_points = payload.get("default_key_points", [])
@@ -368,6 +435,8 @@ def main() -> int:
         result = handle_review_auto(payload)
     elif task == "claim_stable_promotion":
         result = handle_stable_promotion(payload)
+    elif task == "review_concept_candidate":
+        result = handle_review_concept_candidate(payload)
     elif task == "render_readable_concept_page":
         result = handle_render_readable_concept_page(payload)
     elif task == "render_workspace_overview_page":

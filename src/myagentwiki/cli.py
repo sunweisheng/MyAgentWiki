@@ -2933,6 +2933,15 @@ def text_is_iso_date_label(text: str) -> bool:
     return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned))
 
 
+def text_is_question_like(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    if cleaned.endswith(("？", "?")):
+        return True
+    return any(cleaned.startswith(prefix) for prefix in ("问题", "为什么", "如何", "怎么", "是否", "什么是"))
+
+
 def claim_starts_with_dependent_prefix(text: str) -> bool:
     cleaned = clean_claim_candidate_text(text)
     if not cleaned:
@@ -4218,9 +4227,235 @@ def is_generic_concept_label(label: str) -> bool:
     normalized = clean_concept_title_text(label).lower()
     if normalized in {"", "文档开始", "sample"}:
         return True
+    generic_exact_values = {
+        "示例", "总结", "小结", "说明", "原因", "背景", "方法", "流程", "步骤",
+        "注意", "补充", "附录", "表格", "代码", "引用", "问题", "状态", "初始化",
+        "别名", "为什么", "如何", "怎么做", "做法", "概述", "介绍",
+    }
+    if normalized in generic_exact_values:
+        return True
+    if len(normalized) <= 1 and re.search(r"[\u4e00-\u9fff]", normalized):
+        return True
+    if re.fullmatch(r"(?:问题|示例|总结|步骤|方法)\s*\d*", normalized):
+        return True
+    if re.fullmatch(r"[一二三四五六七八九十]+[、.]?.{0,2}", normalized):
+        return True
     if re.fullmatch(r"表格\s*\d+", normalized):
         return True
     return False
+
+
+def concept_title_is_whitelisted_short_label(label: str) -> bool:
+    normalized = clean_concept_title_text(label)
+    if not normalized:
+        return False
+    if normalized in {"AI", "RAG", "MCP", "CLI", "SDK", "API", "Tauri", "React", "Rust", "BM25"}:
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9._+-]{2,8}", normalized))
+
+
+def concept_title_quality_details(
+    title: str,
+    canonical_claim: dict,
+    claim_records: list[dict],
+    preferred_section_label: str = "",
+) -> dict:
+    normalized_title = clean_concept_title_text(title)
+    normalized_lower = normalized_title.lower()
+    section_label = preferred_section_label or extract_primary_section_label(canonical_claim)
+    section_label_normalized = clean_concept_title_text(section_label)
+    claim_text = clean_claim_candidate_text(canonical_claim.get("text", ""))
+    source_ids = {
+        source_id
+        for claim_record in claim_records
+        for source_id in claim_record.get("source_ids", [])
+    }
+    reasons: list[str] = []
+    score = 0
+
+    if not normalized_title:
+        reasons.append("empty_title")
+        score -= 10
+
+    if is_generic_concept_label(normalized_title):
+        reasons.append("generic_title")
+        score -= 8
+    else:
+        score += 3
+
+    if len(normalized_title) <= 1 and not concept_title_is_whitelisted_short_label(normalized_title):
+        reasons.append("too_short")
+        score -= 10
+    elif len(normalized_title) <= 3 and not concept_title_is_whitelisted_short_label(normalized_title):
+        reasons.append("very_short")
+        score -= 4
+    elif len(normalized_title) >= 4:
+        score += 1
+
+    if concept_title_is_whitelisted_short_label(normalized_title):
+        reasons.append("short_whitelisted")
+        score += 4
+
+    if claim_has_standalone_predicate(claim_text):
+        score += 2
+    else:
+        reasons.append("claim_without_predicate")
+        score -= 2
+
+    if claim_starts_with_dependent_prefix(claim_text):
+        reasons.append("dependent_prefix_claim")
+        score -= 3
+
+    if text_is_question_like(claim_text):
+        reasons.append("question_like_claim")
+        score -= 4
+
+    if claim_is_topic_shell_text(canonical_claim, normalized_title):
+        reasons.append("topic_shell_claim")
+        score -= 6
+
+    topic_alignment = claim_topic_alignment_score(canonical_claim, normalized_title)
+    if topic_alignment >= 8:
+        score += 4
+    elif topic_alignment >= 4:
+        score += 2
+    else:
+        reasons.append("low_topic_alignment")
+        score -= 3
+
+    if section_label_normalized and normalized_lower == section_label_normalized.lower():
+        score += 1
+    if section_label_normalized and is_generic_concept_label(section_label_normalized):
+        reasons.append("generic_section_label")
+        score -= 4
+
+    if len(claim_records) >= 2:
+        score += 2
+    else:
+        reasons.append("single_claim_only")
+        score -= 1
+
+    if len(source_ids) >= 2:
+        reasons.append("cross_source_support")
+        score += 4
+    else:
+        reasons.append("single_source_only")
+        score -= 2
+
+    if canonical_claim.get("claim_type") == "definition":
+        score += 2
+
+    hard_reject_reasons = {"empty_title", "generic_title", "too_short", "question_like_claim"}
+    classification = "strong"
+    if any(reason in hard_reject_reasons for reason in reasons):
+        classification = "reject"
+    elif score < 6:
+        classification = "gray"
+
+    return {
+        "title": normalized_title,
+        "score": score,
+        "classification": classification,
+        "reasons": reasons,
+        "topic_alignment": topic_alignment,
+        "section_label": section_label_normalized,
+        "source_count": len(source_ids),
+        "claim_count": len(claim_records),
+    }
+
+
+def load_concept_quality_review_config(config: dict) -> dict:
+    render_config = load_page_render_config(config, "concept_update")
+    return {
+        "mode": render_config.get("mode"),
+        "command": render_config.get("command", []),
+        "timeout_seconds": render_config.get("timeout_seconds", 20),
+    }
+
+
+def run_llm_assisted_concept_title_review(
+    target: Path,
+    review_config: dict,
+    title: str,
+    canonical_claim: dict,
+    claim_records: list[dict],
+    preferred_section_label: str = "",
+) -> dict | None:
+    if review_config.get("mode") != "llm_assisted":
+        return None
+    command = review_config.get("command", [])
+    if not command:
+        return None
+
+    payload = {
+        "task": "review_concept_candidate",
+        "candidate_title": title,
+        "preferred_section_label": preferred_section_label,
+        "canonical_claim": {
+            "claim_id": canonical_claim.get("claim_id"),
+            "text": canonical_claim.get("text"),
+            "claim_type": canonical_claim.get("claim_type"),
+            "confidence": canonical_claim.get("confidence"),
+        },
+        "supporting_claims": [
+            {
+                "claim_id": claim_record.get("claim_id"),
+                "text": claim_record.get("text"),
+                "claim_type": claim_record.get("claim_type"),
+                "confidence": claim_record.get("confidence"),
+                "section_label": extract_primary_section_label(claim_record),
+                "source_count": len(claim_record.get("source_ids", [])),
+            }
+            for claim_record in claim_records[:6]
+        ],
+        "instructions": (
+            "Judge whether this title is a valid reusable concept title or just a structural heading. "
+            "If invalid, suggest a better concept title when the evidence clearly supports one. "
+            "Return strict JSON only."
+        ),
+    }
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=target,
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=review_config.get("timeout_seconds", 20),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        return None
+
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(result, dict):
+        return None
+
+    suggested_title = clean_concept_title_text(result.get("suggested_title", ""))
+    decision = str(result.get("decision", "") or "").strip().lower()
+    reason = str(result.get("reason", "") or "").strip()
+    confidence = result.get("confidence", 0.0)
+    if decision not in {"accept", "reject", "rename"}:
+        return None
+    if suggested_title and is_generic_concept_label(suggested_title):
+        suggested_title = ""
+    return {
+        "decision": decision,
+        "suggested_title": suggested_title,
+        "reason": reason,
+        "confidence": float(confidence) if isinstance(confidence, (int, float)) else 0.0,
+    }
 
 
 def extract_markdown_table_rows(text: str) -> list[list[str]]:
@@ -4458,6 +4693,15 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     if not claim_records:
         return False
     canonical_claim = choose_canonical_claim(claim_records, choose_group_topic_label(claim_records))
+    concept_title = build_concept_title(canonical_claim, preferred_section_label=choose_group_topic_label(claim_records))
+    quality = concept_title_quality_details(
+        title=concept_title,
+        canonical_claim=canonical_claim,
+        claim_records=claim_records,
+        preferred_section_label=choose_group_topic_label(claim_records),
+    )
+    if quality["classification"] == "reject":
+        return False
     claim_text = canonical_claim.get("text", "")
     cleaned_claim_text = clean_claim_candidate_text(claim_text)
     # 一些明显是“转换占位提示”的文本先不提升成概念页，避免 Wiki 被环境提示刷屏。
@@ -4468,6 +4712,53 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     if canonical_claim.get("claim_type") == "definition" and len(cleaned_claim_text) >= 14:
         return True
     return canonical_claim.get("confidence", 0.0) >= 0.35 and len(claim_text) >= 18
+
+
+def resolve_concept_title_candidate(
+    target: Path,
+    config: dict,
+    canonical_claim: dict,
+    claim_records: list[dict],
+    preferred_section_label: str = "",
+) -> tuple[str, dict]:
+    title = build_concept_title(canonical_claim, preferred_section_label=preferred_section_label)
+    quality = concept_title_quality_details(
+        title=title,
+        canonical_claim=canonical_claim,
+        claim_records=claim_records,
+        preferred_section_label=preferred_section_label,
+    )
+
+    llm_review: dict | None = None
+    if quality["classification"] == "gray":
+        llm_review = run_llm_assisted_concept_title_review(
+            target=target,
+            review_config=load_concept_quality_review_config(config),
+            title=title,
+            canonical_claim=canonical_claim,
+            claim_records=claim_records,
+            preferred_section_label=preferred_section_label,
+        )
+        if llm_review and llm_review.get("decision") == "rename" and llm_review.get("suggested_title"):
+            title = llm_review["suggested_title"]
+            quality = concept_title_quality_details(
+                title=title,
+                canonical_claim=canonical_claim,
+                claim_records=claim_records,
+                preferred_section_label=preferred_section_label,
+            )
+        elif llm_review and llm_review.get("decision") == "reject":
+            quality = dict(quality)
+            quality["classification"] = "reject"
+            quality["reasons"] = list(quality.get("reasons", [])) + ["llm_rejected_gray_candidate"]
+        elif llm_review and llm_review.get("decision") == "accept":
+            quality = dict(quality)
+            quality["classification"] = "strong"
+            quality["reasons"] = list(quality.get("reasons", [])) + ["llm_accepted_gray_candidate"]
+
+    quality = dict(quality)
+    quality["llm_review"] = llm_review
+    return title, quality
 
 
 def aggregate_source_refs_for_page(claim_records: list[dict]) -> list[dict]:
@@ -5251,6 +5542,36 @@ def rendered_page_grounding_issues(
     return []
 
 
+def concept_page_quality_issues(page_record: dict, claim_records_by_id: dict[str, dict]) -> list[str]:
+    if page_record.get("type") not in {"concept", "concept-summary"}:
+        return []
+    title = page_record.get("title", "") or ""
+    claim_ids = page_record.get("claim_ids", []) or []
+    claim_records = [
+        claim_records_by_id[claim_id]
+        for claim_id in claim_ids
+        if claim_id in claim_records_by_id
+    ]
+    if not claim_records:
+        return ["missing_claim_records"]
+    canonical_claim = claim_records[0]
+    quality = concept_title_quality_details(
+        title=title,
+        canonical_claim=canonical_claim,
+        claim_records=claim_records,
+    )
+    issues: list[str] = []
+    if quality["classification"] == "reject":
+        issues.append(f"rejected_title:{title}")
+    if "generic_title" in quality["reasons"]:
+        issues.append("generic_title")
+    if "too_short" in quality["reasons"] or "very_short" in quality["reasons"]:
+        issues.append("too_short")
+    if "question_like_claim" in quality["reasons"]:
+        issues.append("question_like_claim")
+    return issues
+
+
 def run_llm_assisted_readable_concept_render(
     target: Path,
     render_config: dict,
@@ -5601,10 +5922,17 @@ def build_readable_concept_page(
     render_config: dict | None = None,
 ) -> tuple[str, dict]:
     render_target = page_record_render_target({"type": "concept"}) or "readable_concept"
+    config = load_workspace_config(target)
     group_topic_label = choose_group_topic_label(stable_claim_records)
     canonical_claim = choose_canonical_claim(stable_claim_records, group_topic_label)
     page_id = build_readable_concept_page_id(bucket_key)
-    title = build_concept_title(canonical_claim, preferred_section_label=group_topic_label)
+    title, title_quality = resolve_concept_title_candidate(
+        target=target,
+        config=config,
+        canonical_claim=canonical_claim,
+        claim_records=stable_claim_records,
+        preferred_section_label=group_topic_label,
+    )
     canonical_id = f"concept:{build_concept_canonical_key(title)}"
     canonical_display_text = render_claim_as_sentence(canonical_claim, title)
     review_ids = collect_review_ids_for_claims(
@@ -5795,6 +6123,7 @@ def build_readable_concept_page(
         "automation_level": "auto_with_log",
         "render_mode": requested_render_mode,
         "render_status": render_status,
+        "concept_title_quality": title_quality,
         "review_reason": "claim_reviews_attached" if review_ids else None,
         "summary": rendered_summary_text,
         "aliases": sorted(set(alias for alias in aliases if alias and alias != title))[:8],
@@ -6059,6 +6388,8 @@ def build_workspace_overview_page(
 
 
 def build_concept_summary_page(
+    target: Path,
+    config: dict,
     bucket_key: str,
     page_rel_path: Path,
     claim_records: list[dict],
@@ -6069,7 +6400,13 @@ def build_concept_summary_page(
     group_topic_label = choose_group_topic_label(claim_records)
     canonical_claim = choose_canonical_claim(claim_records, group_topic_label)
     page_id = build_concept_page_id(bucket_key)
-    title = build_concept_title(canonical_claim, preferred_section_label=group_topic_label)
+    title, title_quality = resolve_concept_title_candidate(
+        target=target,
+        config=config,
+        canonical_claim=canonical_claim,
+        claim_records=claim_records,
+        preferred_section_label=group_topic_label,
+    )
     canonical_display_text = build_display_claim_text(canonical_claim, title)
     canonical_key = build_concept_canonical_key(title)
     review_ids = collect_review_ids_for_claims(
@@ -6215,6 +6552,7 @@ def build_concept_summary_page(
         "status": "needs_review" if review_ids else "draft",
         "lifecycle_status": "active",
         "automation_level": "auto_with_log",
+        "concept_title_quality": title_quality,
         "review_reason": "claim_reviews_attached" if review_ids else None,
         "summary": canonical_claim["text"],
         "aliases": sorted(set(alias for alias in aliases if alias and alias != title))[:8],
@@ -9284,11 +9622,24 @@ def rebuild_review_affected_pages(
             group_topic_label = choose_group_topic_label(grouped_claims)
             canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
             concept_page_id = build_concept_page_id(bucket_key)
+            concept_title, concept_title_quality = resolve_concept_title_candidate(
+                target=target,
+                config=config,
+                canonical_claim=canonical_claim,
+                claim_records=grouped_claims,
+                preferred_section_label=group_topic_label,
+            )
+            if concept_title_quality["classification"] == "reject":
+                stable_claims = filter_live_stable_claim_records(grouped_claims)
+                if not stable_claims:
+                    continue
             page_rel_path = concept_summary_page_path(
                 concept_page_id,
-                build_concept_title(canonical_claim, preferred_section_label=group_topic_label),
+                concept_title,
             )
             page_text, page_record = build_concept_summary_page(
+                target=target,
+                config=config,
                 bucket_key=bucket_key,
                 page_rel_path=page_rel_path,
                 claim_records=grouped_claims,
@@ -10941,43 +11292,54 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             group_topic_label = choose_group_topic_label(grouped_claims)
             canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
             concept_page_id = build_concept_page_id(bucket_key)
-            concept_title = build_concept_title(canonical_claim, preferred_section_label=group_topic_label)
+            concept_title, concept_title_quality = resolve_concept_title_candidate(
+                target=target,
+                config=config,
+                canonical_claim=canonical_claim,
+                claim_records=grouped_claims,
+                preferred_section_label=group_topic_label,
+            )
+            if concept_title_quality["classification"] == "reject":
+                concept_title = ""
             page_rel_path = concept_summary_page_path(
                 concept_page_id,
                 concept_title,
             )
-            page_text, page_record = build_concept_summary_page(
-                bucket_key=bucket_key,
-                page_rel_path=page_rel_path,
-                claim_records=grouped_claims,
-                page_records_by_id=page_records_by_id,
-                review_records=review_records,
-            )
-            page_record = apply_page_alias_overrides(target, page_record)
-            page_record["page_path"] = str(page_rel_path)
-            stored_page_record, page_changed = upsert_wiki_page(
-                target=target,
-                page_records_by_id=page_records_by_id,
-                page_record=page_record,
-                page_text=page_text,
-            )
-            if page_changed:
-                generated_pages.append(stored_page_record)
-                dirty_claim_ids.update(
-                    link_claims_to_page_in_memory(
-                        grouped_claims,
-                        stored_page_record["page_id"],
-                        claims_by_id,
-                    )
+            if concept_title:
+                page_text, page_record = build_concept_summary_page(
+                    target=target,
+                    config=config,
+                    bucket_key=bucket_key,
+                    page_rel_path=page_rel_path,
+                    claim_records=grouped_claims,
+                    page_records_by_id=page_records_by_id,
+                    review_records=review_records,
                 )
-                dirty_review_ids.update(
-                    link_reviews_to_page_in_memory(
-                        review_records=review_records,
-                        page_id=stored_page_record["page_id"],
-                        claim_ids=stored_page_record["claim_ids"],
-                        reviews_by_id=existing_reviews,
-                    )
+                page_record = apply_page_alias_overrides(target, page_record)
+                page_record["page_path"] = str(page_rel_path)
+                stored_page_record, page_changed = upsert_wiki_page(
+                    target=target,
+                    page_records_by_id=page_records_by_id,
+                    page_record=page_record,
+                    page_text=page_text,
                 )
+                if page_changed:
+                    generated_pages.append(stored_page_record)
+                    dirty_claim_ids.update(
+                        link_claims_to_page_in_memory(
+                            grouped_claims,
+                            stored_page_record["page_id"],
+                            claims_by_id,
+                        )
+                    )
+                    dirty_review_ids.update(
+                        link_reviews_to_page_in_memory(
+                            review_records=review_records,
+                            page_id=stored_page_record["page_id"],
+                            claim_ids=stored_page_record["claim_ids"],
+                            reviews_by_id=existing_reviews,
+                        )
+                    )
 
         stable_claims = filter_live_stable_claim_records(grouped_claims)
         if stable_claims:
@@ -11459,6 +11821,10 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 details="Each canonical_id may have one live page per type; only `concept` and `concept-summary` may coexist.",
             )
             concept_pages = [record for record in live_page_records if record.get("type") == "concept"]
+            concept_like_pages = [
+                record for record in live_page_records
+                if record.get("type") in {"concept", "concept-summary"}
+            ]
             add_check(
                 name="readable_concept_render_metadata_present",
                 ok=all(
@@ -11521,6 +11887,25 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 name="overview_pages_grounded",
                 ok=len(grounded_overview_issues) == 0,
                 details=overview_issue_preview,
+            )
+            concept_quality_issues = {
+                record["page_id"]: concept_page_quality_issues(record, claim_records_by_id)
+                for record in concept_like_pages
+            }
+            concept_quality_issues = {
+                page_id: issues
+                for page_id, issues in concept_quality_issues.items()
+                if issues
+            }
+            concept_quality_preview = ", ".join(
+                f"{page_id}:{'/'.join(issues[:2])}"
+                for page_id, issues in list(concept_quality_issues.items())[:8]
+            ) or "All concept pages passed title-quality checks."
+            add_check(
+                name="concept_pages_title_quality",
+                ok=len(concept_quality_issues) == 0,
+                details=concept_quality_preview,
+                severity="warning",
             )
 
             alias_index = load_alias_index(target) if alias_index_path(target).exists() else {}

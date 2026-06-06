@@ -318,6 +318,13 @@ rendering:
       - "-m"
       - "myagentwiki.agent_hook"
     timeout_seconds: 20
+  concept_update:
+    mode: "llm_assisted"
+    command:
+      - "/absolute/path/to/python"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 20
 ```
 
 如果你希望改成自己的 Agent / LLM hook，也可以在工作区 `config/project.yml` 里覆盖：
@@ -350,6 +357,7 @@ automation:
 - `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
 - `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
+- `concept_update` hook 当前也会被复用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
 - 若 hook 失败、超时、低于置信阈值，系统会自动回退到现有的保守自动策略，而不是中断整个流程
 
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
@@ -544,6 +552,10 @@ V1 已实现这些命令入口：
   - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择更像定义、能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类定义短语会优先于说明性长句
   - 当前概念页展示层会把“概念名 + 定义短语”组合成更可读的代表陈述，例如 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`
   - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
+  - 当前概念页生成已加入四层收口规则：先用强规则过滤明显坏标题，再做标题质量评分；灰区候选才会交给 Agent hook 做受限判别；最终 `lint` 会把低质量概念标题显式报成 warning
+  - 强规则当前会优先拦截 `示例`、`总结`、单字中文标题、问句壳标题这类明显更像结构节点而不是概念名的候选，减少“章节标题被误生成为概念页”
+  - 标题质量评分会综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号，避免继续单纯依赖 `section_path` 最后一段命名
+  - 灰区标题当前只允许 Agent hook 返回 `accept / reject / rename` 这三种受限决策，不直接把自由生成的标题写成 canonical，优先保证 `canonical_id` 稳定
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
   - 当前已自动生成人类可读 `concept` 页与工作区级 `overview` 页，且默认渲染模式为 `llm_assisted`
@@ -553,6 +565,7 @@ V1 已实现这些命令入口：
 - `myagentwiki lint`
   - 已实现仓库骨架 / 工作区结构检查，以及 `chunk_id` / `claim_id` / `page_id` 唯一性、Claim 溯源、页面记录完整性、`reviews.jsonl` / `error_log.jsonl` / `pages.jsonl` 存在性检查
   - 已补充 `canonical_id` 唯一性、alias registry 覆盖、search index 覆盖、lint 报告文件写回
+  - 当前已新增 `concept_pages_title_quality` warning，用于显式标出“标题像结构词、过短、问句壳、或整体质量过低”的概念页
 - `myagentwiki query`
   - 已实现基于 `pages + claims + wiki` 产物的多字段 BM25 检索
   - 当前会综合 `title`、`aliases`、`summary`、`headings`、`body`、`claim_text`、`source_refs` 打分，并叠加页面类型权重与页面状态权重

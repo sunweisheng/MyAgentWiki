@@ -508,7 +508,7 @@ CLI 入口固定为：
 
 当前默认模板还会把这些任务统一指向包内入口：
 - `python3 -m myagentwiki.agent_hook`
-- 该统一入口会按 `task` 分发 `review_auto_decision`、`claim_stable_promotion`、`render_readable_concept_page`、`render_workspace_overview_page`
+- 该统一入口会按 `task` 分发 `review_auto_decision`、`claim_stable_promotion`、`review_concept_candidate`、`render_readable_concept_page`、`render_workspace_overview_page`
 - 用户若有更强的外部 Agent / LLM 编排器，仍可在工作区配置里覆盖成自己的命令
 
 CLI 输出约定：
@@ -1285,6 +1285,13 @@ V1 为三类页面提供固定模板：
 V1 当前实现说明：
 - 当前概念页选择 canonical claim 时，不再只按来源数、置信度和文本长度排序，还会综合“是否像定义句”“是否能脱离上下文独立理解”“是否属于从句/元描述”这些可读性信号。
 - 当前概念页展示层会优先把定义短语渲染成“概念名 + 定义短语”的形式，例如把 `一种利用 LLM 构建个人知识库的模式` 展示成 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`，避免代表陈述只剩下孤立短语或半句话。
+- 当前概念页标题生成已改为四层收口：
+  - 第一层：强规则过滤明显坏标题，例如 `示例`、`总结`、单字中文标题、问句壳标题
+  - 第二层：标题质量评分，综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号
+  - 第三层：仅对灰区标题调用 Agent / LLM hook 做受限判别，hook 只允许返回 `accept / reject / rename`
+  - 第四层：`lint` 把低质量概念标题显式报成 warning，而不是静默留在工作区里
+- 当前 `concept_update` 渲染配置除了用于后续概念页更新，也复用于灰区概念标题判别；它承担的是“受限决策”而不是自由改写 canonical_id 的角色。
+- 这意味着系统不再单纯依赖 `section_path` 最后一段命名概念页，而是把章节标题当作候选线索之一，再由质量评分和灰区判别决定是否真正提升为概念页。
 - 当前概念页中的 `Source Pages`（来源页面）与 `Source Evidence`（来源证据）已经不再只平铺内部 ID，而是优先展示适合人工阅读的入口：
   - 来源摘要页链接
   - 原始来源文件链接
@@ -1462,6 +1469,7 @@ V1 当前实现说明：
 - 当前还会检查 `canonical_id`（规范ID）是否唯一、alias registry（别名注册表）是否覆盖 live 页面、search index（搜索索引）是否覆盖 live 页面。
 - 当前如果 alias registry 里存在冲突，会作为 warning 写入 lint 结果，并同步生成 `reports/lint/lint_latest.md`。
 - 当前 lint 已适配 `alias_conflict` review 的结构特征，不会把“只有候选页面、没有候选 Claim”的别名冲突审核误判为缺字段。
+- 当前 lint 已新增 `concept_pages_title_quality` warning，用于显式标出“标题像结构词、过短、问句壳、或整体质量过低”的概念页；这类问题当前先作为 warning 暴露，而不是直接阻断流程。
 - 更细的 `normalize / chunk / wikilink / page quality` 独立子命令属于后续细分方向，V1 先由统一 `lint` 命令覆盖主检查。
 
 ### 巡检级别 Lint Severity
@@ -1478,6 +1486,7 @@ V1 当前实现说明：
 - Source refs（来源引用）：`source_id`、`chunk_id` 可反查，稳定页必须有来源。
 - Alias / Canonical（别名 / 规范名）：检查 alias（别名）冲突、重复 canonical（规范页）、redirect（重定向）失效、疑似重复页。
 - Page quality（页面质量）：检查 summary（摘要）过泛、页面过长、长期 draft（草稿）、稳定页含低置信度推论等问题。
+- 对概念页还应额外关注标题质量：结构词标题、过短标题、问句壳标题，以及仅由低质量单来源 Claim 支撑的概念页，应优先进入 warning 视图。
 
 ## 测试设计 Testing
 

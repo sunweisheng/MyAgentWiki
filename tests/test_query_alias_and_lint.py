@@ -78,6 +78,22 @@ def configure_llm_assisted_overview(workspace_dir: Path, script_path: Path) -> N
     )
 
 
+def configure_llm_assisted_concept_quality(workspace_dir: Path, script_path: Path) -> None:
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n"
+        + "rendering:\n"
+        + "  concept_update:\n"
+        + '    mode: "llm_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{script_path}"\n'
+        + "    timeout_seconds: 20\n",
+        encoding="utf-8",
+    )
+
+
 def create_workspace_with_two_concepts(tmp_path: Path, project_name: str) -> Path:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -1306,6 +1322,114 @@ def test_lint_flags_readable_concept_page_when_manual_edit_breaks_grounding(tmp_
     assert result["summary"]["ok"] is False
     assert checks["readable_concept_pages_grounded"]["ok"] is False
     assert "summary_not_grounded" in checks["readable_concept_pages_grounded"]["details"]
+
+
+def test_ingest_filters_obviously_bad_concept_titles(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Query 预处理规范\n\n"
+        "## 示例\n\n"
+        "“那个 Karpathy 提的 LLM-Wiki 里面，搜索到底是不是语义搜索啊？”\n\n"
+        "可以抽成更适合检索的关键词：Karpathy、LLM-Wiki、BM25。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "FilterBadConceptTitles",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    concept_titles = {
+        record["title"]
+        for record in page_records
+        if record.get("type") == "concept-summary"
+    }
+    assert "示例" not in concept_titles
+
+
+def test_gray_concept_title_can_be_renamed_by_llm_hook(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# 检索设计\n\n"
+        "## 作用\n\n"
+        "BM25 同时承担关键词召回和可解释排序的职责。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ConceptTitleLLMReview",
+        "--target-dir", str(workspace_dir),
+    )
+
+    reviewer_script = tmp_path / "review_concept_title.py"
+    reviewer_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "payload = json.load(sys.stdin)\n"
+        "json.dump({\n"
+        "    'decision': 'rename',\n"
+        "    'suggested_title': 'BM25',\n"
+        "    'reason': 'test_rewrite_gray_title',\n"
+        "    'confidence': 0.95,\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+    configure_llm_assisted_concept_quality(workspace_dir, reviewer_script)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    concept_titles = {
+        record["title"]
+        for record in page_records
+        if record.get("type") == "concept-summary"
+    }
+    assert "BM25" in concept_titles
+    assert "作用" not in concept_titles
+
+
+def test_lint_warns_on_low_quality_concept_titles(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Alpha\n\n"
+        "Alpha 是一个稳定概念。\n\n"
+        "Alpha 用于承载稳定主题说明。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ConceptTitleLint",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    concept_page = next(record for record in page_records if record.get("type") == "concept-summary")
+    concept_page["title"] = "示例"
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in result["checks"]}
+    assert checks["concept_pages_title_quality"]["ok"] is False
+    assert "generic_title" in checks["concept_pages_title_quality"]["details"] or "rejected_title" in checks["concept_pages_title_quality"]["details"]
 
 
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
