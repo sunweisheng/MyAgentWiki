@@ -81,9 +81,9 @@ V1 已通过本地全量测试和端到端验证：
   - `28 passed`
 - `python scripts/validate_workflow.py`
   - 覆盖 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
-- `python -m myagentwiki lint --json`
+- `python3 -m myagentwiki lint --json`
   - 当前仓库结构检查通过
-- `python -m myagentwiki doctor --json`
+- `python3 -m myagentwiki doctor --json`
   - 必需依赖检查通过
 
 当前 CLI 输出还有一条额外约定：
@@ -230,14 +230,14 @@ python3.12 -m venv .venv
 ### 2. 检查运行环境
 
 ```bash
-python -m myagentwiki doctor
-python -m myagentwiki bootstrap --dry-run --extra dev
+python3 -m myagentwiki doctor
+python3 -m myagentwiki bootstrap --dry-run --extra dev
 ```
 
 ### 3. 初始化一个用户工作区
 
 ```bash
-python -m myagentwiki init \
+python3 -m myagentwiki init \
   --source-dir /path/to/raw \
   --project-name MyNotesWiki \
   --target-dir /path/to/MyNotesWiki
@@ -253,24 +253,24 @@ python -m myagentwiki init \
 ### 4. 导入资料并生成第一版 Wiki
 
 ```bash
-python -m myagentwiki ingest --target-dir /path/to/MyNotesWiki
-python -m myagentwiki lint --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki ingest --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki lint --target-dir /path/to/MyNotesWiki
 ```
 
 ### 5. 查询与审核
 
 ```bash
-python -m myagentwiki query "什么是知识声明层" --target-dir /path/to/MyNotesWiki
-python -m myagentwiki query "如何生成 wiki 页面" --reading-depth deep --target-dir /path/to/MyNotesWiki
-python -m myagentwiki query "什么是知识声明层" --answer-ready --target-dir /path/to/MyNotesWiki
-python -m myagentwiki answer-query "这个结论的来源证据是什么" --target-dir /path/to/MyNotesWiki
-python -m myagentwiki answer-query "什么是知识声明层" --format prompt --target-dir /path/to/MyNotesWiki
-python -m myagentwiki answer-query "什么是知识声明层" --format messages --target-dir /path/to/MyNotesWiki
-python -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
-python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki
-python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --dry-run
-python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format prompt
-python -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format messages
+python3 -m myagentwiki query "什么是知识声明层" --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki query "如何生成 wiki 页面" --reading-depth deep --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki query "什么是知识声明层" --answer-ready --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "这个结论的来源证据是什么" --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "什么是知识声明层" --format prompt --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "什么是知识声明层" --format messages --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --dry-run
+python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format prompt
+python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format messages
 ```
 
 推荐用法：

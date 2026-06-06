@@ -31,12 +31,12 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 
 ## 标准工作流 / Standard Flow
 
-1. 先执行 `python -m myagentwiki doctor`
-2. 再执行 `python -m myagentwiki bootstrap`
-3. 初始化工作区时执行 `python -m myagentwiki init --source-dir ... --project-name ...`
-4. 更新资料后执行 `python -m myagentwiki ingest --target-dir ...`
-5. 用 `python -m myagentwiki lint --target-dir ...` 检查一致性
-6. 用 `python -m myagentwiki query "问题" --target-dir ...` 做首轮检索
+1. 先执行 `python3 -m myagentwiki doctor`
+2. 再执行 `python3 -m myagentwiki bootstrap`
+3. 初始化工作区时执行 `python3 -m myagentwiki init --source-dir ... --project-name ...`
+4. 更新资料后执行 `python3 -m myagentwiki ingest --target-dir ...`
+5. 用 `python3 -m myagentwiki lint --target-dir ...` 检查一致性
+6. 用 `python3 -m myagentwiki query "问题" --target-dir ...` 做首轮检索
 7. 如果有冲突或别名问题，执行 `review-list` 与 `review-apply`
 
 ## 查询与阅读 / Query And Reading

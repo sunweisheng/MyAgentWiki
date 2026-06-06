@@ -22,7 +22,7 @@
 
 现象：
 
-- `python -m myagentwiki bootstrap` 返回非 0
+- `python3 -m myagentwiki bootstrap` 返回非 0
 
 先检查：
 
@@ -33,7 +33,7 @@
 建议顺序：
 
 1. 先运行 `python -m pip install -U pip`
-2. 再运行 `python -m myagentwiki bootstrap --extra dev`
+2. 再运行 `python3 -m myagentwiki bootstrap --extra dev`
 3. 如仍失败，直接执行 `python -m pip install -e ".[dev]"`
 
 ## 3. `ingest` 后没有生成太多内容

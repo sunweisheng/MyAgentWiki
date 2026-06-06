@@ -487,15 +487,15 @@ V1 统一规则：
 7. 若目标目录不是 Git 仓库，则自动执行 Git 初始化并生成基线提交。
 
 CLI 入口固定为：
-- `python -m myagentwiki init`：初始化用户工作区。
-- `python -m myagentwiki ingest`：导入并编译资料。
-- `python -m myagentwiki query`：查询 Wiki 和阅读包。
-- `python -m myagentwiki lint`：巡检结构与状态一致性。
-- `python -m myagentwiki doctor`：检查运行环境。
-- `python -m myagentwiki bootstrap`：安装或修复 Python 依赖。
-- `python -m myagentwiki review-list`：列出审核队列。
-- `python -m myagentwiki review-auto`：保守地自动处理高把握审核项，并把剩余需要人判断的项整理成 handoff。
-- `python -m myagentwiki review-apply`：应用审核决策并恢复后续流程。
+- `python3 -m myagentwiki init`：初始化用户工作区。
+- `python3 -m myagentwiki ingest`：导入并编译资料。
+- `python3 -m myagentwiki query`：查询 Wiki 和阅读包。
+- `python3 -m myagentwiki lint`：巡检结构与状态一致性。
+- `python3 -m myagentwiki doctor`：检查运行环境。
+- `python3 -m myagentwiki bootstrap`：安装或修复 Python 依赖。
+- `python3 -m myagentwiki review-list`：列出审核队列。
+- `python3 -m myagentwiki review-auto`：保守地自动处理高把握审核项，并把剩余需要人判断的项整理成 handoff。
+- `python3 -m myagentwiki review-apply`：应用审核决策并恢复后续流程。
 
 工作区配置当前默认会显式声明自动化定位：
 - `project.positioning: agent_driven_local_llm_wiki`
@@ -507,7 +507,7 @@ CLI 入口固定为：
 - `rendering.readable_concept / overview / qa_note / concept_update`：控制概念页、综述页、问答沉淀页的 `llm_assisted` 渲染
 
 当前默认模板还会把这些任务统一指向包内入口：
-- `python -m myagentwiki.agent_hook`
+- `python3 -m myagentwiki.agent_hook`
 - 该统一入口会按 `task` 分发 `review_auto_decision`、`claim_stable_promotion`、`render_readable_concept_page`、`render_workspace_overview_page`
 - 用户若有更强的外部 Agent / LLM 编排器，仍可在工作区配置里覆盖成自己的命令
 
@@ -1028,8 +1028,8 @@ V1 建议的 guardrail 推导规则：
 在 `reading_pack` 之上，当前实现已经补了一层面向上层回答器的 answer-ready 输出。
 
 当前支持两种入口：
-- `python -m myagentwiki query "..." --answer-ready`
-- `python -m myagentwiki answer-query "..."`
+- `python3 -m myagentwiki query "..." --answer-ready`
+- `python3 -m myagentwiki answer-query "..."`
 
 这层输出的目标不是替回答器完成最终答案，而是把最适合回答阶段直接消费的内容再压一层，减少每个上层 Agent 都去手工解析 `reading_pack` 的重复工作。
 
@@ -1060,7 +1060,7 @@ V1 建议的 guardrail 推导规则：
 在 `review-list / review-apply` 之上，当前实现又补了一层面向上层 Agent 的审核自动处理输出。
 
 当前入口为：
-- `python -m myagentwiki review-auto`
+- `python3 -m myagentwiki review-auto`
 
 这层输出的目标不是替用户完成所有审核判断，而是先自动处理高把握审核项，再把剩余需要人判断的部分稳定交给上层 Agent 或对话层。
 
@@ -1105,7 +1105,7 @@ V1 建议的 guardrail 推导规则：
 除了审核自动处理，当前实现已经为 Claim 的 `stable` 提升补了一层 Agent-assisted hook。
 
 当前入口仍然挂在：
-- `python -m myagentwiki review-auto`
+- `python3 -m myagentwiki review-auto`
 
 它的职责不是单独暴露成另一条命令，而是在自动审核完成、需要判断某条 live claim 是否可以被保守提升为 `stable` 时，作为受控子步骤运行。
 

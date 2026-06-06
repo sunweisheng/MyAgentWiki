@@ -8,7 +8,7 @@
 
 ## Claude Code 适配层 / Claude Code Adapter
 
-- 优先使用 `python -m myagentwiki ...` 或 `myagentwiki ...` 执行固定流程
+- 优先使用 `python3 -m myagentwiki ...` 或 `myagentwiki ...` 执行固定流程
 - 在 review / state 恢复场景里，先读当前工作区的 `state/*.jsonl` 与 `reviews/*.json`
 - 不直接跳过 CLI 去批量改写账本文件
 - 用户通常只需要表达目标，不需要主动描述 `reading_pack`、`state/*.jsonl`、`review-apply` 这类内部结构
