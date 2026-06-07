@@ -63,6 +63,8 @@ DEFAULT_CHUNK_TARGET_TOKENS = 1000
 DEFAULT_CHUNK_MAX_TOKENS = 1600
 DEFAULT_CHUNK_MIN_TOKENS = 200
 DEFAULT_MAX_CLAIMS_PER_CHUNK = 3
+MAX_FILENAME_COMPONENT_BYTES = 240
+FILENAME_HASH_LENGTH = 12
 QUERY_READING_DEPTH_LIMITS = {
     "standard": {
         "claim_limit": 3,
@@ -887,6 +889,42 @@ def sanitize_source_key(value: str) -> str:
     while "__" in compact:
         compact = compact.replace("__", "_")
     return compact.strip("_") or "source"
+
+
+def truncate_utf8_text(value: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    truncated = encoded[:max_bytes]
+    while truncated:
+        try:
+            return truncated.decode("utf-8").rstrip(" ._-")
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
+    return ""
+
+
+def stabilize_filename_component(
+    value: str,
+    *,
+    max_bytes: int = MAX_FILENAME_COMPONENT_BYTES,
+    separator: str = "__",
+) -> str:
+    cleaned = value.strip(" .")
+    if not cleaned:
+        return ""
+    if len(cleaned.encode("utf-8")) <= max_bytes:
+        return cleaned
+
+    digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:FILENAME_HASH_LENGTH]
+    suffix = f"{separator}{digest}"
+    prefix_budget = max(max_bytes - len(suffix.encode("utf-8")), 1)
+    prefix = truncate_utf8_text(cleaned, prefix_budget)
+    if not prefix:
+        return digest
+    return f"{prefix}{suffix}"
 
 
 def build_source_id(raw_root: Path, file_path: Path, source_hash: str) -> str:
@@ -5252,7 +5290,8 @@ def prune_stale_auto_pages(
 def sanitize_page_slug(value: str) -> str:
     # wiki 页文件名尽量稳定、可读、跨平台安全。
     slug = sanitize_source_key(value)
-    return slug or "page"
+    stabilized = stabilize_filename_component(slug, separator="_")
+    return stabilized or "page"
 
 
 def sanitize_page_filename(value: str) -> str:
@@ -5260,7 +5299,13 @@ def sanitize_page_filename(value: str) -> str:
     cleaned = clean_concept_title_text(value)
     cleaned = re.sub(r"[\\/:*?\"<>|#]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    return cleaned or "page"
+    hash_source = re.sub(r"[\\/:*?\"<>|#]+", " ", str(value))
+    hash_source = re.sub(r"\s+", " ", hash_source).strip(" .")
+    if hash_source and hash_source != cleaned:
+        digest = hashlib.sha256(hash_source.encode("utf-8")).hexdigest()[:FILENAME_HASH_LENGTH]
+        cleaned = f"{cleaned}__{digest}" if cleaned else digest
+    stabilized = stabilize_filename_component(cleaned)
+    return stabilized or "page"
 
 
 def summarize_claims_for_page(claim_records: list[dict], limit: int = 3) -> list[str]:
@@ -5275,7 +5320,12 @@ def summarize_claims_for_page(claim_records: list[dict], limit: int = 3) -> list
 
 def source_summary_page_path(source_id: str, title: str) -> Path:
     slug = sanitize_page_slug(title)
-    return Path("wiki") / "sources" / f"{slug}__{source_id}.md"
+    source_key = stabilize_filename_component(sanitize_source_key(source_id), separator="_") or "source"
+    filename = stabilize_filename_component(
+        f"{slug}__{source_key}",
+        max_bytes=MAX_FILENAME_COMPONENT_BYTES - len(".md".encode("utf-8")),
+    )
+    return Path("wiki") / "sources" / f"{filename or 'page'}.md"
 
 
 def shorten_title_text(value: str, limit: int = 32) -> str:

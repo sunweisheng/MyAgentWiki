@@ -10,6 +10,9 @@ from myagentwiki.cli import (
     convert_legacy_doc_to_markdown,
     convert_legacy_xls_to_markdown,
     load_page_alias_overrides,
+    sanitize_page_filename,
+    sanitize_page_slug,
+    source_summary_page_path,
     update_page_alias_overrides_with_lock,
 )
 
@@ -137,3 +140,35 @@ def test_update_page_alias_overrides_with_lock_preserves_sequential_alias_update
     assert "共享术语二" in overrides["page_aliases"]["page-b"]["aliases"]
     assert "原有别名A" in overrides["page_aliases"]["page-a"]["aliases"]
     assert "原有别名B" in overrides["page_aliases"]["page-b"]["aliases"]
+
+
+def test_sanitize_page_filename_truncates_long_multibyte_titles_stably() -> None:
+    title = "超长标题" * 80
+
+    filename = sanitize_page_filename(title)
+
+    assert len(filename.encode("utf-8")) <= 240
+    assert filename
+    assert sanitize_page_filename(title) == filename
+
+
+def test_sanitize_page_filename_keeps_distinct_long_titles_distinct() -> None:
+    title_a = ("知识声明层设计说明" * 40) + "A"
+    title_b = ("知识声明层设计说明" * 40) + "B"
+
+    filename_a = sanitize_page_filename(title_a)
+    filename_b = sanitize_page_filename(title_b)
+
+    assert filename_a != filename_b
+
+
+def test_source_summary_page_path_limits_long_slug_and_source_id() -> None:
+    title = "来源摘要标题" * 70
+    source_id = "src_" + ("nested_topic_note_" * 40)
+
+    page_path = source_summary_page_path(source_id, title)
+
+    assert page_path.parent == Path("wiki") / "sources"
+    assert len(page_path.name.encode("utf-8")) <= 240
+    assert page_path.suffix == ".md"
+    assert page_path.stem
