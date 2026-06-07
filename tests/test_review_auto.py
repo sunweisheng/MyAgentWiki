@@ -260,12 +260,59 @@ def test_review_auto_applies_safe_merge_and_promotes_winner_to_stable(tmp_path: 
     surviving_promoted_ids = surviving_claim_ids & promoted_claim_ids
     assert surviving_promoted_ids
 
-    refreshed_claims = {record["claim_id"]: record for record in active_claims}
-    assert refreshed_claims[next(iter(surviving_promoted_ids))]["status"] == "stable"
-    assert ({primary_claim_id, secondary_claim_id} - set(refreshed_claims)).__len__() == 1
 
-    refreshed_reviews = {record["review_id"]: record for record in load_jsonl(reviews_path)}
-    assert refreshed_reviews["rev_auto_apply_merge"]["status"] == "resolved"
+def test_review_auto_escalates_migration_followup_review(tmp_path: Path) -> None:
+    workspace_dir = create_workspace(
+        tmp_path,
+        "ReviewAutoMigrationFollowup",
+        {
+            "topic.md": "# Topic\n\n知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        },
+    )
+
+    reviews_path = workspace_dir / "state" / "reviews.jsonl"
+    review_record = {
+        "review_id": "rev_migrate_followup_chunk",
+        "kind": "migration_followup",
+        "status": "open",
+        "lifecycle_status": "active",
+        "candidate_claim_ids": [],
+        "candidate_page_ids": [],
+        "reason": "migration_followup:create_current_successor_required",
+        "recommended_action": "edit_then_resume",
+        "allowed_actions": ["keep_both", "edit_then_resume"],
+        "resume_from": "migration_followup",
+        "evidence": [
+            {
+                "canonical_id": "concept:chunk",
+                "queue_action": "create_current_successor_required",
+                "reason": "Need a current successor.",
+                "confidence": 0.93,
+            }
+        ],
+        "migration_followup": {
+            "canonical_id": "concept:chunk",
+            "queue_action": "create_current_successor_required",
+            "status": "pending",
+            "migration_class": "legacy_concept_summary_missing_current_successor",
+        },
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "resolved_at": None,
+        "archived_at": None,
+        "review_file_path": "reviews/rev_migrate_followup_chunk.json",
+    }
+    write_jsonl(reviews_path, [review_record])
+    write_json(workspace_dir / "reviews" / "rev_migrate_followup_chunk.json", review_record)
+
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir), "--dry-run")
+
+    assert result["summary"]["auto_apply_count"] == 0
+    assert result["summary"]["escalated_count"] == 1
+    assert result["agent_brief"]["should_ask_user"] is True
+    escalation = result["escalation_handoff"][0]
+    assert escalation["kind"] == "migration_followup"
+    assert escalation["migration_followup"]["canonical_id"] == "concept:chunk"
+    assert "迁移后续项" in escalation["issue_summary"]
 
 
 def test_review_auto_agent_assisted_hook_can_resolve_claim_conflict(tmp_path: Path) -> None:

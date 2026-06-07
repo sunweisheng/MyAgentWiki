@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
 import sys
+import importlib
 from pathlib import Path
 from urllib.parse import quote
 
@@ -44,6 +46,13 @@ def load_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    text = "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
+    if text:
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
 
 
 def configure_llm_assisted_readable_concept(workspace_dir: Path, script_path: Path) -> None:
@@ -136,6 +145,43 @@ def create_workspace_with_two_concepts(tmp_path: Path, project_name: str) -> Pat
     return workspace_dir
 
 
+def inject_shared_alias_override(
+    workspace_dir: Path,
+    shared_alias: str,
+    page_ids: list[str] | None = None,
+) -> list[str]:
+    live_pages = [
+        record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
+        if not record.get("removed")
+        and record.get("lifecycle_status", "active") == "active"
+        and record.get("type") in {"concept-summary", "concept", "topic", "guide", "example"}
+    ]
+    if page_ids is None:
+        page_ids = [record["page_id"] for record in live_pages[:2]]
+    assert len(page_ids) >= 2
+
+    live_page_map = {record["page_id"]: record for record in live_pages}
+    overrides_path = workspace_dir / "state" / "page_alias_overrides.json"
+    overrides = {"page_aliases": {}}
+    if overrides_path.exists():
+        overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+    page_aliases = overrides.setdefault("page_aliases", {})
+
+    for page_id in page_ids:
+        page_record = live_page_map[page_id]
+        page_override = page_aliases.setdefault(page_id, {})
+        aliases = sorted(set(page_override.get("aliases", page_record.get("aliases", []))))
+        if shared_alias not in aliases:
+            aliases.append(shared_alias)
+        page_override["aliases"] = sorted(set(aliases))
+
+    overrides_path.write_text(
+        json.dumps(overrides, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return page_ids
+
+
 def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     # 这条回归验证 query_normalizer 已经真正接入：
     # 用 alias 命中时，不只返回页面，还要回传 alias/canonical 线索。
@@ -165,6 +211,370 @@ def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     assert result["intent"] == "lookup"
     assert any(target["canonical_id"].startswith("concept:") for target in result["canonical_targets"])
     assert result["results"][0]["exact_match_boost"] >= 1.2
+
+
+def test_workspace_schema_guard_blocks_unsupported_workspace_commands(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Topic\n\n"
+        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "SchemaGuardUnsupported",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('schema_version: "v1"', 'schema_version: "v999"'),
+        encoding="utf-8",
+    )
+
+    command = [sys.executable, "-m", "myagentwiki.cli", "query", "知识声明层", "--target-dir", str(workspace_dir), "--json"]
+    completed = subprocess.run(
+        command,
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "Workspace schema guard failed" in completed.stderr
+    assert "workspace.schema_version=v999" in completed.stderr
+
+
+def test_compat_report_can_plan_workspace_schema_migration(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationCompat")
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('schema_version: "v1"', 'schema_version: "unversioned"'),
+        encoding="utf-8",
+    )
+
+    result = run_cli("compat-report", "--target-dir", str(workspace_dir))
+
+    assert result["schema_guard"]["status"] == "needs_migration"
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["suggested_action"] == "upgrade_workspace_schema_to_v1"
+    assert schema_candidates[0]["path_length"] == 1
+    assert schema_candidates[0]["transition_path"][0]["action"] == "upgrade_workspace_schema_to_v1"
+    assert schema_candidates[0]["transition_path"][0]["prerequisites"] == ["config/project.yml exists"]
+    assert schema_candidates[0]["transition_path"][0]["rollback_strategy"] == "restore_config_snapshot"
+    assert schema_candidates[0]["requires_confirmation"] is False
+    assert schema_candidates[0]["action_contract"]["risk_level"] == "medium"
+
+
+def test_compat_report_marks_missing_schema_version_as_report_only_followup(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationMissingVersion")
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('  schema_version: "v1"\n', ""),
+        encoding="utf-8",
+    )
+
+    result = run_cli("compat-report", "--target-dir", str(workspace_dir))
+
+    assert result["schema_guard"]["status"] == "missing_schema_version"
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    assert result["summary"]["schema_report_only_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["planning_decision"] == "report_only"
+    assert schema_candidates[0]["suggested_action"] == "inspect_missing_workspace_schema_version"
+    assert schema_candidates[0]["action_contract"]["risk_level"] == "high"
+
+
+def test_compat_report_marks_confirmation_required_schema_path_as_report_only(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationNeedsConfirm")
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('schema_version: "v1"', 'schema_version: "unversioned"'),
+        encoding="utf-8",
+    )
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_transitions = cli_module.WORKSPACE_SCHEMA_TRANSITIONS
+    cli_module.WORKSPACE_SCHEMA_TRANSITIONS = (
+        {
+            "from_version": "unversioned",
+            "to_version": "v1",
+            "action": "upgrade_workspace_schema_to_v1",
+            "prerequisites": ["config/project.yml exists"],
+            "rollback_strategy": "restore_config_snapshot",
+            "requires_confirmation": True,
+            "notes": "Confirmation required for test.",
+        },
+    )
+    try:
+        result = cli_module.build_compat_report_payload(workspace_dir)
+    finally:
+        cli_module.WORKSPACE_SCHEMA_TRANSITIONS = original_transitions
+
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    assert result["summary"]["schema_report_only_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["planning_decision"] == "report_only"
+    assert schema_candidates[0]["suggested_action"] == "confirm_workspace_schema_transition_path"
+    assert schema_candidates[0]["requires_confirmation"] is True
+    assert schema_candidates[0]["action_contract"]["risk_level"] == "high"
+
+
+def test_compat_report_can_plan_supported_workspace_toward_explicit_future_schema_version(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationFutureTarget")
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_transitions = cli_module.WORKSPACE_SCHEMA_TRANSITIONS
+    original_order = cli_module.WORKSPACE_SCHEMA_VERSION_ORDER
+    cli_module.WORKSPACE_SCHEMA_TRANSITIONS = (
+        *original_transitions,
+        {
+            "from_version": "v1",
+            "to_version": "v2",
+            "action": "future_schema_upgrade_placeholder",
+            "prerequisites": ["state/schema_confirmations.jsonl exists"],
+            "rollback_strategy": "restore_config_snapshot",
+            "requires_confirmation": False,
+            "notes": "Future schema target test.",
+        },
+    )
+    cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = ("v1", "v2")
+    try:
+        result = cli_module.build_compat_report_payload(workspace_dir, target_schema_version="v2")
+    finally:
+        cli_module.WORKSPACE_SCHEMA_TRANSITIONS = original_transitions
+        cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = original_order
+
+    assert result["target_schema_version"] == "v2"
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["from_schema_version"] == "v1"
+    assert schema_candidates[0]["to_schema_version"] == "v2"
+    assert schema_candidates[0]["suggested_action"] == "future_schema_upgrade_placeholder"
+    assert schema_candidates[0]["planning_decision"] == "auto_plan"
+    assert schema_candidates[0]["path_length"] == 1
+    assert schema_candidates[0]["transition_path"][0]["action"] == "future_schema_upgrade_placeholder"
+
+
+def test_compat_report_marks_unregistered_explicit_future_schema_target_as_report_only(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationUnknownTarget")
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_order = cli_module.WORKSPACE_SCHEMA_VERSION_ORDER
+    try:
+        cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = ("v1", "v2")
+        result = cli_module.build_compat_report_payload(workspace_dir, target_schema_version="v2")
+    finally:
+        cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = original_order
+
+    assert result["target_schema_version"] == "v2"
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    assert result["summary"]["schema_report_only_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["from_schema_version"] == "v1"
+    assert schema_candidates[0]["to_schema_version"] == "v2"
+    assert schema_candidates[0]["planning_decision"] == "report_only"
+    assert schema_candidates[0]["suggested_action"] == "schema_transition_not_registered"
+
+
+def test_compat_report_marks_unknown_explicit_future_schema_target_as_report_only(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationUnknownRegistryTarget")
+
+    result = run_cli(
+        "compat-report",
+        "--target-dir", str(workspace_dir),
+        "--to-schema-version", "v9",
+    )
+
+    assert result["target_schema_version"] == "v9"
+    assert result["summary"]["schema_migration_candidate_count"] == 1
+    schema_candidates = [
+        item for item in result["migration_candidates"]
+        if item.get("migration_scope") == "workspace_schema"
+    ]
+    assert len(schema_candidates) == 1
+    assert schema_candidates[0]["from_schema_version"] == "v1"
+    assert schema_candidates[0]["to_schema_version"] == "v9"
+    assert schema_candidates[0]["planning_decision"] == "report_only"
+    assert schema_candidates[0]["suggested_action"] == "inspect_target_workspace_schema_version"
+
+
+def test_workspace_schema_registry_validation_passes_for_default_registry() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    assert cli_module.validate_workspace_schema_registry() == []
+
+
+def test_workspace_schema_registry_validation_detects_unknown_versions_and_missing_contract(tmp_path: Path) -> None:
+    del tmp_path
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_transitions = cli_module.WORKSPACE_SCHEMA_TRANSITIONS
+    original_order = cli_module.WORKSPACE_SCHEMA_VERSION_ORDER
+    cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = ("v1", "v2")
+    cli_module.WORKSPACE_SCHEMA_TRANSITIONS = (
+        {
+            "from_version": "v2",
+            "to_version": "v3",
+            "action": "missing_contract_action",
+            "prerequisites": [],
+            "rollback_strategy": "restore_config_snapshot",
+            "requires_confirmation": False,
+            "notes": "broken registry test",
+        },
+    )
+    try:
+        issues = cli_module.validate_workspace_schema_registry()
+    finally:
+        cli_module.WORKSPACE_SCHEMA_TRANSITIONS = original_transitions
+        cli_module.WORKSPACE_SCHEMA_VERSION_ORDER = original_order
+
+    assert any("Unknown transition to_version: v3" in issue for issue in issues)
+    assert any("Missing migration action contract for workspace schema transition: missing_contract_action" in issue for issue in issues)
+
+
+def test_schema_migration_confirmation_reenables_auto_plan(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationConfirmResume")
+    config_path = workspace_dir / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace('schema_version: "v1"', 'schema_version: "unversioned"'),
+        encoding="utf-8",
+    )
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_transitions = cli_module.WORKSPACE_SCHEMA_TRANSITIONS
+    cli_module.WORKSPACE_SCHEMA_TRANSITIONS = (
+        {
+            "from_version": "unversioned",
+            "to_version": "v1",
+            "action": "upgrade_workspace_schema_to_v1",
+            "prerequisites": ["config/project.yml exists"],
+            "rollback_strategy": "restore_config_snapshot",
+            "requires_confirmation": True,
+            "notes": "Confirmation required for resume test.",
+        },
+    )
+    try:
+        before = cli_module.build_migrate_plan_payload(workspace_dir)
+        assert before["summary"]["schema_manual_followup_count"] == 1
+        assert before["summary"]["schema_planned_action_count"] == 0
+        followup = before["schema_migration"]["manual_followups"][0]
+
+        confirm_result = cli_module.command_migrate_schema_confirm(
+            argparse.Namespace(
+                target_dir=str(workspace_dir),
+                confirm=True,
+                from_version="unversioned",
+                to_version="v1",
+                path_signature=followup["path_signature"],
+                notes="approved",
+                json=True,
+            )
+        )
+        refreshed = confirm_result.payload["refreshed_plan"]
+    finally:
+        cli_module.WORKSPACE_SCHEMA_TRANSITIONS = original_transitions
+
+    assert refreshed["summary"]["schema_manual_followup_count"] == 0
+    assert refreshed["summary"]["schema_planned_action_count"] == 1
+    assert refreshed["schema_migration"]["planned_actions"][0]["action"] == "upgrade_workspace_schema_to_v1"
+
+
+def test_migrate_apply_can_upgrade_workspace_schema_and_rollback(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "SchemaMigrationApply")
+    config_path = workspace_dir / "config" / "project.yml"
+    original_config_text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        original_config_text.replace('schema_version: "v1"', 'schema_version: "unversioned"'),
+        encoding="utf-8",
+    )
+
+    plan_result = run_cli("migrate", "--target-dir", str(workspace_dir))
+    assert plan_result["summary"]["schema_planned_action_count"] == 1
+    assert plan_result["summary"]["compatibility_planned_action_count"] >= 1
+    schema_actions = [
+        item for item in plan_result["planned_actions"]
+        if item["action"] == "upgrade_workspace_schema_to_v1"
+    ]
+    assert len(schema_actions) == 1
+    assert len(plan_result["schema_migration"]["planned_actions"]) == 1
+    assert plan_result["schema_migration"]["planned_actions"][0]["action"] == "upgrade_workspace_schema_to_v1"
+    assert plan_result["schema_migration"]["planned_actions"][0]["path_length"] == 1
+
+    apply_result = run_cli("migrate", "--apply", "--target-dir", str(workspace_dir))
+    assert apply_result["summary"]["applied_action_count"] >= 1
+    applied_schema_actions = [
+        item for item in apply_result["applied_actions"]
+        if item["action"] == "upgrade_workspace_schema_to_v1"
+    ]
+    assert len(applied_schema_actions) == 1
+    assert 'schema_version: "v1"' in config_path.read_text(encoding="utf-8")
+    latest_backup_path = workspace_dir / "state" / "backups" / "migrate_latest.json"
+    assert latest_backup_path.exists()
+
+    rollback_result = run_cli("migrate", "--rollback", "--target-dir", str(workspace_dir))
+    assert rollback_result["summary"]["restored_entry_count"] >= 1
+    assert 'schema_version: "unversioned"' in config_path.read_text(encoding="utf-8")
+    migration_runs = load_jsonl(workspace_dir / "state" / "migration_runs.jsonl")
+    assert migration_runs
+    assert any(record["mode"] == "plan" for record in migration_runs)
+    assert any(record["mode"] == "apply" for record in migration_runs)
+    assert any(record["mode"] == "rollback" for record in migration_runs)
 
 
 def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Path) -> None:
@@ -209,10 +619,108 @@ def test_query_answer_ready_returns_agent_consumable_summary(tmp_path: Path) -> 
     assert result["query_contract_version"] == "query_answer_handoff/v1"
     assert result["selected_result"]["title"]
     assert result["selected_result"]["ready_state"] == "summary_ready"
+    assert result["selected_result"]["page_type_profile"] in {"concept", "legacy_concept_evidence"}
     assert result["agent_brief"]["answer_mode"] == "summary_first"
+    assert result["agent_brief"]["page_type_profile"] in {"concept", "legacy_concept_evidence"}
     assert result["agent_brief"]["fallback_action"] == "answer_from_summary_and_claims"
     assert result["answer_context"]["page_summary"]
+    assert result["answer_context"]["answer_shape"] in {"concept_summary", "legacy_evidence_summary"}
     assert result["answer_context"]["key_claims"]
+
+
+def test_query_answer_ready_exposes_page_type_driven_answer_shape(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "guide.md").write_text(
+        "# 导入流程\n\n"
+        "首先扫描 raw 目录。\n\n"
+        "然后生成 normalized 文档。\n\n"
+        "最后写入 chunk 与 claim。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "AnswerReadyGuideShape",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli(
+        "query",
+        "如何生成 normalized 文档",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+
+    assert result["contract_version"] == "answer_ready_query/v1"
+    assert result["selected_result"]["page_type_profile"] in {"guide", "source"}
+    if result["selected_result"]["page_type_profile"] == "guide":
+        assert result["agent_brief"]["answer_mode"] == "chunks_first"
+        assert result["answer_context"]["answer_shape"] == "step_by_step"
+
+
+def test_query_answer_ready_exposes_reference_page_shape(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "reference.md").write_text(
+        "# FAQ Reference\n\n"
+        "参数列表用于说明系统的关键配置项。\n\n"
+        "规则清单用于列出处理约束。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "AnswerReadyReferenceShape",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli(
+        "query",
+        "参数列表是什么",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+
+    assert result["selected_result"]["page_type_profile"] in {"reference", "source"}
+    if result["selected_result"]["page_type_profile"] == "reference":
+        assert result["answer_context"]["answer_shape"] == "reference_sheet"
+
+
+def test_query_answer_ready_exposes_timeline_page_shape(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "timeline.md").write_text(
+        "# Timeline\n\n"
+        "起初系统只支持 source-summary。\n\n"
+        "随后加入 claim 层。\n\n"
+        "后来引入 semantic batch。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "AnswerReadyTimelineShape",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli(
+        "query",
+        "系统的时间线",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+
+    assert result["answer_context"]["answer_shape"] == "timeline_evidence"
 
 
 def test_answer_query_matches_query_answer_ready_view(tmp_path: Path) -> None:
@@ -250,6 +758,8 @@ def test_answer_query_prompt_format_returns_prompt_text(tmp_path: Path) -> None:
     assert "## Query" in result["prompt_text"]
     assert "## Answer Instruction" in result["prompt_text"]
     assert "user_query: 什么是 Claim" in result["prompt_text"]
+    assert "page_type_profile:" in result["prompt_text"]
+    assert "answer_shape:" in result["prompt_text"]
 
 
 def test_query_answer_ready_prompt_matches_answer_query_prompt(tmp_path: Path) -> None:
@@ -290,6 +800,8 @@ def test_answer_query_messages_format_returns_api_ready_messages(tmp_path: Path)
     assert result["messages"][0]["role"] == "system"
     assert result["messages"][1]["role"] == "user"
     assert "## Query" in result["messages"][1]["content"]
+    assert "page_type_profile:" in result["messages"][1]["content"]
+    assert "answer_shape:" in result["messages"][1]["content"]
 
 
 def test_answer_query_chatml_format_returns_chatml_and_messages(tmp_path: Path) -> None:
@@ -307,6 +819,596 @@ def test_answer_query_chatml_format_returns_chatml_and_messages(tmp_path: Path) 
     assert "chatml_text" in result
     assert "<|im_start|>system" in result["chatml_text"]
     assert "<|im_start|>user" in result["chatml_text"]
+    assert "page_type_profile:" in result["chatml_text"]
+    assert "answer_shape:" in result["chatml_text"]
+
+
+def test_legacy_concept_summary_is_marked_as_compatibility_view(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "LegacyConceptSummaryCompatibility")
+
+    result = run_cli(
+        "query",
+        "Claim",
+        "--target-dir", str(workspace_dir),
+        "--reading-depth", "deep",
+    )
+    legacy_result = next(item for item in result["results"] if item["type"] == "concept-summary")
+    reading_pack = legacy_result["reading_pack"]
+    assert reading_pack["page_context"]["page_type_profile"] == "legacy_concept_evidence"
+    assert reading_pack["page_context"]["compat_mode"] == "legacy"
+
+    answer_ready = run_cli(
+        "query",
+        "Claim",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+    if answer_ready["selected_result"]["type"] == "concept-summary":
+        assert answer_ready["selected_result"]["page_type_profile"] == "legacy_concept_evidence"
+        assert answer_ready["selected_result"]["compat_mode"] == "legacy"
+        assert answer_ready["agent_brief"]["compat_mode"] == "legacy"
+        assert answer_ready["answer_context"]["answer_shape"] == "legacy_evidence_summary"
+
+
+def test_wiki_index_labels_concept_summary_as_legacy_evidence_view(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "LegacyWikiIndex")
+
+    wiki_index = (workspace_dir / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "## 兼容证据页 / Legacy Evidence Views" in wiki_index
+    assert "compat=legacy" in wiki_index
+
+
+def test_workspace_summary_exposes_compatibility_report(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "CompatibilityReportSummary")
+
+    result = run_cli("query", "Claim", "--target-dir", str(workspace_dir))
+    compatibility_report = result["workspace_summary"]["compatibility_report"]
+    assert compatibility_report["legacy_page_count"] >= 1
+    assert compatibility_report["current_page_count"] >= 1
+    assert compatibility_report["legacy_page_types"].get("concept-summary", 0) >= 1
+    assert compatibility_report["canonical_families_with_legacy"] >= 1
+    assert compatibility_report["legacy_pages"]
+
+
+def test_compat_report_lists_migration_candidates(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "CompatReportCandidates")
+
+    result = run_cli("compat-report", "--target-dir", str(workspace_dir))
+    assert result["action_catalog"]
+    catalog_actions = {item["action"] for item in result["action_catalog"]}
+    assert "archive_legacy_concept_summary" in catalog_actions
+    assert "needs_current_successor_before_migration" in catalog_actions
+    assert result["compatibility_report"]["legacy_page_count"] >= 1
+    assert result["summary"]["migration_candidate_count"] >= 1
+    assert result["summary"]["auto_applicable_candidate_count"] >= 1
+    assert result["migration_candidates"]
+    candidate = result["migration_candidates"][0]
+    assert candidate["suggested_action"] == "archive_legacy_concept_summary"
+    assert candidate["planning_decision"] == "auto_plan"
+    assert candidate["migration_class"] == "legacy_concept_summary_has_current_successor"
+    assert candidate["action_contract"]["action_class"] == "legacy_cleanup"
+    assert candidate["action_contract"]["execution_mode"] == "apply_supported"
+    assert "concept-summary" in candidate["legacy_types"]
+    assert "concept" in candidate["current_types"]
+
+
+def test_migrate_returns_planned_actions_for_legacy_families(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigratePlanCandidates")
+
+    result = run_cli("migrate", "--target-dir", str(workspace_dir))
+    assert result["action_catalog"]
+    assert result["summary"]["schema_planned_action_count"] == 0
+    assert result["summary"]["planned_action_count"] >= 1
+    assert result["summary"]["manual_followup_count"] == 0
+    assert result["planned_actions"]
+    assert result["compatibility_cleanup"]["planned_actions"]
+    action = result["planned_actions"][0]
+    assert action["action"] == "archive_legacy_concept_summary"
+    assert action["action_class"] == "legacy_cleanup"
+    assert action["execution_mode"] == "apply_supported"
+    assert "concept-summary" in action["legacy_types"]
+    assert "concept" in action["current_types"]
+    report = result["migration_report"]
+    assert Path(report["report_dir"]).exists()
+    assert Path(report["report_json_path"]).exists()
+    assert Path(report["report_md_path"]).exists()
+    latest_json = json.loads(Path(report["latest_json_path"]).read_text(encoding="utf-8"))
+    assert latest_json["mode"] == "plan"
+
+
+def test_migrate_plan_flag_matches_default_plan_output(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateExplicitPlan")
+
+    default_result = run_cli("migrate", "--target-dir", str(workspace_dir))
+    explicit_plan_result = run_cli("migrate", "--plan", "--target-dir", str(workspace_dir))
+
+    assert explicit_plan_result["summary"] == default_result["summary"]
+    assert explicit_plan_result["action_catalog"] == default_result["action_catalog"]
+    assert explicit_plan_result["planned_actions"] == default_result["planned_actions"]
+    assert explicit_plan_result["migration_candidates"] == default_result["migration_candidates"]
+    assert explicit_plan_result["manual_followups"] == default_result["manual_followups"]
+    assert explicit_plan_result["migration_report"]["mode"] == "plan"
+    assert default_result["migration_report"]["mode"] == "plan"
+
+
+def test_migrate_reports_manual_followup_when_legacy_has_no_current_successor(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateManualFollowup")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    compat_result = run_cli("compat-report", "--target-dir", str(workspace_dir))
+    assert compat_result["summary"]["migration_candidate_count"] >= 1
+    assert compat_result["summary"]["auto_applicable_candidate_count"] == 0
+    assert compat_result["summary"]["report_only_candidate_count"] >= 1
+    candidate = compat_result["migration_candidates"][0]
+    assert candidate["planning_decision"] == "report_only"
+    assert candidate["auto_applicable"] is False
+    assert candidate["suggested_action"] == "needs_current_successor_before_migration"
+    assert candidate["action_contract"]["followup_action"] == "wait_for_current_successor"
+    assert candidate["current_types"] == []
+
+    migrate_result = run_cli("migrate", "--target-dir", str(workspace_dir))
+    assert migrate_result["summary"]["schema_manual_followup_count"] == 0
+    assert migrate_result["summary"]["compatibility_manual_followup_count"] >= 1
+    assert migrate_result["summary"]["planned_action_count"] == 0
+    assert migrate_result["summary"]["manual_followup_count"] >= 1
+    assert migrate_result["planned_actions"] == []
+    assert migrate_result["manual_followups"]
+    assert migrate_result["compatibility_cleanup"]["manual_followups"]
+    followup = migrate_result["manual_followups"][0]
+    assert followup["action"] == "wait_for_current_successor"
+    assert followup["execution_mode"] == "report_only"
+
+
+def test_migrate_prompt_handoff_focuses_on_report_only_candidates(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigratePromptHandoff")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    result = run_cli("migrate", "--format", "prompt", "--target-dir", str(workspace_dir))
+    assert result["contract_version"] == "migrate_handoff/v1"
+    assert result["agent_brief"]["should_invoke_llm"] is True
+    assert result["agent_brief"]["next_action"] == "batch_judge_report_only_candidates"
+    assert result["manual_followups"]
+    assert result["batching"]["batch_count"] >= 1
+    assert "Do not reinterpret or override apply_supported actions" in result["prompt_text"]
+    assert "## Batches" in result["prompt_text"]
+    assert "## Report-only Candidates" in result["prompt_text"]
+
+
+def test_migrate_messages_handoff_exposes_action_catalog(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateMessagesHandoff")
+
+    result = run_cli("migrate", "--format", "messages", "--target-dir", str(workspace_dir))
+    assert result["contract_version"] == "migrate_handoff/v1"
+    assert result["messages"]
+    assert result["action_catalog"]
+    assert all("risk_level" in item for item in result["action_catalog"])
+    assert result["agent_brief"]["next_action"] == "apply_supported_actions_or_continue"
+
+
+def test_migrate_handoff_batches_report_only_candidates(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateBatching")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    source_dir = workspace_dir.parent / "raw"
+    (source_dir / "new_topic.md").write_text(
+        "# New Topic\n\n"
+        "新的主题仍然只生成 legacy 概念页，用于制造更多 report_only 候选。\n",
+        encoding="utf-8",
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    result = run_cli("migrate", "--format", "prompt", "--batch-size", "1", "--target-dir", str(workspace_dir))
+    assert result["batching"]["batch_size"] == 1
+    assert result["batching"]["batch_count"] >= 2
+    assert len(result["batch_reports"]) == result["batching"]["batch_count"]
+    assert all(batch["batch_size"] == 1 for batch in result["batch_reports"])
+
+
+def test_migrate_decisions_ingest_and_apply_roundtrip(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateDecisionRoundtrip")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    handoff = run_cli("migrate", "--format", "prompt", "--target-dir", str(workspace_dir))
+    assert handoff["manual_followups"]
+    canonical_id = handoff["manual_followups"][0]["canonical_id"]
+
+    decision_input = workspace_dir / "outputs" / "migration_decision_input.json"
+    decision_input.write_text(
+        json.dumps(
+            {
+                "decisions": [
+                    {
+                        "canonical_id": canonical_id,
+                        "decision_action": "promote_to_current_successor_needed",
+                        "rationale": "This family still needs a current successor page before migration can continue.",
+                        "confidence": 0.91,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    ingest_result = run_cli(
+        "migrate-decisions",
+        "--ingest",
+        "--input",
+        str(decision_input),
+        "--target-dir",
+        str(workspace_dir),
+    )
+    assert ingest_result["ledger_version"] == "migration_decision/v1"
+    assert ingest_result["summary"]["written_decision_count"] == 1
+
+    ledger_records = load_jsonl(workspace_dir / "state" / "migration_decisions.jsonl")
+    assert ledger_records
+    assert ledger_records[0]["canonical_id"] == canonical_id
+    assert ledger_records[0]["decision_action"] == "promote_to_current_successor_needed"
+
+    apply_result = run_cli("migrate-decisions", "--apply", "--target-dir", str(workspace_dir))
+    assert apply_result["summary"]["applied_decision_count"] == 1
+    assert apply_result["summary"]["promoted_action_count"] == 1
+    assert apply_result["summary"]["followup_queue_count"] == 1
+    assert apply_result["promoted_actions"][0]["canonical_id"] == canonical_id
+    followup_queue = load_jsonl(workspace_dir / "state" / "migration_followups.jsonl")
+    assert followup_queue
+    assert followup_queue[0]["canonical_id"] == canonical_id
+    assert followup_queue[0]["queue_action"] == "create_current_successor_required"
+    assert followup_queue[0]["status"] == "pending"
+
+    followups_result = run_cli("migrate-followups", "--target-dir", str(workspace_dir))
+    assert followups_result["summary"]["followup_count"] == 1
+    assert followups_result["summary"]["pending_count"] == 1
+    assert followups_result["items"][0]["canonical_id"] == canonical_id
+
+    complete_result = run_cli("migrate-followups", "--complete", canonical_id, "--target-dir", str(workspace_dir))
+    assert complete_result["completed_followup"]["canonical_id"] == canonical_id
+    assert complete_result["completed_followup"]["status"] == "completed"
+
+    completed_list = run_cli("migrate-followups", "--status", "completed", "--target-dir", str(workspace_dir))
+    assert completed_list["summary"]["completed_count"] == 1
+    assert completed_list["items"][0]["canonical_id"] == canonical_id
+
+
+def test_migrate_followup_can_be_promoted_to_review(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateFollowupReview")
+
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    kept_records = []
+    for record in page_records:
+        if record.get("type") == "concept" and not record.get("removed"):
+            page_path = workspace_dir / record["page_path"]
+            if page_path.exists():
+                page_path.unlink()
+            continue
+        kept_records.append(record)
+    write_jsonl(workspace_dir / "state" / "pages.jsonl", kept_records)
+
+    handoff = run_cli("migrate", "--format", "prompt", "--target-dir", str(workspace_dir))
+    canonical_id = handoff["manual_followups"][0]["canonical_id"]
+    decision_input = workspace_dir / "outputs" / "migration_decision_input_review.json"
+    decision_input.write_text(
+        json.dumps(
+            {
+                "decisions": [
+                    {
+                        "canonical_id": canonical_id,
+                        "decision_action": "promote_to_current_successor_needed",
+                        "rationale": "Need a tracked review item for current successor creation.",
+                        "confidence": 0.95,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    run_cli("migrate-decisions", "--ingest", "--input", str(decision_input), "--target-dir", str(workspace_dir))
+    run_cli("migrate-decisions", "--apply", "--target-dir", str(workspace_dir))
+
+    promote_result = run_cli("migrate-followups", "--promote-to-review", canonical_id, "--target-dir", str(workspace_dir))
+    assert promote_result["canonical_id"] == canonical_id
+    assert promote_result["review_record"]["kind"] == "migration_followup"
+    assert promote_result["review_record"]["migration_followup"]["canonical_id"] == canonical_id
+
+    review_list = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert any(item["kind"] == "migration_followup" for item in review_list["items"])
+
+
+def test_migrate_apply_removes_legacy_pages_when_current_family_exists(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateApplyRejected")
+
+    before_pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    before_live_legacy = [
+        record for record in before_pages
+        if record.get("type") == "concept-summary" and not record.get("removed")
+    ]
+    assert before_live_legacy
+
+    result = run_cli("migrate", "--apply", "--target-dir", str(workspace_dir))
+
+    assert result["summary"]["applied_action_count"] >= 1
+    assert result["summary"]["removed_legacy_page_count"] >= 1
+    assert result["summary"]["migration_candidate_count"] == 0
+    assert result["summary"]["legacy_page_count"] == 0
+    assert result["applied_actions"]
+    assert "unsupported_actions" not in result
+    assert result["migration_report"]["mode"] == "apply-plan"
+    backup = result["backup"]
+    backup_dir = Path(backup["backup_dir"])
+    assert backup_dir.exists()
+    manifest = json.loads(Path(backup["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["entries"]
+    backup_paths = {entry["path"] for entry in manifest["entries"]}
+    assert "state/pages.jsonl" in backup_paths
+    assert "state/claims.jsonl" in backup_paths
+    assert "state/reviews.jsonl" in backup_paths
+    assert "indexes/aliases.json" in backup_paths
+    assert "indexes/search_pages.jsonl" in backup_paths
+    assert any(entry["kind"] == "wiki_page_snapshot" for entry in manifest["entries"])
+
+    after_pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    after_live_legacy = [
+        record for record in after_pages
+        if record.get("type") == "concept-summary" and not record.get("removed")
+    ]
+    assert not after_live_legacy
+
+    removed_legacy_pages = [
+        record for record in after_pages
+        if record.get("type") == "concept-summary" and record.get("removed")
+    ]
+    assert removed_legacy_pages
+    assert all(record.get("archived_at") for record in removed_legacy_pages)
+    assert all(not (workspace_dir / record["page_path"]).exists() for record in removed_legacy_pages)
+
+    compat_result = run_cli("compat-report", "--target-dir", str(workspace_dir))
+    assert compat_result["summary"]["migration_candidate_count"] == 0
+    assert compat_result["compatibility_report"]["legacy_page_count"] == 0
+
+    lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
+    assert lint_result["summary"]["ok"] is True
+
+
+def test_migrate_apply_marks_unsupported_planned_action_without_crashing(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateUnsupportedAction")
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_builder = cli_module.build_migrate_plan_payload
+
+    def fake_builder(target: Path) -> dict:
+        payload = original_builder(target)
+        payload["planned_actions"] = payload["planned_actions"] + [
+            {
+                "action": "future_schema_upgrade_placeholder",
+                "action_class": "schema_upgrade",
+                "execution_mode": "apply_supported",
+                "canonical_id": "workspace:schema",
+                "legacy_page_ids": [],
+                "current_page_ids": [],
+                "legacy_types": [],
+                "current_types": [],
+                "migration_class": "future_schema_upgrade_placeholder",
+                "reason": "placeholder",
+            }
+        ]
+        payload["summary"] = {
+            **payload["summary"],
+            "planned_action_count": len(payload["planned_actions"]),
+        }
+        return payload
+
+    cli_module.build_migrate_plan_payload = fake_builder
+    try:
+        result = cli_module.apply_migrate_plan(workspace_dir)
+    finally:
+        cli_module.build_migrate_plan_payload = original_builder
+
+    assert result["applied_actions"]
+    assert result["unsupported_actions"]
+    assert result["unsupported_actions"][0]["action"] == "future_schema_upgrade_placeholder"
+    assert result["unsupported_actions"][0]["status"] == "unsupported_action"
+
+
+def test_migrate_apply_expands_multi_step_schema_transition_path(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "MigrateMultiStepSchema")
+
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+    try:
+        cli_module = importlib.import_module("myagentwiki.cli")
+    finally:
+        sys.path.pop(0)
+
+    original_builder = cli_module.build_migrate_plan_payload
+    original_handlers = dict(cli_module.MIGRATION_ACTION_HANDLERS)
+    call_order: list[str] = []
+
+    def fake_builder(target: Path) -> dict:
+        payload = original_builder(target)
+        payload["planned_actions"] = [
+            {
+                "action": "upgrade_workspace_schema_to_v1",
+                "action_class": "schema_upgrade",
+                "execution_mode": "apply_supported",
+                "canonical_id": "workspace:schema_version",
+                "migration_scope": "workspace_schema",
+                "from_schema_version": "v0",
+                "to_schema_version": "v2",
+                "transition_path": [
+                    {
+                        "from_version": "v0",
+                        "to_version": "v1",
+                        "action": "fake_schema_step_one",
+                    },
+                    {
+                        "from_version": "v1",
+                        "to_version": "v2",
+                        "action": "fake_schema_step_two",
+                    },
+                ],
+                "path_length": 2,
+                "legacy_page_ids": [],
+                "current_page_ids": [],
+                "legacy_types": [],
+                "current_types": [],
+                "migration_class": "workspace_schema_upgrade_to_v2",
+                "reason": "multi-step upgrade",
+                "risk_level": "high",
+            }
+        ]
+        payload["schema_migration"] = {
+            "planned_actions": payload["planned_actions"],
+            "manual_followups": [],
+        }
+        payload["compatibility_cleanup"] = {
+            "planned_actions": [],
+            "manual_followups": [],
+        }
+        payload["summary"] = {
+            **payload["summary"],
+            "planned_action_count": 1,
+            "manual_followup_count": 0,
+            "migration_candidate_count": 1,
+            "schema_planned_action_count": 1,
+            "schema_manual_followup_count": 0,
+            "compatibility_planned_action_count": 0,
+            "compatibility_manual_followup_count": 0,
+        }
+        return payload
+
+    def make_handler(name: str, to_version: str):
+        def apply(target: Path, action: dict, page_records_by_id: dict, live_claims_by_id: dict, live_reviews_by_id: dict) -> dict:
+            del page_records_by_id, live_claims_by_id, live_reviews_by_id
+            call_order.append(name)
+            cli_module.update_workspace_schema_version(target, to_version)
+            return {
+                "status": "applied",
+                "removed_legacy_page_ids": [],
+                "changed_page_records": [],
+            }
+        return {
+            "backup_entries": lambda target, action, page_records_by_id, backup_dir: [],
+            "apply": apply,
+        }
+
+    cli_module.build_migrate_plan_payload = fake_builder
+    cli_module.MIGRATION_ACTION_HANDLERS["fake_schema_step_one"] = make_handler("fake_schema_step_one", "v1")
+    cli_module.MIGRATION_ACTION_HANDLERS["fake_schema_step_two"] = make_handler("fake_schema_step_two", "v2")
+    try:
+        result = cli_module.apply_migrate_plan(workspace_dir)
+    finally:
+        cli_module.build_migrate_plan_payload = original_builder
+        cli_module.MIGRATION_ACTION_HANDLERS.clear()
+        cli_module.MIGRATION_ACTION_HANDLERS.update(original_handlers)
+
+    assert call_order == ["fake_schema_step_one", "fake_schema_step_two"]
+    applied_actions = [item for item in result["applied_actions"] if item["action"].startswith("fake_schema_step_")]
+    assert len(applied_actions) == 2
+    assert applied_actions[0]["transition_step_index"] == 1
+    assert applied_actions[1]["transition_step_index"] == 2
+
+
+def test_lint_migration_warning_uses_action_contract_metadata(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "LintMigrationContract")
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {check["name"]: check for check in result["checks"]}
+    assert "legacy_migration_candidates_absent" in checks
+    check = checks["legacy_migration_candidates_absent"]
+    assert check["ok"] is False
+    assert check["severity"] == "warning"
+    assert "archive_legacy_concept_summary" in check["details"]
+
+
+def test_answer_query_prompt_includes_page_type_driven_instruction_for_guide(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "guide.md").write_text(
+        "# 导入流程\n\n"
+        "首先扫描 raw 目录。\n\n"
+        "然后生成 normalized 文档。\n\n"
+        "最后写入 chunk 与 claim。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "AnswerQueryGuidePrompt",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli(
+        "answer-query",
+        "如何生成 normalized 文档",
+        "--target-dir", str(workspace_dir),
+        "--format", "prompt",
+    )
+
+    if "page_type_profile: guide" in result["prompt_text"]:
+        assert "answer_shape: step_by_step" in result["prompt_text"]
+        assert "prefer a procedural step-by-step answer" in result["prompt_text"]
 
 
 def test_query_answer_ready_messages_matches_answer_query_messages(tmp_path: Path) -> None:
@@ -1432,6 +2534,41 @@ def test_lint_warns_on_low_quality_concept_titles(tmp_path: Path) -> None:
     assert "generic_title" in checks["concept_pages_title_quality"]["details"] or "rejected_title" in checks["concept_pages_title_quality"]["details"]
 
 
+def test_lint_warns_on_page_semantic_consistency_conflicts(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "workflow.md").write_text(
+        "# 工作流\n\n"
+        "首先扫描 raw 目录。\n\n"
+        "然后生成 normalized 文档。\n\n"
+        "例如，可以先处理 Markdown 文件。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "LintSemanticConsistency",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    topic_page = next(record for record in page_records if record.get("type") == "guide")
+    topic_page["type"] = "example"
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in result["checks"]}
+    assert checks["page_semantic_consistency"]["ok"] is False
+    assert "page_type_intent_mismatch" in checks["page_semantic_consistency"]["details"]
+
+
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
     # 初始化后的工作区应该直接带 alias registry，占位也好过缺文件。
     source_dir = tmp_path / "raw"
@@ -1478,24 +2615,8 @@ def test_ingest_creates_alias_conflict_review_when_alias_registry_collides(tmp_p
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = [
-        json.loads(line)
-        for line in pages_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
-    assert len(concept_pages) >= 2
-
-    first = concept_pages[0]
-    second = concept_pages[1]
     shared_alias = "共享术语"
-    first["aliases"] = sorted(set(first.get("aliases", []) + [shared_alias]))
-    second["aliases"] = sorted(set(second.get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
-    )
+    injected_page_ids = inject_shared_alias_override(workspace_dir, shared_alias)
 
     # 再次 ingest 会刷新 pages -> aliases -> reviews。
     run_cli("ingest", "--target-dir", str(workspace_dir))
@@ -1510,6 +2631,7 @@ def test_ingest_creates_alias_conflict_review_when_alias_registry_collides(tmp_p
 
     assert alias_reviews
     assert any(shared_alias in json.dumps(record.get("evidence", []), ensure_ascii=False) for record in alias_reviews)
+    assert any(sorted(record.get("candidate_page_ids", [])) == sorted(injected_page_ids) for record in alias_reviews)
 
 
 def test_review_apply_assign_alias_updates_page_alias_overrides(tmp_path: Path) -> None:
@@ -1528,20 +2650,8 @@ def test_review_apply_assign_alias_updates_page_alias_overrides(tmp_path: Path) 
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = [
-        json.loads(line)
-        for line in pages_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
     shared_alias = "共享术语"
-    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
-    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
-    )
+    inject_shared_alias_override(workspace_dir, shared_alias)
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
@@ -1579,20 +2689,8 @@ def test_review_apply_remove_alias_clears_alias_from_overrides(tmp_path: Path) -
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = [
-        json.loads(line)
-        for line in pages_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
     shared_alias = "共享术语"
-    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
-    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
-    )
+    inject_shared_alias_override(workspace_dir, shared_alias)
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
@@ -1629,20 +2727,8 @@ def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = [
-        json.loads(line)
-        for line in pages_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
     shared_alias = "共享术语"
-    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
-    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
-    )
+    inject_shared_alias_override(workspace_dir, shared_alias)
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
@@ -1686,19 +2772,20 @@ def test_assign_alias_allows_same_canonical_page_family_to_share_alias(tmp_path:
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = load_jsonl(pages_path)
-    concept_summary = next(record for record in page_records if record.get("type") == "concept-summary")
-    other_concept = next(
+    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    candidate_pages = [
         record for record in page_records
-        if record.get("type") == "concept-summary" and record.get("page_id") != concept_summary.get("page_id")
-    )
+        if not record.get("removed")
+        and record.get("lifecycle_status", "active") == "active"
+        and record.get("type") in {"concept-summary", "concept", "topic", "guide", "example"}
+    ]
+    concept_summary = candidate_pages[0]
+    other_concept = candidate_pages[1]
     shared_alias = "一句话总结"
-    concept_summary["title"] = shared_alias
-    other_concept["aliases"] = sorted(set(other_concept.get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
+    inject_shared_alias_override(
+        workspace_dir,
+        shared_alias,
+        page_ids=[concept_summary["page_id"], other_concept["page_id"]],
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
@@ -1737,36 +2824,25 @@ def test_review_list_archives_stale_alias_conflict_reviews(tmp_path: Path) -> No
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    pages_path = workspace_dir / "state" / "pages.jsonl"
-    page_records = load_jsonl(pages_path)
-    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"]
     shared_alias = "共享术语"
-    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
-    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
-        encoding="utf-8",
-    )
+    inject_shared_alias_override(workspace_dir, shared_alias)
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     initial_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     alias_review = next(item for item in initial_reviews["items"] if item["kind"] == "alias_conflict")
 
-    refreshed_pages = load_jsonl(pages_path)
-    for record in refreshed_pages:
-        aliases = [alias for alias in record.get("aliases", []) if alias != shared_alias]
-        record["aliases"] = aliases
-    pages_path.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in refreshed_pages) + "\n",
-        encoding="utf-8",
-    )
+    overrides_path = workspace_dir / "state" / "page_alias_overrides.json"
+    overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+    for page_override in overrides.get("page_aliases", {}).values():
+        page_override["aliases"] = [
+            alias for alias in page_override.get("aliases", [])
+            if alias != shared_alias
+        ]
+    overrides_path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
-    assert not any(
-        item["review_id"] == alias_review["review_id"] and item["kind"] == "alias_conflict"
-        for item in refreshed_reviews["items"]
-    )
+    assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
 
     review_records = load_jsonl(workspace_dir / "state" / "reviews.jsonl")
     historical_alias_reviews = [
@@ -2092,6 +3168,45 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
     assert compare["results"][0]["reading_pack"]["answer_guardrails"]["must_read_claims"] is True
     assert compare["results"][0]["reading_pack"]["answer_guardrails"]["must_read_sources"] is False
     assert compare["results"][0]["reading_pack"]["answer_handoff"]["answer_mode"] == "claims_first"
+
+
+def test_query_reading_pack_uses_page_type_specific_focus(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "guide.md").write_text(
+        "# 导入流程\n\n"
+        "首先扫描 raw 目录。\n\n"
+        "然后生成 normalized 文档。\n\n"
+        "最后写入 chunk 与 claim。\n",
+        encoding="utf-8",
+    )
+    (source_dir / "example.md").write_text(
+        "# 示例集合\n\n"
+        "例如，Claim 可以承载定义句。\n\n"
+        "比如，一个概念页可以引用多个 Claim。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReadingPackPageTypeFocus",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    how_to = run_cli("query", "如何生成 normalized 文档", "--target-dir", str(workspace_dir))
+    example = run_cli("query", "Claim 的例子有哪些", "--target-dir", str(workspace_dir))
+
+    how_to_result = next(item for item in how_to["results"] if item["type"] == "guide")
+    example_result = next(item for item in example["results"] if item["type"] == "example")
+    how_to_pack = how_to_result["reading_pack"]
+    example_pack = example_result["reading_pack"]
+    assert how_to_pack["focus"] == "guide_steps"
+    assert how_to_pack["answer_handoff"]["recommended_read_order"][1] == "page_context.summary"
+    assert example_pack["focus"] == "worked_examples"
+    assert example_pack["answer_handoff"]["recommended_read_order"][1] == "page_context.summary"
 
 
 def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:

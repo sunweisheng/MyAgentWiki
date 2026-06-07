@@ -15,6 +15,11 @@
   - 当前版本的主设计文档，适合先理解系统目标、数据模型、工作流、`deterministic first` 原则，以及 `query / overview` 的最新实现边界。
   - 其中已包含 `query -> answer handoff contract`，用于定义 `reading_pack` 如何作为上层回答器/Agent 的标准输入。
   - 当前也已包含 `answer-ready output layer`，用于说明 `answer-query`、`query --answer-ready` 及其 `prompt/messages/chatml` 输出格式。
+  - 当前也已包含 Phase 6 迁移骨架，说明 `compat-report / migrate / migrate-schema-confirm / migrate-decisions / migrate-followups` 的设计边界。
+
+- [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
+  - 当前重构计划主文档。
+  - 其中 Phase 6 已记录迁移框架现状、schema transition graph、确认 ledger、灰区 decision/followup queue 与 registry 自校验。
 
 - [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
   - 运行依赖、平台差异、安装方式与降级能力说明。
@@ -42,10 +47,11 @@
 ## 建议阅读顺序
 
 1. [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
-2. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
-3. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
-4. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
-5. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
+2. [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
+3. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
+4. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
+5. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
+6. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
 
 ## 边界说明
 

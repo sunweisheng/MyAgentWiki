@@ -29,6 +29,14 @@ import fcntl
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
+from .semantic import (
+    SemanticTaskConfig,
+    build_semantic_decision_id,
+    fingerprint_payload,
+    item_type_for_task,
+    semantic_batches_dir,
+)
+
 try:
     import docx
 except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
@@ -68,6 +76,11 @@ QUERY_READING_DEPTH_LIMITS = {
 ALIAS_INDEX_REL_PATH = Path("indexes") / "aliases.json"
 PAGE_ALIAS_OVERRIDES_REL_PATH = Path("state") / "page_alias_overrides.json"
 PAGE_ALIAS_OVERRIDES_LOCK_REL_PATH = Path("state") / ".page_alias_overrides.lock"
+SEMANTIC_DECISIONS_REL_PATH = Path("state") / "semantic_decisions.jsonl"
+MIGRATION_DECISIONS_REL_PATH = Path("state") / "migration_decisions.jsonl"
+MIGRATION_FOLLOWUPS_REL_PATH = Path("state") / "migration_followups.jsonl"
+MIGRATION_RUNS_REL_PATH = Path("state") / "migration_runs.jsonl"
+SCHEMA_CONFIRMATIONS_REL_PATH = Path("state") / "schema_confirmations.jsonl"
 NEGATION_MARKERS = ("不", "不是", "没有", "无法", "不能", "未", "无", "禁止", "不要", "not ", "no ", "never ", "cannot ")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
@@ -78,6 +91,31 @@ PAGE_RENDER_TARGETS = {
         "page_types": {"concept"},
         "rebuild_strategy": "review_affected_pages",
         "grounding_checker": "readable_concept",
+    },
+    "guide": {
+        "page_types": {"guide"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
+    },
+    "example": {
+        "page_types": {"example"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
+    },
+    "topic": {
+        "page_types": {"topic"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
+    },
+    "reference": {
+        "page_types": {"reference"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
+    },
+    "timeline": {
+        "page_types": {"timeline"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
     },
     "overview": {
         "page_types": {"overview"},
@@ -107,7 +145,12 @@ QUERY_FIELD_WEIGHTS = {
 QUERY_PAGE_TYPE_WEIGHTS = {
     "overview": 1.25,
     "concept": 1.22,
-    "concept-summary": 1.10,
+    "topic": 1.08,
+    "guide": 1.05,
+    "example": 0.95,
+    "reference": 1.04,
+    "timeline": 1.02,
+    "concept-summary": 0.88,
     "entity": 1.10,
     "source-summary": 1.00,
     "qa": 0.95,
@@ -146,8 +189,27 @@ SEARCH_PAGES_INDEX_VERSION = "search_pages_v1"
 ALIAS_INDEX_VERSION = "aliases_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
+MIGRATE_HANDOFF_CONTRACT_VERSION = "migrate_handoff/v1"
+MIGRATION_DECISION_LEDGER_VERSION = "migration_decision/v1"
+SCHEMA_CONFIRMATION_LEDGER_VERSION = "schema_confirmation/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
+SEMANTIC_TASK_NAMES = ("document_analysis", "claim_role", "page_intent")
+WORKSPACE_SCHEMA_VERSION = "v1"
+WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION = "v1"
+WORKSPACE_SCHEMA_VERSION_ORDER = ("v1",)
+WORKSPACE_SCHEMA_LEGACY_VERSION = "unversioned"
+WORKSPACE_SCHEMA_TRANSITIONS = (
+    {
+        "from_version": WORKSPACE_SCHEMA_LEGACY_VERSION,
+        "to_version": "v1",
+        "action": "upgrade_workspace_schema_to_v1",
+        "prerequisites": ["config/project.yml exists"],
+        "rollback_strategy": "restore_config_snapshot",
+        "requires_confirmation": False,
+        "notes": "Bootstrap legacy unversioned workspaces into the first explicit schema version.",
+    },
+)
 QUERY_INTENT_MARKERS = {
     "overview": (
         "概览", "概况", "总览", "总述", "整体", "全局", "框架", "脉络", "overview",
@@ -161,6 +223,9 @@ QUERY_INTENT_MARKERS = {
     ),
     "timeline": (
         "时间线", "演变", "历史", "历程", "timeline",
+    ),
+    "reference": (
+        "参数", "清单", "列表", "faq", "FAQ", "参考", "规则", "字段", "配置项", "reference",
     ),
     "how_to": (
         "如何", "怎么", "步骤", "做法", "实践", "how to", "tutorial",
@@ -192,6 +257,12 @@ QUERY_INTENT_FIELD_MULTIPLIERS = {
         "body": 1.10,
         "summary": 1.05,
         "source_refs": 1.10,
+    },
+    "reference": {
+        "title": 1.10,
+        "headings": 1.12,
+        "body": 1.08,
+        "claim_text": 1.06,
     },
     "how_to": {
         "headings": 1.15,
@@ -363,6 +434,20 @@ def print_result(result: CommandResult, as_json: bool = False) -> int:
 def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> dict:
     # 给上层 Agent 和人类读者一份“可以直接复述”的路径摘要，避免只剩目录名。
     lint_report_path = target_dir / "reports" / "lint" / "lint_latest.md"
+    schema_version = None
+    schema_guard = {
+        "status": "unknown",
+        "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
+        "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
+    }
+    config_path = target_dir / "config" / "project.yml"
+    if config_path.exists():
+        workspace_config = load_simple_yaml(config_path)
+        workspace_block = workspace_config.get("workspace", {})
+        if not isinstance(workspace_block, dict):
+            workspace_block = {}
+        schema_version = str(workspace_block.get("schema_version", "")).strip() or None
+        schema_guard["status"] = workspace_schema_guard_status(schema_version).replace("_schema_version", "")
     summary = {
         "workspace_dir": str(target_dir),
         "workspace_name": target_dir.name,
@@ -370,9 +455,12 @@ def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> di
         "wiki_log_path": str(target_dir / "wiki" / "log.md"),
         "lint_report_path": str(lint_report_path),
         "lint_report_exists": lint_report_path.exists(),
+        "schema_version": schema_version,
+        "schema_guard": schema_guard,
     }
     if raw_dir is not None:
         summary["raw_dir"] = str(raw_dir)
+    summary["compatibility_report"] = build_workspace_compatibility_report(target_dir)
     return summary
 
 
@@ -400,6 +488,27 @@ def render_workspace_summary_message(
             ),
         ]
     )
+    compatibility_report = summary.get("compatibility_report", {})
+    if compatibility_report.get("legacy_page_count", 0) > 0:
+        legacy_types = compatibility_report.get("legacy_page_types", {})
+        legacy_type_text = ", ".join(
+            f"{page_type}={count}" for page_type, count in sorted(legacy_types.items())
+        ) or "legacy_pages_present"
+        lines.append(
+            "Compatibility: "
+            f"legacy_pages={compatibility_report.get('legacy_page_count', 0)}, "
+            f"families_with_legacy={compatibility_report.get('canonical_families_with_legacy', 0)} "
+            f"({legacy_type_text})"
+        )
+    schema_guard = summary.get("schema_guard", {})
+    if schema_guard.get("status") == "unsupported":
+        lines.append(
+            "Schema guard: "
+            f"workspace_schema={summary.get('schema_version')}, "
+            f"supported={schema_guard.get('minimum_supported_schema_version')}..{schema_guard.get('expected_schema_version')}"
+        )
+    elif summary.get("schema_version"):
+        lines.append(f"Schema version: {summary.get('schema_version')}")
     if extra_lines:
         lines.extend(line for line in extra_lines if line)
     return "\n".join(lines)
@@ -650,6 +759,8 @@ def baseline_git_paths(target: Path) -> list[str]:
         "state/chunks.jsonl",
         "state/error_log.jsonl",
         "state/ingest_state.jsonl",
+        str(SCHEMA_CONFIRMATIONS_REL_PATH),
+        str(MIGRATION_RUNS_REL_PATH),
         "state/normalized.jsonl",
         "state/pages.jsonl",
         "state/reviews.jsonl",
@@ -863,6 +974,384 @@ def load_workspace_config(target: Path) -> dict:
     return load_simple_yaml(config_path)
 
 
+def workspace_schema_version_rank(schema_version: str | None) -> int | None:
+    normalized = str(schema_version or "").strip()
+    if not normalized:
+        return None
+    if normalized == WORKSPACE_SCHEMA_LEGACY_VERSION:
+        return -1
+    try:
+        return WORKSPACE_SCHEMA_VERSION_ORDER.index(normalized)
+    except ValueError:
+        return None
+
+
+def workspace_schema_guard_status(schema_version: str | None) -> str:
+    normalized = str(schema_version or "").strip() or None
+    if normalized is None:
+        return "missing_schema_version"
+
+    current_rank = workspace_schema_version_rank(normalized)
+    minimum_rank = workspace_schema_version_rank(WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION)
+    expected_rank = workspace_schema_version_rank(WORKSPACE_SCHEMA_VERSION)
+    if current_rank is None or minimum_rank is None or expected_rank is None:
+        return "unsupported"
+    if minimum_rank <= current_rank <= expected_rank:
+        return "supported"
+    if current_rank < minimum_rank:
+        return "needs_migration"
+    return "unsupported"
+
+
+def find_workspace_schema_transition(from_version: str | None, to_version: str | None = None) -> dict | None:
+    normalized_from = str(from_version or "").strip() or None
+    normalized_to = str(to_version or WORKSPACE_SCHEMA_VERSION).strip() or WORKSPACE_SCHEMA_VERSION
+    for transition in WORKSPACE_SCHEMA_TRANSITIONS:
+        if transition.get("from_version") == normalized_from and transition.get("to_version") == normalized_to:
+            return dict(transition)
+    return None
+
+
+def plan_workspace_schema_transition_path(
+    from_version: str | None,
+    to_version: str | None = None,
+) -> list[dict]:
+    normalized_from = str(from_version or "").strip() or None
+    normalized_to = str(to_version or WORKSPACE_SCHEMA_VERSION).strip() or WORKSPACE_SCHEMA_VERSION
+    if normalized_from == normalized_to:
+        return []
+
+    queue: list[tuple[str | None, list[dict]]] = [(normalized_from, [])]
+    visited = {normalized_from}
+    while queue:
+        current_version, current_path = queue.pop(0)
+        for transition in WORKSPACE_SCHEMA_TRANSITIONS:
+            if transition.get("from_version") != current_version:
+                continue
+            next_path = [*current_path, dict(transition)]
+            next_version = transition.get("to_version")
+            if next_version == normalized_to:
+                return next_path
+            if next_version in visited:
+                continue
+            visited.add(next_version)
+            queue.append((next_version, next_path))
+    return []
+
+
+def workspace_schema_transition_path_signature(
+    from_version: str | None,
+    to_version: str | None,
+    transition_path: list[dict],
+) -> str:
+    from_part = str(from_version or "unknown").strip() or "unknown"
+    to_part = str(to_version or "unknown").strip() or "unknown"
+    step_parts = [
+        f"{step.get('from_version')}->{step.get('to_version')}:{step.get('action')}"
+        for step in transition_path
+    ]
+    return "|".join([from_part, to_part, *step_parts])
+
+
+def resolve_target_workspace_schema_version(target_schema_version: str | None = None) -> str:
+    normalized = str(target_schema_version or "").strip()
+    if normalized.lower() == "none":
+        normalized = ""
+    return normalized or WORKSPACE_SCHEMA_VERSION
+
+
+def workspace_schema_version_is_known(schema_version: str | None) -> bool:
+    normalized = str(schema_version or "").strip()
+    if not normalized:
+        return False
+    if normalized == WORKSPACE_SCHEMA_LEGACY_VERSION:
+        return True
+    return normalized in WORKSPACE_SCHEMA_VERSION_ORDER
+
+
+def validate_workspace_schema_registry() -> list[str]:
+    issues: list[str] = []
+    known_versions = set(WORKSPACE_SCHEMA_VERSION_ORDER)
+    known_versions.add(WORKSPACE_SCHEMA_LEGACY_VERSION)
+
+    for transition in WORKSPACE_SCHEMA_TRANSITIONS:
+        from_version = str(transition.get("from_version", "")).strip() or None
+        to_version = str(transition.get("to_version", "")).strip() or None
+        action = str(transition.get("action", "")).strip()
+        if from_version is not None and from_version not in known_versions:
+            issues.append(f"Unknown transition from_version: {from_version}")
+        if to_version is None or to_version not in known_versions:
+            issues.append(f"Unknown transition to_version: {to_version or 'missing'}")
+        if not action:
+            issues.append("Workspace schema transition is missing action.")
+            continue
+        contract = migration_action_contract(action)
+        if not contract:
+            issues.append(f"Missing migration action contract for workspace schema transition: {action}")
+            continue
+        if contract.get("action_class") != "schema_upgrade":
+            issues.append(f"Workspace schema transition action must use schema_upgrade contract: {action}")
+        if contract.get("execution_mode") != "apply_supported":
+            issues.append(f"Workspace schema transition action must be apply_supported: {action}")
+
+    return issues
+
+
+def normalize_optional_cli_string(value) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() == "none":
+        return None
+    return normalized
+
+
+def build_migrate_plan_payload_for_target(target: Path, target_schema_version: str | None = None) -> dict:
+    normalized_target = resolve_target_workspace_schema_version(target_schema_version)
+    if normalized_target == WORKSPACE_SCHEMA_VERSION:
+        return build_migrate_plan_payload(target)
+    return build_migrate_plan_payload(target, target_schema_version=normalized_target)
+
+
+def classify_workspace_schema_migration(
+    target: Path,
+    target_schema_version: str | None = None,
+) -> dict | None:
+    schema_guard = workspace_schema_guard_payload(target)
+    status = schema_guard.get("status")
+    current_version = schema_guard.get("workspace_schema_version")
+    desired_version = resolve_target_workspace_schema_version(target_schema_version)
+    desired_version_known = workspace_schema_version_is_known(desired_version)
+    if status in {"supported", "needs_migration"} and current_version == desired_version:
+        return None
+    if not desired_version_known:
+        return {
+            "migration_scope": "workspace_schema",
+            "from_schema_version": current_version,
+            "to_schema_version": desired_version,
+            "classification": "report_only",
+            "reason": "Requested target workspace schema_version is outside the known schema registry and must be inspected before planning.",
+            "suggested_action": "inspect_target_workspace_schema_version",
+            "planning_decision": "report_only",
+            "action_contract": {
+                "action_class": "schema_followup",
+                "execution_mode": "report_only",
+                "risk_level": "high",
+            },
+            "migration_class": "target_workspace_schema_version_unknown",
+            "transition_path": [],
+            "path_length": 0,
+            "path_signature": None,
+            "confirmation_status": "not_applicable",
+        }
+    if status in {"supported", "needs_migration"}:
+        transition_path = plan_workspace_schema_transition_path(current_version, desired_version)
+        if transition_path:
+            planned_actions = []
+            for transition in transition_path:
+                contract = migration_action_contract(transition.get("action"))
+                planned_actions.append({
+                    "from_version": transition.get("from_version"),
+                    "to_version": transition.get("to_version"),
+                    "action": transition.get("action"),
+                    "prerequisites": list(transition.get("prerequisites", [])),
+                    "rollback_strategy": transition.get("rollback_strategy"),
+                    "requires_confirmation": bool(transition.get("requires_confirmation", False)),
+                    "notes": transition.get("notes"),
+                    "action_class": contract.get("action_class"),
+                    "execution_mode": contract.get("execution_mode"),
+                    "risk_level": contract.get("risk_level"),
+                    "migration_class": contract.get("migration_class"),
+                })
+            final_contract = migration_action_contract(transition_path[-1].get("action"))
+            path_signature = workspace_schema_transition_path_signature(
+                current_version,
+                desired_version,
+                planned_actions,
+            )
+            latest_confirmations = build_latest_schema_confirmations_by_signature(
+                load_schema_confirmations(target)
+            )
+            confirmation_record = latest_confirmations.get(path_signature)
+            requires_confirmation = any(
+                bool(step.get("requires_confirmation", False))
+                for step in planned_actions
+            )
+            confirmation_status = str(confirmation_record.get("status", "")).strip() if confirmation_record else "unconfirmed"
+            if requires_confirmation and confirmation_status != "confirmed":
+                return {
+                    "migration_scope": "workspace_schema",
+                    "from_schema_version": current_version,
+                    "to_schema_version": desired_version,
+                    "classification": "report_only",
+                    "reason": "Workspace schema migration path contains at least one step that requires explicit confirmation before execution.",
+                    "suggested_action": "confirm_workspace_schema_transition_path",
+                    "planning_decision": "report_only",
+                    "action_contract": {
+                        "action_class": "schema_followup",
+                        "execution_mode": "report_only",
+                        "risk_level": "high",
+                    },
+                    "migration_class": "workspace_schema_transition_requires_confirmation",
+                    "transition_path": planned_actions,
+                    "path_length": len(planned_actions),
+                    "requires_confirmation": True,
+                    "rollback_strategy": planned_actions[-1].get("rollback_strategy"),
+                    "path_signature": path_signature,
+                    "confirmation_status": confirmation_status,
+                }
+            return {
+                "migration_scope": "workspace_schema",
+                "from_schema_version": current_version,
+                "to_schema_version": desired_version,
+                "classification": "auto_plan",
+                "reason": final_contract.get("candidate_reason"),
+                "suggested_action": transition_path[-1].get("action"),
+                "planning_decision": final_contract.get("planning_decision"),
+                "action_contract": {
+                    "action_class": final_contract.get("action_class"),
+                    "execution_mode": final_contract.get("execution_mode"),
+                    "risk_level": final_contract.get("risk_level"),
+                },
+                "migration_class": final_contract.get("migration_class"),
+                "transition_path": planned_actions,
+                "path_length": len(planned_actions),
+                "requires_confirmation": requires_confirmation,
+                "rollback_strategy": planned_actions[-1].get("rollback_strategy"),
+                "path_signature": path_signature,
+                "confirmation_status": confirmation_status,
+            }
+        return {
+            "migration_scope": "workspace_schema",
+            "from_schema_version": current_version,
+            "to_schema_version": desired_version,
+            "classification": "report_only",
+            "reason": "Workspace schema migration target is outside the registered deterministic transition graph.",
+            "suggested_action": "schema_transition_not_registered",
+            "planning_decision": "report_only",
+            "action_contract": {
+                "action_class": "schema_followup",
+                "execution_mode": "report_only",
+                "risk_level": "high",
+            },
+            "migration_class": "workspace_schema_transition_not_registered",
+            "transition_path": [],
+            "path_length": 0,
+            "path_signature": None,
+            "confirmation_status": "not_applicable",
+        }
+    if status == "missing_schema_version":
+        return {
+            "migration_scope": "workspace_schema",
+            "from_schema_version": None,
+            "to_schema_version": desired_version,
+            "classification": "report_only",
+            "reason": "Workspace schema_version is missing and must be confirmed before an explicit schema transition can be chosen.",
+            "suggested_action": "inspect_missing_workspace_schema_version",
+            "planning_decision": "report_only",
+            "action_contract": {
+                "action_class": "schema_followup",
+                "execution_mode": "report_only",
+                "risk_level": "high",
+            },
+            "migration_class": "workspace_schema_version_missing",
+            "transition_path": [],
+            "path_length": 0,
+            "path_signature": None,
+            "confirmation_status": "not_applicable",
+        }
+    if status == "unsupported":
+        return {
+            "migration_scope": "workspace_schema",
+            "from_schema_version": current_version,
+            "to_schema_version": desired_version,
+            "classification": "report_only",
+            "reason": "Workspace schema_version is newer or outside the known transition graph and must not be silently rewritten.",
+            "suggested_action": "inspect_unsupported_workspace_schema_version",
+            "planning_decision": "report_only",
+            "action_contract": {
+                "action_class": "schema_followup",
+                "execution_mode": "report_only",
+                "risk_level": "high",
+            },
+            "migration_class": "workspace_schema_unsupported_version",
+            "transition_path": [],
+            "path_length": 0,
+            "path_signature": None,
+            "confirmation_status": "not_applicable",
+        }
+    return None
+
+
+def update_workspace_schema_version(target: Path, schema_version: str) -> None:
+    config_path = target / "config" / "project.yml"
+    if not config_path.exists():
+        raise ValueError(f"Missing config/project.yml in {target}.")
+    config_text = config_path.read_text(encoding="utf-8")
+    updated_text, replacement_count = re.subn(
+        r'(^\s*schema_version:\s*")[^"]*(".*$)',
+        rf'\g<1>{schema_version}\2',
+        config_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if replacement_count == 0:
+        raise ValueError("Could not update workspace.schema_version in config/project.yml.")
+    atomic_write_text(config_path, updated_text, encoding="utf-8")
+
+
+def workspace_schema_guard_payload(target: Path) -> dict:
+    config_path = target / "config" / "project.yml"
+    if not config_path.exists():
+        return {
+            "status": "missing_config",
+            "workspace_schema_version": None,
+            "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
+            "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
+        }
+    config = load_simple_yaml(config_path)
+    workspace_block = config.get("workspace", {})
+    if not isinstance(workspace_block, dict):
+        workspace_block = {}
+    schema_version = str(workspace_block.get("schema_version", "")).strip() or None
+    status = workspace_schema_guard_status(schema_version)
+    return {
+        "status": status,
+        "workspace_schema_version": schema_version,
+        "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
+        "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
+    }
+
+
+def ensure_workspace_schema_supported(target: Path) -> None:
+    payload = workspace_schema_guard_payload(target)
+    if payload["status"] == "supported":
+        return
+    if payload["status"] == "missing_config":
+        raise ValueError(
+            f"Workspace schema guard failed: missing config/project.yml in {target}. "
+            "Re-initialize the workspace or point the command at a valid workspace."
+        )
+    if payload["status"] == "missing_schema_version":
+        raise ValueError(
+            "Workspace schema guard failed: workspace.schema_version is missing in config/project.yml. "
+            "Run `migrate --plan` to inspect compatibility, then add or migrate the workspace schema explicitly."
+        )
+    if payload["status"] == "needs_migration":
+        raise ValueError(
+            "Workspace schema guard failed: "
+            f"workspace.schema_version={payload['workspace_schema_version']} needs migration before this command can write safely "
+            f"(supported={payload['minimum_supported_schema_version']}..{payload['expected_schema_version']}). "
+            "Run `migrate --plan` or `migrate --apply` first."
+        )
+    raise ValueError(
+        "Workspace schema guard failed: "
+        f"workspace.schema_version={payload['workspace_schema_version']} is not supported by this CLI "
+        f"(supported={payload['minimum_supported_schema_version']}..{payload['expected_schema_version']}). "
+        "Run `compat-report` or `migrate --plan` before attempting mutating commands."
+    )
+
+
 def coerce_int(value, default: int) -> int:
     if isinstance(value, int):
         return value
@@ -940,6 +1429,51 @@ def load_post_ingest_review_auto_config(config: dict) -> dict:
     }
 
 
+def load_semantic_task_config(config: dict, task_name: str) -> SemanticTaskConfig:
+    semantic_config = config.get("semantic", {})
+    if not isinstance(semantic_config, dict):
+        semantic_config = {}
+
+    scheduler_config = semantic_config.get("batch_scheduler", {})
+    if not isinstance(scheduler_config, dict):
+        scheduler_config = {}
+
+    task_config = semantic_config.get(task_name, {})
+    if not isinstance(task_config, dict):
+        task_config = {}
+
+    strategy = str(task_config.get("strategy", "agent_assisted")).strip() or "agent_assisted"
+    if strategy not in AUTOMATION_STRATEGIES:
+        strategy = "agent_assisted"
+
+    command = normalize_command_config(task_config.get("command", []))
+    timeout_seconds = max(coerce_int(task_config.get("timeout_seconds", 45), 45), 5)
+    min_confidence = min(max(coerce_float(task_config.get("min_confidence", 0.75), 0.75), 0.0), 1.0)
+    batch_size = max(
+        coerce_int(
+            task_config.get("batch_size", scheduler_config.get("default_batch_size", 12)),
+            12,
+        ),
+        1,
+    )
+    model_key = str(task_config.get("model_key", "local-default")).strip() or "local-default"
+    prompt_version = str(task_config.get("prompt_version", "v1")).strip() or "v1"
+    schema_version = str(task_config.get("schema_version", "v1")).strip() or "v1"
+    enabled = strategy == "agent_assisted" and bool(command)
+    return SemanticTaskConfig(
+        task_name=task_name,
+        strategy=strategy,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        min_confidence=min_confidence,
+        batch_size=batch_size,
+        enabled=enabled,
+        model_key=model_key,
+        prompt_version=prompt_version,
+        schema_version=schema_version,
+    )
+
+
 def run_json_automation_command(
     target: Path,
     command: list[str],
@@ -973,6 +1507,368 @@ def run_json_automation_command(
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
+    if task_name == "document_analysis":
+        records = load_jsonl(target / "state" / "normalized.jsonl")
+        items = []
+        for record in records:
+            source_id = str(record.get("source_id", "")).strip()
+            normalized_path = str(record.get("normalized_path", "")).strip()
+            if not source_id or not normalized_path:
+                continue
+            items.append(
+                {
+                    "item_id": source_id,
+                    "source_id": source_id,
+                    "normalized_path": normalized_path,
+                    "title": record.get("title", ""),
+                    "extraction_quality": record.get("extraction_quality"),
+                }
+            )
+        return items
+
+    if task_name == "claim_role":
+        records = load_jsonl(target / "state" / "claims.jsonl")
+        items = []
+        for record in records:
+            claim_id = str(record.get("claim_id", "")).strip()
+            if not claim_id or record.get("lifecycle_status", "active") != "active":
+                continue
+            items.append(
+                {
+                    "item_id": claim_id,
+                    "claim_id": claim_id,
+                    "text": record.get("text", ""),
+                    "claim_type": record.get("claim_type"),
+                    "source_ids": record.get("source_ids", []),
+                    "source_refs": record.get("source_refs", []),
+                }
+            )
+        return items
+
+    if task_name == "page_intent":
+        records = load_jsonl(target / "state" / "claims.jsonl")
+        groups: dict[str, list[dict]] = {}
+        for record in records:
+            if record.get("lifecycle_status", "active") != "active":
+                continue
+            bucket_key = build_concept_group_key(record)
+            if not bucket_key:
+                continue
+            groups.setdefault(bucket_key, []).append(record)
+
+        items = []
+        for bucket_key, grouped_claims in sorted(groups.items()):
+            claim_ids = [item.get("claim_id") for item in grouped_claims if item.get("claim_id")]
+            preview_texts = [str(item.get("text", "")).strip() for item in grouped_claims[:5] if str(item.get("text", "")).strip()]
+            items.append(
+                {
+                    "item_id": bucket_key,
+                    "bucket_key": bucket_key,
+                    "claim_ids": claim_ids,
+                    "claim_texts": preview_texts,
+                    "claim_count": len(claim_ids),
+                }
+            )
+        return items
+
+    raise KeyError(f"Unsupported semantic task: {task_name}")
+
+
+def chunk_semantic_items(items: list[dict], batch_size: int) -> list[list[dict]]:
+    if batch_size <= 0:
+        batch_size = 1
+    return [items[index:index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def normalize_semantic_batch_results(
+    task_name: str,
+    hook_result: dict,
+    batch_items: list[dict],
+    config: SemanticTaskConfig,
+) -> list[dict]:
+    decisions = hook_result.get("decisions", [])
+    if not isinstance(decisions, list):
+        return []
+
+    item_map = {str(item.get("item_id")): item for item in batch_items if item.get("item_id")}
+    normalized: list[dict] = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        item_id = str(decision.get("item_id", "")).strip()
+        if not item_id or item_id not in item_map:
+            continue
+        confidence = coerce_float(decision.get("confidence", 0.0), 0.0)
+        if confidence < config.min_confidence:
+            continue
+        item_payload = item_map[item_id]
+        input_fingerprint = fingerprint_payload(
+            task_name=task_name,
+            item_payloads=[item_payload],
+            prompt_version=config.prompt_version,
+            schema_version=config.schema_version,
+        )
+        normalized.append(
+            {
+                "decision_id": build_semantic_decision_id(task_name, input_fingerprint),
+                "task_type": task_name,
+                "item_type": item_type_for_task(task_name),
+                "item_ids": [item_id],
+                "decision": decision.get("decision"),
+                "confidence": confidence,
+                "reason_code": str(decision.get("reason_code", "")).strip() or "semantic_batch_result",
+                "prompt_version": config.prompt_version,
+                "model_key": config.model_key,
+                "schema_version": config.schema_version,
+                "input_fingerprint": input_fingerprint,
+                "created_at": utc_now_iso(),
+                "superseded_by": [],
+            }
+        )
+    return normalized
+
+
+def run_semantic_batch_task(
+    target: Path,
+    task_name: str,
+    dry_run: bool = False,
+) -> dict:
+    config = load_semantic_task_config(load_workspace_config(target), task_name)
+    items = collect_semantic_task_items(target, task_name)
+    existing_records = load_semantic_decisions(target)
+    existing_by_fingerprint = build_latest_semantic_decisions_by_fingerprint(existing_records)
+
+    cache_hits = 0
+    pending_batches: list[tuple[list[dict], list[str]]] = []
+    for batch_items in chunk_semantic_items(items, config.batch_size):
+        pending_items = []
+        cached_ids = []
+        for item in batch_items:
+            input_fingerprint = fingerprint_payload(
+                task_name=task_name,
+                item_payloads=[item],
+                prompt_version=config.prompt_version,
+                schema_version=config.schema_version,
+            )
+            if input_fingerprint in existing_by_fingerprint:
+                cache_hits += 1
+                cached_ids.append(str(item.get("item_id")))
+            else:
+                pending_items.append(item)
+        if pending_items:
+            pending_batches.append((pending_items, cached_ids))
+
+    written_decisions: list[dict] = []
+    batch_reports = []
+    ensure_directory(semantic_batches_dir(target))
+
+    for batch_index, (batch_items, cached_ids) in enumerate(pending_batches, start=1):
+        payload = {
+            "task": f"review_{task_name}_batch",
+            "task_name": task_name,
+            "prompt_version": config.prompt_version,
+            "schema_version": config.schema_version,
+            "items": batch_items,
+        }
+        hook_result = run_json_automation_command(
+            target=target,
+            command=config.command,
+            payload=payload,
+            timeout_seconds=config.timeout_seconds,
+        ) if config.enabled else None
+        normalized_results = normalize_semantic_batch_results(task_name, hook_result or {}, batch_items, config)
+
+        batch_report = {
+            "task_name": task_name,
+            "batch_index": batch_index,
+            "item_ids": [str(item.get("item_id")) for item in batch_items],
+            "cached_item_ids": cached_ids,
+            "decision_count": len(normalized_results),
+            "created_at": utc_now_iso(),
+        }
+        write_json(
+            semantic_batches_dir(target) / f"{task_name}_batch_{batch_index:04d}.json",
+            batch_report,
+        )
+        batch_reports.append(batch_report)
+        written_decisions.extend(normalized_results)
+
+    if written_decisions and not dry_run:
+        for record in written_decisions:
+            append_jsonl(semantic_decisions_path(target), record)
+
+    return {
+        "task_name": task_name,
+        "workspace_summary": build_workspace_summary(target),
+        "summary": {
+            "item_count": len(items),
+            "cache_hits": cache_hits,
+            "pending_batch_count": len(pending_batches),
+            "written_decision_count": 0 if dry_run else len(written_decisions),
+            "dry_run": dry_run,
+        },
+        "config": {
+            "strategy": config.strategy,
+            "batch_size": config.batch_size,
+            "model_key": config.model_key,
+            "prompt_version": config.prompt_version,
+            "schema_version": config.schema_version,
+            "enabled": config.enabled,
+        },
+        "batch_reports": batch_reports,
+        "decisions": written_decisions,
+    }
+
+
+def apply_document_analysis_decisions_to_normalized_records(
+    target: Path,
+    normalized_records: list[dict],
+    task_config: SemanticTaskConfig,
+) -> list[dict]:
+    latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
+    normalized_by_source_id = {record["source_id"]: dict(record) for record in normalized_records}
+    changed_records: list[dict] = []
+
+    for record in normalized_records:
+        item_payload = {
+            "item_id": record["source_id"],
+            "source_id": record["source_id"],
+            "normalized_path": record.get("normalized_path", ""),
+            "title": record.get("title", ""),
+            "extraction_quality": record.get("extraction_quality"),
+        }
+        fingerprint = fingerprint_payload(
+            task_name="document_analysis",
+            item_payloads=[item_payload],
+            prompt_version=task_config.prompt_version,
+            schema_version=task_config.schema_version,
+        )
+        decision_record = latest_decisions.get(fingerprint)
+        if decision_record is None:
+            continue
+        decision = decision_record.get("decision", {})
+        if not isinstance(decision, dict):
+            continue
+
+        updated_record = dict(normalized_by_source_id[record["source_id"]])
+        updated_record["document_kind"] = decision.get("document_kind", updated_record.get("document_kind", "note"))
+        updated_record["structure_quality"] = decision.get("structure_quality", updated_record.get("structure_quality", "unknown"))
+        updated_record["chunk_strategy_hint"] = decision.get("chunk_strategy_hint", updated_record.get("chunk_strategy_hint", "heading_first"))
+        normalized_by_source_id[record["source_id"]] = updated_record
+        changed_records.append(updated_record)
+
+    if changed_records:
+        ordered_records = []
+        for record in normalized_records:
+            ordered_records.append(normalized_by_source_id[record["source_id"]])
+        write_jsonl(target / "state" / "normalized.jsonl", ordered_records)
+        return ordered_records
+    return normalized_records
+
+
+def apply_claim_role_decisions_to_claim_records(
+    target: Path,
+    claim_records: list[dict],
+    task_config: SemanticTaskConfig,
+) -> list[dict]:
+    latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
+    claims_by_id = {record["claim_id"]: dict(record) for record in claim_records}
+    changed = False
+
+    for record in claim_records:
+        item_payload = {
+            "item_id": record["claim_id"],
+            "claim_id": record["claim_id"],
+            "text": record.get("text", ""),
+            "claim_type": record.get("claim_type"),
+            "source_ids": record.get("source_ids", []),
+            "source_refs": record.get("source_refs", []),
+        }
+        fingerprint = fingerprint_payload(
+            task_name="claim_role",
+            item_payloads=[item_payload],
+            prompt_version=task_config.prompt_version,
+            schema_version=task_config.schema_version,
+        )
+        decision_record = latest_decisions.get(fingerprint)
+        if decision_record is None:
+            continue
+        decision = decision_record.get("decision", {})
+        if not isinstance(decision, dict):
+            continue
+
+        updated = dict(claims_by_id[record["claim_id"]])
+        updated["knowledge_role"] = decision.get("knowledge_role", updated.get("knowledge_role"))
+        updated["page_intent_hints"] = list(decision.get("page_intent_hints", updated.get("page_intent_hints", [])) or [])
+        updated["concept_candidate_score"] = coerce_float(
+            decision.get("concept_candidate_score", updated.get("concept_candidate_score", 0.0)),
+            coerce_float(updated.get("concept_candidate_score", 0.0), 0.0),
+        )
+        updated["updated_at"] = utc_now_iso()
+        claims_by_id[record["claim_id"]] = updated
+        changed = True
+
+    ordered_records = []
+    for record in claim_records:
+        ordered_records.append(claims_by_id[record["claim_id"]])
+
+    if changed:
+        write_jsonl(target / "state" / "claims.jsonl", ordered_records)
+        for record in ordered_records:
+            write_claim_file(target, record)
+    return ordered_records
+
+
+def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
+    if not grouped_claims:
+        return "reject"
+    hint_counts: Counter[str] = Counter()
+    for claim_record in grouped_claims:
+        for hint in claim_record.get("page_intent_hints", []):
+            normalized_hint = str(hint).strip().lower()
+            if normalized_hint:
+                hint_counts[normalized_hint] += 1
+    for preferred in ("reject", "timeline", "reference", "guide", "example", "concept", "topic"):
+        if hint_counts.get(preferred):
+            return preferred
+    return "topic"
+
+
+def apply_page_intent_decisions_to_claim_groups(
+    target: Path,
+    concept_claim_groups: dict[str, list[dict]],
+    task_config: SemanticTaskConfig,
+) -> dict[str, str]:
+    latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
+    page_intents: dict[str, str] = {}
+
+    for bucket_key, grouped_claims in concept_claim_groups.items():
+        item_payload = {
+            "item_id": bucket_key,
+            "bucket_key": bucket_key,
+            "claim_ids": [item.get("claim_id") for item in grouped_claims if item.get("claim_id")],
+            "claim_texts": [str(item.get("text", "")).strip() for item in grouped_claims[:5] if str(item.get("text", "")).strip()],
+            "claim_count": len(grouped_claims),
+        }
+        fingerprint = fingerprint_payload(
+            task_name="page_intent",
+            item_payloads=[item_payload],
+            prompt_version=task_config.prompt_version,
+            schema_version=task_config.schema_version,
+        )
+        decision_record = latest_decisions.get(fingerprint)
+        if decision_record is not None:
+            decision = decision_record.get("decision", {})
+            if isinstance(decision, dict):
+                page_intent = str(decision.get("page_intent", "")).strip().lower()
+                if page_intent:
+                    page_intents[bucket_key] = page_intent
+                    continue
+        page_intents[bucket_key] = choose_bucket_page_intent(grouped_claims)
+    return page_intents
 
 
 def supported_page_render_targets() -> tuple[str, ...]:
@@ -1063,6 +1959,196 @@ def page_alias_overrides_path(target: Path) -> Path:
 def page_alias_overrides_lock_path(target: Path) -> Path:
     # review-apply 可能被多个 Agent/进程同时触发，覆盖层更新要串行化。
     return target / PAGE_ALIAS_OVERRIDES_LOCK_REL_PATH
+
+
+def semantic_decisions_path(target: Path) -> Path:
+    return target / SEMANTIC_DECISIONS_REL_PATH
+
+
+def load_semantic_decisions(target: Path) -> list[dict]:
+    return load_jsonl(semantic_decisions_path(target))
+
+
+def migration_decisions_path(target: Path) -> Path:
+    return target / MIGRATION_DECISIONS_REL_PATH
+
+
+def load_migration_decisions(target: Path) -> list[dict]:
+    return load_jsonl(migration_decisions_path(target))
+
+
+def build_latest_migration_decisions_by_canonical_id(records: list[dict]) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for record in records:
+        canonical_id = str(record.get("canonical_id", "")).strip()
+        if not canonical_id:
+            continue
+        current = latest.get(canonical_id)
+        if current is None or record.get("created_at", "") >= current.get("created_at", ""):
+            latest[canonical_id] = record
+    return latest
+
+
+def migration_followups_path(target: Path) -> Path:
+    return target / MIGRATION_FOLLOWUPS_REL_PATH
+
+
+def load_migration_followups(target: Path) -> list[dict]:
+    return load_jsonl(migration_followups_path(target))
+
+
+def schema_confirmations_path(target: Path) -> Path:
+    return target / SCHEMA_CONFIRMATIONS_REL_PATH
+
+
+def load_schema_confirmations(target: Path) -> list[dict]:
+    return load_jsonl(schema_confirmations_path(target))
+
+
+def build_latest_schema_confirmations_by_signature(records: list[dict]) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for record in records:
+        signature = str(record.get("path_signature", "")).strip()
+        if not signature:
+            continue
+        current = latest.get(signature)
+        if current is None or record.get("created_at", "") >= current.get("created_at", ""):
+            latest[signature] = record
+    return latest
+
+
+def migration_runs_path(target: Path) -> Path:
+    return target / MIGRATION_RUNS_REL_PATH
+
+
+def append_migration_run_record(target: Path, record: dict) -> None:
+    append_jsonl(migration_runs_path(target), record)
+
+
+def build_migration_followups_payload(target: Path, status_filter: str | None = None) -> dict:
+    records = load_migration_followups(target)
+    if status_filter:
+        records = [
+            record for record in records
+            if str(record.get("status", "")).strip() == status_filter
+        ]
+    items = [
+        {
+            "canonical_id": record.get("canonical_id"),
+            "queue_action": record.get("queue_action"),
+            "status": record.get("status"),
+            "reason": record.get("reason"),
+            "confidence": record.get("confidence"),
+            "migration_class": record.get("migration_class"),
+            "created_at": record.get("created_at"),
+            "updated_at": record.get("updated_at"),
+        }
+        for record in sorted(
+            records,
+            key=lambda item: (
+                str(item.get("status", "")),
+                str(item.get("canonical_id", "")),
+            ),
+        )
+    ]
+    return {
+        "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
+        "followup_queue_path": str(migration_followups_path(target)),
+        "items": items,
+        "summary": {
+            "followup_count": len(items),
+            "pending_count": sum(1 for item in items if item.get("status") == "pending"),
+            "completed_count": sum(1 for item in items if item.get("status") == "completed"),
+        },
+    }
+
+
+def complete_migration_followup(target: Path, canonical_id: str) -> dict:
+    records = load_migration_followups(target)
+    updated = False
+    updated_records = []
+    matched_record = None
+    for record in records:
+        current = dict(record)
+        if str(current.get("canonical_id", "")).strip() == canonical_id:
+            current["status"] = "completed"
+            current["updated_at"] = utc_now_iso()
+            updated = True
+            matched_record = current
+        updated_records.append(current)
+    if not updated or matched_record is None:
+        raise KeyError(f"Unknown migration follow-up canonical_id: {canonical_id}")
+    write_jsonl(migration_followups_path(target), updated_records)
+    return {
+        "workspace": str(target),
+        "canonical_id": canonical_id,
+        "completed_followup": matched_record,
+    }
+
+
+def review_id_for_migration_followup(canonical_id: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", canonical_id.lower()).strip("_") or "unknown"
+    return f"rev_migrate_followup_{normalized}"
+
+
+def ensure_migration_followup_review(target: Path, followup_record: dict) -> dict:
+    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+    canonical_id = str(followup_record.get("canonical_id", "")).strip()
+    review_id = review_id_for_migration_followup(canonical_id)
+    existing = live_reviews_by_id.get(review_id)
+    if existing is not None:
+        return existing
+
+    review_record = build_review_record(
+        kind="migration_followup",
+        candidate_claim_ids=[],
+        reason=f"migration_followup:{followup_record.get('queue_action')}",
+        evidence=[
+            {
+                "canonical_id": canonical_id,
+                "queue_action": followup_record.get("queue_action"),
+                "reason": followup_record.get("reason"),
+                "confidence": followup_record.get("confidence"),
+            }
+        ],
+        recommended_action="edit_then_resume",
+        signature_parts=[canonical_id, str(followup_record.get("queue_action", "")).strip(), "migration_followup"],
+    )
+    review_record["review_id"] = review_id
+    review_record["allowed_actions"] = ["keep_both", "edit_then_resume"]
+    review_record["candidate_page_ids"] = []
+    review_record["migration_followup"] = {
+        "canonical_id": canonical_id,
+        "queue_action": followup_record.get("queue_action"),
+        "status": followup_record.get("status"),
+        "migration_class": followup_record.get("migration_class"),
+    }
+    review_record["review_file_path"] = write_review_file(target, review_record)
+    live_reviews_by_id[review_record["review_id"]] = review_record
+
+    write_jsonl(
+        target / "state" / "reviews.jsonl",
+        build_ordered_review_state_records(
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        ),
+    )
+    for item in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
+        write_review_file(target, item)
+    return review_record
+
+
+def build_latest_semantic_decisions_by_fingerprint(records: list[dict]) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for record in records:
+        fingerprint = str(record.get("input_fingerprint", "")).strip()
+        if not fingerprint:
+            continue
+        current = latest.get(fingerprint)
+        if current is None or record.get("created_at", "") >= current.get("created_at", ""):
+            latest[fingerprint] = record
+    return latest
 
 
 def normalize_alias_value(text: str) -> str:
@@ -1334,6 +2420,11 @@ def apply_page_alias_overrides(target: Path, page_record: dict) -> dict:
     return apply_page_alias_overrides_payload(page_record, overrides)
 
 
+def apply_page_alias_overrides_to_records(target: Path, page_records: list[dict]) -> list[dict]:
+    overrides = load_page_alias_overrides(target)
+    return [apply_page_alias_overrides_payload(record, overrides) for record in page_records]
+
+
 def build_alias_conflict_reviews(
     alias_index: dict,
     existing_reviews: dict[str, dict],
@@ -1500,6 +2591,9 @@ def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict
         "raw_hash": source_record["source_hash"],
         "normalized_hash": normalized_hash,
         "normalizer_version": "normalize_v1",
+        "document_kind": "note",
+        "structure_quality": "unknown",
+        "chunk_strategy_hint": "heading_first",
         "extraction_method": "python_only",
         "extraction_quality": "good",
         "warnings": [],
@@ -2583,6 +3677,9 @@ def normalize_source_record(target: Path, source_record: dict) -> dict | None:
         "raw_hash": source_record["source_hash"],
         "normalized_hash": normalized_hash,
         "normalizer_version": "normalize_v1",
+        "document_kind": "note",
+        "structure_quality": "unknown",
+        "chunk_strategy_hint": "heading_first",
         "extraction_method": metadata.get("extraction_method", "python_only"),
         "extraction_quality": metadata.get("extraction_quality", "partial"),
         "warnings": metadata.get("warnings", []),
@@ -2684,6 +3781,50 @@ def split_normalized_into_sections(normalized_text: str) -> list[dict]:
     return sections
 
 
+def split_normalized_into_paragraph_sections(normalized_text: str) -> list[dict]:
+    # paragraph_first 用于结构较弱或纯文本型文档：
+    # 不依赖标题层级，而是把连续段落作为 section 候选。
+    sections: list[dict] = []
+    lines = normalized_text.splitlines()
+    current_lines: list[tuple[int, str]] = []
+
+    def flush_section() -> None:
+        nonlocal current_lines
+        if not current_lines:
+            return
+        preview = next((line.strip() for _, line in current_lines if line.strip()), "文档段落")
+        sections.append({
+            "section_path": [sanitize_section_label(preview[:24]) or "文档段落"],
+            "lines": current_lines,
+        })
+        current_lines = []
+
+    for line_no, line in enumerate(lines, start=1):
+        if re.match(r"^(#{1,6})\s+(.+?)\s*$", line):
+            flush_section()
+            sections.append({
+                "section_path": [sanitize_section_label(re.sub(r"^(#{1,6})\s+", "", line).strip())],
+                "lines": [(line_no, line)],
+            })
+            continue
+        if not line.strip():
+            flush_section()
+            continue
+        current_lines.append((line_no, line))
+
+    flush_section()
+    return sections
+
+
+def choose_sections_for_chunking(normalized_record: dict, normalized_text: str) -> list[dict]:
+    chunk_strategy_hint = str(normalized_record.get("chunk_strategy_hint", "heading_first")).strip() or "heading_first"
+    if chunk_strategy_hint in {"paragraph_first", "chat_turn"}:
+        sections = split_normalized_into_paragraph_sections(normalized_text)
+        if sections:
+            return sections
+    return split_normalized_into_sections(normalized_text)
+
+
 def build_chunk_records_for_section(
     source_id: str,
     source_path: str,
@@ -2769,7 +3910,7 @@ def build_chunk_records_for_section(
 
 def build_chunk_records(normalized_record: dict, normalized_text: str) -> list[dict]:
     # 这里负责文档级切块：先按 section 拆，再给每段 section 分配 chunk 序号。
-    sections = split_normalized_into_sections(normalized_text)
+    sections = choose_sections_for_chunking(normalized_record, normalized_text)
     chunk_records: list[dict] = []
     chunk_index = 0
 
@@ -2785,11 +3926,13 @@ def build_chunk_records(normalized_record: dict, normalized_text: str) -> list[d
         chunk_index += len(section_chunks)
 
     # previous / next 引用最后再统一回填，避免在切块阶段一边生成一边回看。
-    for index, record in enumerate(chunk_records):
-        previous_chunk = chunk_records[index - 1]["chunk_id"] if index > 0 else None
-        next_chunk = chunk_records[index + 1]["chunk_id"] if index + 1 < len(chunk_records) else None
-        record["previous_chunk"] = previous_chunk
-        record["next_chunk"] = next_chunk
+        for index, record in enumerate(chunk_records):
+            previous_chunk = chunk_records[index - 1]["chunk_id"] if index > 0 else None
+            next_chunk = chunk_records[index + 1]["chunk_id"] if index + 1 < len(chunk_records) else None
+            record["previous_chunk"] = previous_chunk
+            record["next_chunk"] = next_chunk
+            record["chunk_kind"] = normalized_record.get("chunk_strategy_hint", "heading_first")
+            record["topicworthiness_hint"] = normalized_record.get("document_kind", "note")
 
     return chunk_records
 
@@ -3173,6 +4316,11 @@ def review_lifecycle_status_for_record(review_record: dict) -> str:
         return "superseded"
     if review_record.get("archived_at"):
         return "archived"
+    if (
+        review_record.get("kind") == "migration_followup"
+        and review_record.get("migration_followup")
+    ):
+        return "active"
     if not review_record.get("candidate_claim_ids") and not review_record.get("candidate_page_ids"):
         return "superseded"
     return "active"
@@ -3249,10 +4397,11 @@ def filter_live_stable_claim_records(claim_records: list[dict]) -> list[dict]:
 def is_live_review_record(review_record: dict) -> bool:
     # review 只有在仍然挂着候选 claim、且 lifecycle 为 active 时，
     # 才应继续进入概念页和后续人工处理视图。
-    return (
-        review_record.get("lifecycle_status") == "active"
-        and bool(review_record.get("candidate_claim_ids") or review_record.get("candidate_page_ids"))
-    )
+    if review_record.get("lifecycle_status") != "active":
+        return False
+    if review_record.get("kind") == "migration_followup":
+        return bool(review_record.get("migration_followup"))
+    return bool(review_record.get("candidate_claim_ids") or review_record.get("candidate_page_ids"))
 
 
 def filter_live_review_records(review_records: list[dict]) -> list[dict]:
@@ -3581,6 +4730,9 @@ def build_claim_record_from_chunk(chunk_record: dict, claim_text: str) -> dict:
         "text": claim_text.strip(),
         "normalized_text": normalized_text,
         "claim_type": classify_claim_type(claim_text),
+        "knowledge_role": None,
+        "page_intent_hints": [],
+        "concept_candidate_score": 0.0,
         "status": "draft",
         "lifecycle_status": "active",
         "confidence": estimate_claim_confidence(claim_text),
@@ -3630,6 +4782,17 @@ def merge_claim_records(existing_record: dict, incoming_record: dict) -> dict:
             existing_ref_keys.add(ref_key)
 
     merged["confidence"] = max(merged.get("confidence", 0.0), incoming_record.get("confidence", 0.0))
+    if not merged.get("knowledge_role") and incoming_record.get("knowledge_role"):
+        merged["knowledge_role"] = incoming_record.get("knowledge_role")
+    incoming_intents = incoming_record.get("page_intent_hints", [])
+    existing_intents = list(merged.get("page_intent_hints", []))
+    for hint in incoming_intents:
+        append_unique(existing_intents, hint)
+    merged["page_intent_hints"] = existing_intents
+    merged["concept_candidate_score"] = max(
+        coerce_float(merged.get("concept_candidate_score", 0.0), 0.0),
+        coerce_float(incoming_record.get("concept_candidate_score", 0.0), 0.0),
+    )
     merged["updated_at"] = utc_now_iso()
     merged["lifecycle_status"] = claim_lifecycle_status_for_record(merged)
     return merged
@@ -4146,6 +5309,24 @@ def build_concept_group_key(claim_record: dict) -> str:
     seed_hash = hashlib.sha256(f"{seed}|{token_fingerprint}".encode("utf-8")).hexdigest()[:12]
     readable_prefix = build_similarity_bucket(claim_record.get("text", ""))
     return f"{readable_prefix}|{seed_hash}"
+
+
+def claim_role_blocks_concept_path(claim_record: dict) -> bool:
+    role = str(claim_record.get("knowledge_role") or "").strip().lower()
+    if role in {"procedure", "example", "meta", "structural_shell", "opinion"}:
+        return True
+    page_intent_hints = {
+        str(item).strip().lower()
+        for item in claim_record.get("page_intent_hints", [])
+        if str(item).strip()
+    }
+    if "reject" in page_intent_hints:
+        return True
+    return False
+
+
+def filter_claim_records_for_concept_path(claim_records: list[dict]) -> list[dict]:
+    return [record for record in claim_records if not claim_role_blocks_concept_path(record)]
 
 
 def concept_summary_page_path(page_id: str, title: str) -> Path:
@@ -4681,24 +5862,26 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     # 1. 多条相似 claim 汇聚到一起；
     # 2. 单条 claim 但有多个来源支撑；
     # 3. 单条 claim 但置信度较高，值得先沉淀成主题入口。
+    concept_claim_records = filter_claim_records_for_concept_path(claim_records)
+    if not concept_claim_records:
+        return False
+
     source_ids = {
         source_id
-        for claim_record in claim_records
+        for claim_record in concept_claim_records
         for source_id in claim_record.get("source_ids", [])
     }
-    if len(claim_records) >= 2:
+    if len(concept_claim_records) >= 2:
         return True
     if len(source_ids) >= 2:
         return True
-    if not claim_records:
-        return False
-    canonical_claim = choose_canonical_claim(claim_records, choose_group_topic_label(claim_records))
-    concept_title = build_concept_title(canonical_claim, preferred_section_label=choose_group_topic_label(claim_records))
+    canonical_claim = choose_canonical_claim(concept_claim_records, choose_group_topic_label(concept_claim_records))
+    concept_title = build_concept_title(canonical_claim, preferred_section_label=choose_group_topic_label(concept_claim_records))
     quality = concept_title_quality_details(
         title=concept_title,
         canonical_claim=canonical_claim,
-        claim_records=claim_records,
-        preferred_section_label=choose_group_topic_label(claim_records),
+        claim_records=concept_claim_records,
+        preferred_section_label=choose_group_topic_label(concept_claim_records),
     )
     if quality["classification"] == "reject":
         return False
@@ -4711,7 +5894,10 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
         return True
     if canonical_claim.get("claim_type") == "definition" and len(cleaned_claim_text) >= 14:
         return True
-    return canonical_claim.get("confidence", 0.0) >= 0.35 and len(claim_text) >= 18
+    concept_candidate_score = coerce_float(canonical_claim.get("concept_candidate_score", 0.0), 0.0)
+    if concept_candidate_score >= 0.75:
+        return True
+    return canonical_claim.get("confidence", 0.0) >= 0.35 and len(claim_text) >= 18 and concept_candidate_score >= 0.3
 
 
 def resolve_concept_title_candidate(
@@ -5569,6 +6755,72 @@ def concept_page_quality_issues(page_record: dict, claim_records_by_id: dict[str
         issues.append("too_short")
     if "question_like_claim" in quality["reasons"]:
         issues.append("question_like_claim")
+    return issues
+
+
+def page_semantic_consistency_issues(page_record: dict, claim_records_by_id: dict[str, dict]) -> list[str]:
+    page_type = str(page_record.get("type", "")).strip().lower()
+    if page_type not in {"concept", "concept-summary", "guide", "example", "topic", "reference", "timeline"}:
+        return []
+
+    page_intent = str(page_record.get("page_intent", "")).strip().lower()
+    claim_ids = page_record.get("claim_ids", []) or []
+    claim_records = [
+        claim_records_by_id[claim_id]
+        for claim_id in claim_ids
+        if claim_id in claim_records_by_id
+    ]
+    if not claim_records:
+        return []
+
+    roles = {
+        str(record.get("knowledge_role", "")).strip().lower()
+        for record in claim_records
+        if str(record.get("knowledge_role", "")).strip()
+    }
+    intent_hints = {
+        str(hint).strip().lower()
+        for record in claim_records
+        for hint in record.get("page_intent_hints", [])
+        if str(hint).strip()
+    }
+    issues: list[str] = []
+
+    expected_intent_by_type = {
+        "concept": "concept",
+        "concept-summary": "concept",
+        "guide": "guide",
+        "example": "example",
+        "topic": "topic",
+        "reference": "reference",
+        "timeline": "timeline",
+    }
+    expected_intent = expected_intent_by_type.get(page_type)
+    if page_intent and expected_intent and page_intent != expected_intent:
+        issues.append(f"page_type_intent_mismatch:{page_type}!={page_intent}")
+
+    if page_type in {"concept", "concept-summary"}:
+        blocked_roles = sorted(role for role in roles if role in {"procedure", "example", "meta", "structural_shell", "opinion"})
+        if blocked_roles:
+            issues.append(f"concept_page_blocked_roles:{','.join(blocked_roles)}")
+        if "reject" in intent_hints:
+            issues.append("concept_page_reject_intent_hint")
+    elif page_type == "guide":
+        if roles and "procedure" not in roles:
+            issues.append(f"guide_page_missing_procedure_role:{','.join(sorted(roles))}")
+    elif page_type == "example":
+        if roles and "example" not in roles:
+            issues.append(f"example_page_missing_example_role:{','.join(sorted(roles))}")
+    elif page_type == "topic":
+        if roles and roles.issubset({"procedure", "example", "meta", "structural_shell"}):
+            issues.append(f"topic_page_semantically_thin:{','.join(sorted(roles))}")
+    elif page_type == "reference":
+        if roles and roles.issubset({"procedure", "example", "meta"}):
+            issues.append(f"reference_page_semantically_thin:{','.join(sorted(roles))}")
+    elif page_type == "timeline":
+        if roles and roles.issubset({"meta", "structural_shell"}):
+            issues.append(f"timeline_page_semantically_thin:{','.join(sorted(roles))}")
+
     return issues
 
 
@@ -6567,6 +7819,149 @@ def build_concept_summary_page(
     return page_text, page_record
 
 
+def page_intent_page_id(bucket_key: str, page_intent: str) -> str:
+    bucket_hash = hashlib.sha256(f"{page_intent}|{bucket_key}".encode("utf-8")).hexdigest()
+    return f"page_{page_intent[:3]}_{bucket_hash[:12]}"
+
+
+def page_intent_page_path(page_intent: str, page_id: str, title: str) -> Path:
+    filename = sanitize_page_filename(title)
+    folder = {
+        "guide": "guides",
+        "example": "examples",
+        "topic": "topics",
+        "reference": "references",
+        "timeline": "timelines",
+    }.get(page_intent, "topics")
+    return Path("wiki") / folder / page_id / f"{filename}.md"
+
+
+def build_intent_routed_page(
+    target: Path,
+    config: dict,
+    bucket_key: str,
+    page_intent: str,
+    page_rel_path: Path,
+    claim_records: list[dict],
+    page_records_by_id: dict[str, dict],
+    review_records: list[dict],
+) -> tuple[str, dict]:
+    group_topic_label = choose_group_topic_label(claim_records)
+    canonical_claim = choose_canonical_claim(claim_records, group_topic_label)
+    if page_intent == "guide":
+        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "指南"
+        canonical_id = f"guide:{build_concept_canonical_key(title)}"
+        summary = f"{title} 的操作步骤与执行提示。"
+        section_title = "步骤摘要 / Steps"
+    elif page_intent == "example":
+        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "示例"
+        canonical_id = f"example:{build_concept_canonical_key(title)}"
+        summary = f"{title} 的样例与案例说明。"
+        section_title = "示例内容 / Examples"
+    elif page_intent == "reference":
+        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "参考"
+        canonical_id = f"reference:{build_concept_canonical_key(title)}"
+        summary = f"{title} 的参考信息、规则条目与检索入口。"
+        section_title = "参考条目 / Reference Notes"
+    elif page_intent == "timeline":
+        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "时间线"
+        canonical_id = f"timeline:{build_concept_canonical_key(title)}"
+        summary = f"{title} 的时间顺序事实与演变节点。"
+        section_title = "时间节点 / Timeline Notes"
+    else:
+        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "主题"
+        canonical_id = f"topic:{build_concept_canonical_key(title)}"
+        summary = f"{title} 的主题概览与相关证据入口。"
+        section_title = "主题要点 / Topic Notes"
+
+    page_id = page_intent_page_id(bucket_key, page_intent)
+    review_ids = collect_review_ids_for_claims(
+        [claim_record["claim_id"] for claim_record in claim_records],
+        review_records,
+    )
+    source_refs = aggregate_source_refs_for_page(claim_records)
+    source_pages = collect_source_summary_pages_for_claims(claim_records, page_records_by_id)
+
+    lines = [
+        "---",
+        f'page_id: "{page_id}"',
+        f'title: "{title}"',
+        f'type: "{page_intent}"',
+        f'canonical_id: "{canonical_id}"',
+        f'status: "{"needs_review" if review_ids else "stable"}"',
+        'automation_level: "auto_with_log"',
+        f'claim_count: {len(claim_records)}',
+        f'source_count: {len(source_refs)}',
+        "---",
+        "",
+        f"# {title}",
+        "",
+        "## 摘要 / Summary",
+        "",
+        summary,
+        "",
+        f"## {section_title}",
+        "",
+    ]
+    for claim_record in claim_records[:6]:
+        lines.append(
+            f"- {render_claim_as_sentence(claim_record, title)} "
+            f"({format_claim_reference(page_rel_path, claim_record)})"
+        )
+    if page_intent == "timeline":
+        lines.extend([
+            "",
+            "## 时间线来源 / Timeline Sources",
+            "",
+        ])
+        for source_ref in source_refs[:8]:
+            lines.append(
+                f"- {source_ref.get('section_path') or '未标注章节'} | "
+                f"{format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
+            )
+    lines.extend([
+        "",
+        "## 证据入口 / Evidence Trail",
+        "",
+    ])
+    for source_ref in source_refs:
+        source_page = next(
+            (item for item in source_pages if item["page_id"] == f"page_src_{source_ref['source_id']}"),
+            None,
+        )
+        source_label = (
+            format_source_page_label(page_rel_path, source_page)
+            if source_page is not None
+            else "`未生成来源摘要页`"
+        )
+        lines.append(
+            f"- {source_label} | 原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
+        )
+
+    page_text = "\n".join(lines).strip() + "\n"
+    page_record = {
+        "page_id": page_id,
+        "title": title,
+        "type": page_intent,
+        "canonical_id": canonical_id,
+        "status": "needs_review" if review_ids else "stable",
+        "lifecycle_status": "active",
+        "automation_level": "auto_with_log",
+        "review_reason": "claim_reviews_attached" if review_ids else None,
+        "page_intent": page_intent,
+        "summary": summary,
+        "aliases": [],
+        "redirect_to": None,
+        "claim_ids": [claim_record["claim_id"] for claim_record in claim_records],
+        "review_ids": review_ids,
+        "source_refs": source_refs,
+        "created": utc_now_iso(),
+        "updated": utc_now_iso(),
+        "archived_at": None,
+    }
+    return page_text, page_record
+
+
 def write_wiki_page(target: Path, relative_path: Path, page_text: str) -> None:
     # Wiki 页面属于最终产物，改写时也尽量走原子写，避免意外中断留下半截 Markdown。
     page_path = target / relative_path
@@ -6698,7 +8093,7 @@ def rebuild_wiki_index(target: Path, page_records: list[dict]) -> None:
 
     lines.extend([
         "",
-        "## 证据页 / Evidence Pages",
+        "## 兼容证据页 / Legacy Evidence Views",
         "",
     ])
     if concept_summary_pages:
@@ -6706,11 +8101,11 @@ def rebuild_wiki_index(target: Path, page_records: list[dict]) -> None:
             page_path = markdown_link_target(record.get("page_path", ""))
             lines.append(
                 f"- [{record['title']}]({page_path}) "
-                f"({record['type']}, claims={len(record.get('claim_ids', []))}, reviews={len(record.get('review_ids', []))}) "
+                f"({record['type']}, compat=legacy, claims={len(record.get('claim_ids', []))}, reviews={len(record.get('review_ids', []))}) "
                 f"- {record['summary']}"
             )
     else:
-        lines.append("- 暂无概念证据页。")
+        lines.append("- 暂无兼容概念证据页。")
     lines.extend([
         "",
         "## 来源页 / Source Pages",
@@ -6876,10 +8271,12 @@ def detect_query_intent(query_text: str, normalized_query: str) -> str:
         return "how_to"
     if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["evidence"]):
         return "evidence"
+    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["reference"]):
+        return "reference"
     if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["overview"]):
         return "overview"
     for intent, markers in QUERY_INTENT_MARKERS.items():
-        if intent in {"how_to", "evidence", "overview"}:
+        if intent in {"how_to", "evidence", "reference", "overview"}:
             continue
         if any(marker in combined_text for marker in markers):
             return intent
@@ -6936,10 +8333,22 @@ def query_intent_page_type_boost(intent: str, page_record: dict) -> tuple[float,
         return 1.12, "intent_compare_prefers_readable_concept"
     if intent == "compare" and page_type == "concept-summary":
         return 1.05, "intent_compare_prefers_concept_summary"
+    if intent == "reference" and page_type == "reference":
+        return 2.40, "intent_reference_prefers_reference_page"
+    if intent == "reference" and page_type == "source-summary":
+        return 1.45, "intent_reference_prefers_source"
+    if intent == "reference" and page_type in {"concept-summary", "concept"}:
+        return 0.35, "intent_reference_deprioritizes_concept_views"
     if intent == "how_to" and page_type == "source-summary":
         return 1.05, "intent_how_to_prefers_source"
     if intent == "evidence" and page_type == "source-summary":
         return 2.6, "intent_evidence_prefers_source"
+    if intent == "evidence" and page_type == "topic":
+        return 0.55, "intent_evidence_deprioritizes_topic_page"
+    if intent == "evidence" and page_type == "guide":
+        return 0.50, "intent_evidence_deprioritizes_guide_page"
+    if intent == "evidence" and page_type == "example":
+        return 0.50, "intent_evidence_deprioritizes_example_page"
     if intent == "evidence" and page_type == "concept":
         return 0.45, "intent_evidence_deprioritizes_readable_concept"
     if intent == "evidence" and page_type == "concept-summary":
@@ -7075,6 +8484,1489 @@ def query_page_type_weight(page_record: dict) -> float:
 def query_page_status_weight(page_record: dict) -> float:
     status = page_record.get("status", "draft")
     return QUERY_PAGE_STATUS_WEIGHTS.get(status, QUERY_PAGE_STATUS_WEIGHTS["draft"])
+
+
+def page_type_profile(page_type: str) -> str:
+    normalized = str(page_type or "").strip().lower()
+    if normalized == "guide":
+        return "guide"
+    if normalized == "example":
+        return "example"
+    if normalized == "topic":
+        return "topic"
+    if normalized == "reference":
+        return "reference"
+    if normalized == "timeline":
+        return "timeline"
+    if normalized == "concept":
+        return "concept"
+    if normalized == "concept-summary":
+        return "legacy_concept_evidence"
+    if normalized == "source-summary":
+        return "source"
+    if normalized == "overview":
+        return "overview"
+    return "generic"
+
+
+def page_type_compat_mode(page_type: str) -> str:
+    return "legacy" if str(page_type or "").strip().lower() == "concept-summary" else "current"
+
+
+def build_workspace_compatibility_report(target_dir: Path) -> dict:
+    pages_path = target_dir / "state" / "pages.jsonl"
+    if not pages_path.exists():
+        return {
+            "legacy_page_count": 0,
+            "current_page_count": 0,
+            "legacy_page_types": {},
+            "canonical_families_with_legacy": 0,
+            "legacy_pages": [],
+        }
+
+    page_records = [
+        ensure_page_lifecycle_defaults(record)
+        for record in load_jsonl(pages_path)
+    ]
+    live_pages = filter_live_page_records(page_records)
+    legacy_pages = [
+        record for record in live_pages
+        if page_type_compat_mode(record.get("type", "")) == "legacy"
+    ]
+    current_pages = [
+        record for record in live_pages
+        if page_type_compat_mode(record.get("type", "")) == "current"
+    ]
+
+    legacy_page_types: dict[str, int] = {}
+    canonical_groups: dict[str, list[dict]] = {}
+    for record in legacy_pages:
+        page_type = str(record.get("type", "")).strip().lower() or "unknown"
+        legacy_page_types[page_type] = legacy_page_types.get(page_type, 0) + 1
+    for record in live_pages:
+        canonical_id = str(record.get("canonical_id", "")).strip()
+        if not canonical_id:
+            continue
+        canonical_groups.setdefault(canonical_id, []).append(record)
+
+    canonical_families_with_legacy = sum(
+        1
+        for grouped_records in canonical_groups.values()
+        if any(page_type_compat_mode(record.get("type", "")) == "legacy" for record in grouped_records)
+    )
+
+    legacy_page_briefs = [
+        {
+            "page_id": record.get("page_id"),
+            "title": record.get("title", ""),
+            "type": record.get("type", ""),
+            "canonical_id": record.get("canonical_id"),
+            "page_path": record.get("page_path", ""),
+            "page_type_profile": page_type_profile(record.get("type", "")),
+        }
+        for record in sorted(legacy_pages, key=lambda item: (str(item.get("type", "")), str(item.get("title", "")).lower()))[:20]
+    ]
+
+    return {
+        "legacy_page_count": len(legacy_pages),
+        "current_page_count": len(current_pages),
+        "legacy_page_types": legacy_page_types,
+        "canonical_families_with_legacy": canonical_families_with_legacy,
+        "legacy_pages": legacy_page_briefs,
+    }
+
+
+def build_compat_report_payload(target: Path, target_schema_version: str | None = None) -> dict:
+    compatibility_report = build_workspace_compatibility_report(target)
+    schema_guard = workspace_schema_guard_payload(target)
+    desired_schema_version = resolve_target_workspace_schema_version(target_schema_version)
+    schema_registry_issues = validate_workspace_schema_registry()
+    pages_path = target / "state" / "pages.jsonl"
+    page_records = []
+    if pages_path.exists():
+        page_records = [
+            ensure_page_lifecycle_defaults(record)
+            for record in load_jsonl(pages_path)
+        ]
+    live_pages = filter_live_page_records(page_records)
+
+    canonical_groups: dict[str, list[dict]] = {}
+    for record in live_pages:
+        canonical_id = str(record.get("canonical_id", "")).strip()
+        if not canonical_id:
+            continue
+        canonical_groups.setdefault(canonical_id, []).append(record)
+
+    migration_candidates = []
+    current_only_families = 0
+    auto_applicable_candidates = 0
+    report_only_candidates = 0
+    schema_migration_candidate_count = 0
+    schema_report_only_candidate_count = 0
+    for canonical_id, grouped_records in sorted(canonical_groups.items()):
+        legacy_records = [
+            record for record in grouped_records
+            if page_type_compat_mode(record.get("type", "")) == "legacy"
+        ]
+        current_records = [
+            record for record in grouped_records
+            if page_type_compat_mode(record.get("type", "")) == "current"
+        ]
+        if current_records and not legacy_records:
+            current_only_families += 1
+        if not legacy_records:
+            continue
+        candidate = {
+            "canonical_id": canonical_id,
+            "legacy_page_ids": [record.get("page_id") for record in legacy_records],
+            "legacy_types": sorted({record.get("type", "") for record in legacy_records}),
+            "current_page_ids": [record.get("page_id") for record in current_records],
+            "current_types": sorted({record.get("type", "") for record in current_records}),
+        }
+        if current_records:
+            contract = migration_action_contract("archive_legacy_concept_summary")
+            auto_applicable_candidates += 1
+            candidate.update({
+                "migration_class": contract.get("migration_class"),
+                "planning_decision": contract.get("planning_decision"),
+                "auto_applicable": True,
+                "suggested_action": "archive_legacy_concept_summary",
+                "reason": contract.get("candidate_reason"),
+                "action_contract": {
+                    "action_class": contract.get("action_class"),
+                    "execution_mode": contract.get("execution_mode"),
+                },
+            })
+        else:
+            contract = migration_action_contract("needs_current_successor_before_migration")
+            report_only_candidates += 1
+            candidate.update({
+                "migration_class": contract.get("migration_class"),
+                "planning_decision": contract.get("planning_decision"),
+                "auto_applicable": False,
+                "suggested_action": "needs_current_successor_before_migration",
+                "reason": contract.get("candidate_reason"),
+                "action_contract": {
+                    "action_class": contract.get("action_class"),
+                    "execution_mode": contract.get("execution_mode"),
+                    "followup_action": contract.get("followup_action"),
+                },
+            })
+        migration_candidates.append(candidate)
+
+    schema_migration = classify_workspace_schema_migration(target, desired_schema_version)
+    if schema_migration is not None:
+        migration_candidates.append({
+            "canonical_id": "workspace:schema_version",
+            "legacy_page_ids": [],
+            "legacy_types": [],
+            "current_page_ids": [],
+            "current_types": [],
+            **schema_migration,
+            "auto_applicable": schema_migration.get("planning_decision") == "auto_plan",
+        })
+        schema_migration_candidate_count += 1
+        if schema_migration.get("planning_decision") == "auto_plan":
+            auto_applicable_candidates += 1
+        else:
+            report_only_candidates += 1
+            schema_report_only_candidate_count += 1
+
+    summary = {
+        "legacy_page_count": compatibility_report.get("legacy_page_count", 0),
+        "current_page_count": compatibility_report.get("current_page_count", 0),
+        "migration_candidate_count": len(migration_candidates),
+        "current_only_family_count": current_only_families,
+        "auto_applicable_candidate_count": auto_applicable_candidates,
+        "report_only_candidate_count": report_only_candidates,
+        "schema_migration_candidate_count": schema_migration_candidate_count,
+        "schema_report_only_candidate_count": schema_report_only_candidate_count,
+    }
+
+    return {
+        "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
+        "schema_guard": schema_guard,
+        "schema_registry": {
+            "ok": len(schema_registry_issues) == 0,
+            "issues": schema_registry_issues,
+        },
+        "target_schema_version": desired_schema_version,
+        "action_catalog": build_migration_action_catalog(),
+        "compatibility_report": compatibility_report,
+        "migration_candidates": migration_candidates,
+        "summary": summary,
+    }
+
+
+MIGRATION_ACTION_CONTRACTS = {
+    "upgrade_workspace_schema_to_v1": {
+        "planning_decision": "auto_plan",
+        "action_class": "schema_upgrade",
+        "execution_mode": "apply_supported",
+        "migration_class": "workspace_schema_upgrade_to_v1",
+        "candidate_reason": "Workspace schema_version is older than the minimum supported range and can be upgraded to v1.",
+        "followup_action": None,
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "medium",
+    },
+    "inspect_missing_workspace_schema_version": {
+        "planning_decision": "report_only",
+        "action_class": "schema_followup",
+        "execution_mode": "report_only",
+        "migration_class": "workspace_schema_version_missing",
+        "candidate_reason": "Workspace schema_version is missing and should be inspected before any explicit transition.",
+        "followup_action": "inspect_workspace_schema_version",
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "inspect_unsupported_workspace_schema_version": {
+        "planning_decision": "report_only",
+        "action_class": "schema_followup",
+        "execution_mode": "report_only",
+        "migration_class": "workspace_schema_unsupported_version",
+        "candidate_reason": "Workspace schema_version is outside the supported transition graph and requires manual inspection.",
+        "followup_action": "inspect_workspace_schema_version",
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "inspect_target_workspace_schema_version": {
+        "planning_decision": "report_only",
+        "action_class": "schema_followup",
+        "execution_mode": "report_only",
+        "migration_class": "target_workspace_schema_version_unknown",
+        "candidate_reason": "Requested target workspace schema version is outside the known registry and should be inspected before planning.",
+        "followup_action": "inspect_target_workspace_schema_version",
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "schema_transition_not_registered": {
+        "planning_decision": "report_only",
+        "action_class": "schema_followup",
+        "execution_mode": "report_only",
+        "migration_class": "workspace_schema_transition_not_registered",
+        "candidate_reason": "Workspace schema_version needs migration, but no deterministic transition has been registered yet.",
+        "followup_action": "inspect_workspace_schema_transition",
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "future_schema_upgrade_placeholder": {
+        "planning_decision": "auto_plan",
+        "action_class": "schema_upgrade",
+        "execution_mode": "apply_supported",
+        "migration_class": "future_schema_upgrade_placeholder",
+        "candidate_reason": "Workspace can be advanced to a registered future schema target through a deterministic transition.",
+        "followup_action": None,
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "confirm_workspace_schema_transition_path": {
+        "planning_decision": "report_only",
+        "action_class": "schema_followup",
+        "execution_mode": "report_only",
+        "migration_class": "workspace_schema_transition_requires_confirmation",
+        "candidate_reason": "Workspace schema migration path contains at least one step that requires explicit confirmation before execution.",
+        "followup_action": "confirm_workspace_schema_transition_path",
+        "lint_check_name": "workspace_schema_supported",
+        "lint_severity": "warning",
+        "risk_level": "high",
+    },
+    "archive_legacy_concept_summary": {
+        "planning_decision": "auto_plan",
+        "action_class": "legacy_cleanup",
+        "execution_mode": "apply_supported",
+        "migration_class": "legacy_concept_summary_has_current_successor",
+        "candidate_reason": "Current taxonomy pages already exist for this canonical family.",
+        "followup_action": None,
+        "lint_check_name": "legacy_migration_candidates_absent",
+        "lint_severity": "warning",
+        "risk_level": "low",
+    },
+    "needs_current_successor_before_migration": {
+        "planning_decision": "report_only",
+        "action_class": "manual_followup",
+        "execution_mode": "report_only",
+        "migration_class": "legacy_concept_summary_missing_current_successor",
+        "candidate_reason": "Legacy concept-summary still has no current taxonomy successor page.",
+        "followup_action": "wait_for_current_successor",
+        "lint_check_name": "legacy_migration_candidates_absent",
+        "lint_severity": "warning",
+        "risk_level": "medium",
+    },
+}
+
+
+def migration_action_contract(action_name: str) -> dict:
+    return MIGRATION_ACTION_CONTRACTS.get(str(action_name or "").strip(), {})
+
+
+def build_migration_action_catalog() -> list[dict]:
+    catalog: list[dict] = []
+    for action_name, contract in sorted(MIGRATION_ACTION_CONTRACTS.items()):
+        catalog.append({
+            "action": action_name,
+            "planning_decision": contract.get("planning_decision"),
+            "action_class": contract.get("action_class"),
+            "execution_mode": contract.get("execution_mode"),
+            "migration_class": contract.get("migration_class"),
+            "candidate_reason": contract.get("candidate_reason"),
+            "followup_action": contract.get("followup_action"),
+            "lint_check_name": contract.get("lint_check_name"),
+            "lint_severity": contract.get("lint_severity"),
+            "risk_level": contract.get("risk_level"),
+        })
+    return catalog
+
+
+def build_migrate_agent_handoff(plan_payload: dict) -> tuple[dict, str]:
+    manual_followups = plan_payload.get("manual_followups", [])
+    planned_actions = plan_payload.get("planned_actions", [])
+    should_escalate = bool(manual_followups)
+    next_action = (
+        "batch_judge_report_only_candidates"
+        if should_escalate
+        else "apply_supported_actions_or_continue"
+    )
+    agent_brief = {
+        "mode": "needs_semantic_judgment_for_report_only_candidates" if should_escalate else "all_candidates_rule_resolved",
+        "should_invoke_llm": should_escalate,
+        "next_action": next_action,
+        "planned_action_count": len(planned_actions),
+        "manual_followup_count": len(manual_followups),
+        "action_catalog_count": len(plan_payload.get("action_catalog", [])),
+        "escalation_scope": "report_only_candidates_only" if should_escalate else "none",
+    }
+    if should_escalate:
+        first_item = manual_followups[0]
+        agent_summary = (
+            f"当前有 {len(manual_followups)} 条 migration 灰区项需要语义判断，"
+            f"应只处理 report_only 候选。优先判断 `{first_item['canonical_id']}`，"
+            f"因为它仍缺少 current successor。"
+        )
+    else:
+        agent_summary = (
+            f"当前 migration 候选都已被规则分类，共有 {len(planned_actions)} 条可自动执行动作，"
+            "没有需要额外语义判断的 report_only 灰区项。"
+        )
+    return agent_brief, agent_summary
+
+
+def render_migrate_handoff_summary(handoff_payload: dict) -> str:
+    summary = handoff_payload.get("summary", {})
+    agent_brief = handoff_payload.get("agent_brief", {})
+    lines = [
+        "Migration Handoff Summary:",
+        f"  planned_actions: {summary.get('planned_action_count', 0)}",
+        f"  manual_followups: {summary.get('manual_followup_count', 0)}",
+        f"  migration_candidates: {summary.get('migration_candidate_count', 0)}",
+        f"  next_action: {agent_brief.get('next_action')}",
+        f"  agent_summary: {handoff_payload.get('agent_summary', '')}",
+    ]
+    followups = handoff_payload.get("manual_followups", [])
+    if followups:
+        lines.append("  report_only_candidates:")
+        for item in followups[:8]:
+            lines.append(
+                f"    - {item.get('canonical_id')} action={item.get('action')} "
+                f"suggested_action={item.get('suggested_action')} reason={item.get('reason')}"
+            )
+    return "\n".join(lines)
+
+
+def render_migrate_handoff_prompt(handoff_payload: dict) -> str:
+    agent_brief = handoff_payload.get("agent_brief", {})
+    lines = [
+        "You are the migration workflow layer for a MyAgentWiki migrate handoff.",
+        "Use the handoff below to judge only the report_only migration candidates that still need semantic follow-up.",
+        "Do not reinterpret or override apply_supported actions; those remain owned by deterministic rules and scripts.",
+        "",
+        "## Migration Run",
+        f"- contract_version: {handoff_payload.get('contract_version', '')}",
+        f"- workspace: {handoff_payload.get('workspace', '')}",
+        f"- planned_action_count: {handoff_payload.get('summary', {}).get('planned_action_count')}",
+        f"- manual_followup_count: {handoff_payload.get('summary', {}).get('manual_followup_count')}",
+        f"- migration_candidate_count: {handoff_payload.get('summary', {}).get('migration_candidate_count')}",
+        "",
+        "## Agent Brief",
+        f"- mode: {agent_brief.get('mode')}",
+        f"- should_invoke_llm: {agent_brief.get('should_invoke_llm')}",
+        f"- next_action: {agent_brief.get('next_action')}",
+        f"- escalation_scope: {agent_brief.get('escalation_scope')}",
+        f"- agent_summary: {handoff_payload.get('agent_summary', '')}",
+        "",
+        "## Action Catalog",
+    ]
+    action_catalog = handoff_payload.get("action_catalog", [])
+    if action_catalog:
+        for item in action_catalog:
+            lines.append(
+                f"- action={item.get('action')} decision={item.get('planning_decision')} "
+                f"execution={item.get('execution_mode')} class={item.get('action_class')} "
+                f"followup_action={item.get('followup_action') or 'none'} "
+                f"risk={item.get('risk_level') or 'unknown'}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Report-only Candidates",
+    ])
+    manual_followups = handoff_payload.get("manual_followups", [])
+    if manual_followups:
+        for item in manual_followups:
+            lines.append(
+                f"- canonical_id={item.get('canonical_id')} action={item.get('action')} "
+                f"suggested_action={item.get('suggested_action')} migration_class={item.get('migration_class')} "
+                f"risk={item.get('risk_level') or 'unknown'} reason={item.get('reason')}"
+            )
+            if item.get("migration_scope") == "workspace_schema":
+                lines.append(
+                    f"  transition_steps={item.get('path_length', 0)} "
+                    f"requires_confirmation={bool(item.get('requires_confirmation', False))} "
+                    f"rollback_strategy={item.get('rollback_strategy') or 'none'}"
+                )
+                for step in item.get("transition_path", []):
+                    lines.append(
+                        f"  step {step.get('from_version')} -> {step.get('to_version')} "
+                        f"action={step.get('action')} confirm={bool(step.get('requires_confirmation', False))} "
+                        f"rollback={step.get('rollback_strategy') or 'none'}"
+                    )
+            lines.append(
+                f"  legacy_types={','.join(item.get('legacy_types', [])) or 'none'} "
+                f"current_types={','.join(item.get('current_types', [])) or 'none'}"
+            )
+            lines.append(
+                f"  legacy_page_ids={','.join(item.get('legacy_page_ids', [])) or 'none'} "
+                f"current_page_ids={','.join(item.get('current_page_ids', [])) or 'none'}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Instruction",
+        "Only judge whether each report_only candidate should stay pending, trigger creation of a current successor page, or be otherwise escalated for human follow-up.",
+        "Do not mark deterministic apply_supported actions as needing LLM review.",
+        "Prefer batching multiple report_only candidates into one judgment pass when possible.",
+    ])
+    return "\n".join(lines)
+
+
+def build_migrate_handoff_messages(handoff_payload: dict) -> list[dict]:
+    prompt_text = render_migrate_handoff_prompt(handoff_payload)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the migration workflow layer for a MyAgentWiki migrate handoff. "
+                "Judge only report-only migration candidates and leave deterministic actions untouched."
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt_text,
+        },
+    ]
+
+
+def render_migrate_handoff_chatml(handoff_payload: dict) -> str:
+    messages = build_migrate_handoff_messages(handoff_payload)
+    blocks = []
+    for message in messages:
+        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
+    return "\n".join(blocks)
+
+
+def build_migrate_handoff_payload(plan_payload: dict) -> dict:
+    agent_brief, agent_summary = build_migrate_agent_handoff(plan_payload)
+    return {
+        "contract_version": MIGRATE_HANDOFF_CONTRACT_VERSION,
+        "workspace": plan_payload.get("workspace"),
+        "workspace_summary": plan_payload.get("workspace_summary", {}),
+        "action_catalog": plan_payload.get("action_catalog", []),
+        "planned_actions": plan_payload.get("planned_actions", []),
+        "manual_followups": plan_payload.get("manual_followups", []),
+        "migration_candidates": plan_payload.get("migration_candidates", []),
+        "summary": plan_payload.get("summary", {}),
+        "agent_brief": agent_brief,
+        "agent_summary": agent_summary,
+    }
+
+
+def chunk_migrate_followups(items: list[dict], batch_size: int) -> list[list[dict]]:
+    if batch_size <= 0:
+        batch_size = 1
+    return [items[index:index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def build_migrate_batch_handoff_payload(plan_payload: dict, batch_size: int) -> dict:
+    handoff_payload = build_migrate_handoff_payload(plan_payload)
+    manual_followups = handoff_payload.get("manual_followups", [])
+    batches = chunk_migrate_followups(manual_followups, batch_size)
+    batch_reports = []
+    for batch_index, batch_items in enumerate(batches, start=1):
+        batch_reports.append({
+            "batch_index": batch_index,
+            "batch_size": len(batch_items),
+            "canonical_ids": [item.get("canonical_id") for item in batch_items],
+            "items": batch_items,
+        })
+    handoff_payload["batching"] = {
+        "enabled": True,
+        "batch_size": batch_size,
+        "batch_count": len(batch_reports),
+        "item_count": len(manual_followups),
+    }
+    handoff_payload["batch_reports"] = batch_reports
+    handoff_payload["agent_brief"] = {
+        **handoff_payload.get("agent_brief", {}),
+        "batch_count": len(batch_reports),
+        "batch_size": batch_size,
+    }
+    return handoff_payload
+
+
+def normalize_migration_handoff_results(
+    handoff_payload: dict,
+    hook_result: dict,
+) -> list[dict]:
+    decisions = hook_result.get("decisions", [])
+    if not isinstance(decisions, list):
+        return []
+
+    followups = {
+        str(item.get("canonical_id")): item
+        for item in handoff_payload.get("manual_followups", [])
+        if item.get("canonical_id")
+    }
+    normalized: list[dict] = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        canonical_id = str(decision.get("canonical_id", "")).strip()
+        if not canonical_id or canonical_id not in followups:
+            continue
+        action = str(decision.get("decision_action", "")).strip() or "keep_pending"
+        rationale = str(decision.get("rationale", "")).strip()
+        confidence = coerce_float(decision.get("confidence", 0.0), 0.0)
+        normalized.append({
+            "ledger_version": MIGRATION_DECISION_LEDGER_VERSION,
+            "canonical_id": canonical_id,
+            "decision_action": action,
+            "rationale": rationale,
+            "confidence": confidence,
+            "source_suggested_action": followups[canonical_id].get("suggested_action"),
+            "followup_action": followups[canonical_id].get("action"),
+            "migration_class": followups[canonical_id].get("migration_class"),
+            "created_at": utc_now_iso(),
+        })
+    return normalized
+
+
+def apply_migration_decision_records(target: Path, decision_records: list[dict]) -> dict:
+    latest_by_canonical_id = build_latest_migration_decisions_by_canonical_id(decision_records)
+    plan_payload = build_migrate_plan_payload(target)
+    manual_followups = plan_payload.get("manual_followups", [])
+    existing_followups = load_migration_followups(target)
+    existing_by_canonical_id = {
+        str(record.get("canonical_id", "")).strip(): record
+        for record in existing_followups
+        if str(record.get("canonical_id", "")).strip()
+    }
+
+    applied_decisions = []
+    unresolved_decisions = []
+    promoted_actions = []
+    updated_followups_by_canonical_id = dict(existing_by_canonical_id)
+    for followup in manual_followups:
+        canonical_id = str(followup.get("canonical_id", "")).strip()
+        decision_record = latest_by_canonical_id.get(canonical_id)
+        if decision_record is None:
+            continue
+        action = str(decision_record.get("decision_action", "")).strip()
+        if action == "promote_to_current_successor_needed":
+            followup_record = {
+                "canonical_id": canonical_id,
+                "queue_action": "create_current_successor_required",
+                "source_decision_action": action,
+                "status": "pending",
+                "reason": decision_record.get("rationale", ""),
+                "confidence": decision_record.get("confidence", 0.0),
+                "migration_class": followup.get("migration_class"),
+                "created_at": existing_by_canonical_id.get(canonical_id, {}).get("created_at") or utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            }
+            updated_followups_by_canonical_id[canonical_id] = followup_record
+            promoted_actions.append({
+                **followup_record,
+                "canonical_id": canonical_id,
+            })
+            applied_decisions.append(decision_record)
+        elif action in {"keep_pending", "needs_human_followup"}:
+            unresolved_decisions.append(decision_record)
+        else:
+            unresolved_decisions.append({
+                **decision_record,
+                "status": "unknown_decision_action",
+            })
+
+    write_jsonl(
+        migration_followups_path(target),
+        sorted(
+            updated_followups_by_canonical_id.values(),
+            key=lambda item: (str(item.get("status", "")), str(item.get("canonical_id", ""))),
+        ),
+    )
+
+    return {
+        "workspace": str(target),
+        "applied_decisions": applied_decisions,
+        "promoted_actions": promoted_actions,
+        "followup_queue_path": str(migration_followups_path(target)),
+        "followup_queue": sorted(
+            updated_followups_by_canonical_id.values(),
+            key=lambda item: (str(item.get("status", "")), str(item.get("canonical_id", ""))),
+        ),
+        "unresolved_decisions": unresolved_decisions,
+        "summary": {
+            "applied_decision_count": len(applied_decisions),
+            "promoted_action_count": len(promoted_actions),
+            "followup_queue_count": len(updated_followups_by_canonical_id),
+            "unresolved_decision_count": len(unresolved_decisions),
+        },
+    }
+
+
+def confirm_workspace_schema_transition_path(
+    target: Path,
+    from_version: str,
+    to_version: str,
+    path_signature: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    plan_payload = build_migrate_plan_payload_for_target(target, target_schema_version=to_version)
+    schema_followups = plan_payload.get("schema_migration", {}).get("manual_followups", [])
+    matching = [
+        item for item in schema_followups
+        if item.get("migration_scope") == "workspace_schema"
+        and str(item.get("from_schema_version")) == str(from_version)
+        and str(item.get("to_schema_version")) == str(to_version)
+    ]
+    if path_signature:
+        matching = [
+            item for item in matching
+            if str(item.get("path_signature", "")).strip() == str(path_signature).strip()
+        ]
+    if not matching:
+        raise KeyError("No matching schema migration follow-up path requires confirmation.")
+    selected = matching[0]
+    confirmation_record = {
+        "ledger_version": SCHEMA_CONFIRMATION_LEDGER_VERSION,
+        "path_signature": selected.get("path_signature"),
+        "from_schema_version": selected.get("from_schema_version"),
+        "to_schema_version": selected.get("to_schema_version"),
+        "status": "confirmed",
+        "notes": str(notes or "").strip(),
+        "created_at": utc_now_iso(),
+    }
+    append_jsonl(schema_confirmations_path(target), confirmation_record)
+    refreshed_plan = build_migrate_plan_payload(target)
+    return {
+        "workspace": str(target),
+        "confirmation_record": confirmation_record,
+        "refreshed_plan": refreshed_plan,
+        "summary": {
+            "confirmed_path_count": 1,
+            "schema_planned_action_count": refreshed_plan.get("summary", {}).get("schema_planned_action_count", 0),
+            "schema_manual_followup_count": refreshed_plan.get("summary", {}).get("schema_manual_followup_count", 0),
+        },
+    }
+
+
+def render_migrate_batch_prompt(handoff_payload: dict) -> str:
+    base_prompt = render_migrate_handoff_prompt(handoff_payload)
+    lines = [base_prompt, "", "## Batches"]
+    batch_reports = handoff_payload.get("batch_reports", [])
+    if batch_reports:
+        for batch in batch_reports:
+            lines.append(
+                f"- batch_index={batch.get('batch_index')} batch_size={batch.get('batch_size')} "
+                f"canonical_ids={','.join(batch.get('canonical_ids', [])) or 'none'}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Process one batch at a time when invoking an external LLM so the static context can be shared across multiple report_only candidates.",
+    ])
+    return "\n".join(lines)
+
+
+def build_migrate_batch_messages(handoff_payload: dict) -> list[dict]:
+    prompt_text = render_migrate_batch_prompt(handoff_payload)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the batched migration workflow layer for a MyAgentWiki migrate handoff. "
+                "Judge report-only migration candidates in batches and do not revisit deterministic actions."
+            ),
+        },
+        {
+            "role": "user",
+            "content": prompt_text,
+        },
+    ]
+
+
+def render_migrate_batch_chatml(handoff_payload: dict) -> str:
+    messages = build_migrate_batch_messages(handoff_payload)
+    blocks = []
+    for message in messages:
+        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
+    return "\n".join(blocks)
+
+
+def build_migrate_plan_payload(target: Path, target_schema_version: str | None = None) -> dict:
+    desired_schema_version = resolve_target_workspace_schema_version(target_schema_version)
+    compat_payload = build_compat_report_payload(target, desired_schema_version)
+    migration_candidates = compat_payload.get("migration_candidates", [])
+
+    planned_actions = []
+    manual_followups = []
+    planned_schema_actions = []
+    planned_compatibility_actions = []
+    schema_followups = []
+    compatibility_followups = []
+    for candidate in migration_candidates:
+        contract = migration_action_contract(candidate.get("suggested_action"))
+        if contract.get("planning_decision") == "auto_plan":
+            action_record = {
+                "action": candidate.get("suggested_action"),
+                "action_class": contract.get("action_class"),
+                "execution_mode": contract.get("execution_mode"),
+                "canonical_id": candidate["canonical_id"],
+                "migration_scope": candidate.get("migration_scope", "compatibility_cleanup"),
+                "from_schema_version": candidate.get("from_schema_version"),
+                "to_schema_version": candidate.get("to_schema_version"),
+                "transition_path": candidate.get("transition_path", []),
+                "path_length": candidate.get("path_length", 0),
+                "path_signature": candidate.get("path_signature"),
+                "requires_confirmation": bool(candidate.get("requires_confirmation", False)),
+                "rollback_strategy": candidate.get("rollback_strategy"),
+                "legacy_page_ids": candidate["legacy_page_ids"],
+                "current_page_ids": candidate["current_page_ids"],
+                "legacy_types": candidate["legacy_types"],
+                "current_types": candidate["current_types"],
+                "migration_class": contract.get("migration_class"),
+                "reason": candidate.get("reason"),
+                "risk_level": contract.get("risk_level"),
+            }
+            planned_actions.append(action_record)
+            if action_record["migration_scope"] == "workspace_schema":
+                planned_schema_actions.append(action_record)
+            else:
+                planned_compatibility_actions.append(action_record)
+        else:
+            followup_record = {
+                "action": contract.get("followup_action") or "wait_for_current_successor",
+                "action_class": contract.get("action_class", "manual_followup"),
+                "execution_mode": contract.get("execution_mode", "report_only"),
+                "canonical_id": candidate["canonical_id"],
+                "migration_scope": candidate.get("migration_scope", "compatibility_cleanup"),
+                "from_schema_version": candidate.get("from_schema_version"),
+                "to_schema_version": candidate.get("to_schema_version"),
+                "transition_path": candidate.get("transition_path", []),
+                "path_length": candidate.get("path_length", 0),
+                "path_signature": candidate.get("path_signature"),
+                "requires_confirmation": bool(candidate.get("requires_confirmation", False)),
+                "rollback_strategy": candidate.get("rollback_strategy"),
+                "legacy_page_ids": candidate["legacy_page_ids"],
+                "legacy_types": candidate["legacy_types"],
+                "current_page_ids": candidate["current_page_ids"],
+                "current_types": candidate["current_types"],
+                "migration_class": contract.get("migration_class") or candidate.get("migration_class"),
+                "reason": candidate.get("reason"),
+                "suggested_action": candidate.get("suggested_action"),
+                "risk_level": contract.get("risk_level"),
+            }
+            manual_followups.append(followup_record)
+            if followup_record["migration_scope"] == "workspace_schema":
+                schema_followups.append(followup_record)
+            else:
+                compatibility_followups.append(followup_record)
+
+    return {
+        "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
+        "action_catalog": compat_payload.get("action_catalog", build_migration_action_catalog()),
+        "target_schema_version": desired_schema_version,
+        "compatibility_report": compat_payload.get("compatibility_report", {}),
+        "schema_guard": compat_payload.get("schema_guard", workspace_schema_guard_payload(target)),
+        "migration_candidates": migration_candidates,
+        "planned_actions": planned_actions,
+        "manual_followups": manual_followups,
+        "schema_migration": {
+            "planned_actions": planned_schema_actions,
+            "manual_followups": schema_followups,
+        },
+        "compatibility_cleanup": {
+            "planned_actions": planned_compatibility_actions,
+            "manual_followups": compatibility_followups,
+        },
+        "summary": {
+            "planned_action_count": len(planned_actions),
+            "manual_followup_count": len(manual_followups),
+            "migration_candidate_count": len(migration_candidates),
+            "legacy_page_count": compat_payload.get("summary", {}).get("legacy_page_count", 0),
+            "auto_applicable_candidate_count": compat_payload.get("summary", {}).get("auto_applicable_candidate_count", 0),
+            "report_only_candidate_count": compat_payload.get("summary", {}).get("report_only_candidate_count", 0),
+            "schema_migration_candidate_count": compat_payload.get("summary", {}).get("schema_migration_candidate_count", 0),
+            "schema_planned_action_count": len(planned_schema_actions),
+            "schema_manual_followup_count": len(schema_followups),
+            "compatibility_planned_action_count": len(planned_compatibility_actions),
+            "compatibility_manual_followup_count": len(compatibility_followups),
+        },
+    }
+
+
+def migration_action_backup_entries_archive_legacy_concept_summary(
+    target: Path,
+    action: dict,
+    page_records_by_id: dict[str, dict],
+    backup_dir: Path,
+) -> list[dict]:
+    entries: list[dict] = []
+    for legacy_page_id in action.get("legacy_page_ids", []):
+        page_record = page_records_by_id.get(legacy_page_id)
+        if not page_record:
+            continue
+        page_rel_path = Path(str(page_record.get("page_path", "")).strip())
+        if not str(page_rel_path):
+            continue
+        page_abs_path = target / page_rel_path
+        if not page_abs_path.exists():
+            continue
+        destination_path = backup_dir / "wiki_pages" / page_rel_path
+        ensure_directory(destination_path.parent)
+        shutil.copy2(page_abs_path, destination_path)
+        entries.append({
+            "kind": "wiki_page_snapshot",
+            "page_id": legacy_page_id,
+            "path": str(page_rel_path),
+            "backup_path": str(destination_path),
+            "action": action.get("action"),
+        })
+    return entries
+
+
+def migration_action_backup_entries_upgrade_workspace_schema_to_v1(
+    target: Path,
+    action: dict,
+    page_records_by_id: dict[str, dict],
+    backup_dir: Path,
+) -> list[dict]:
+    del page_records_by_id
+    entries: list[dict] = []
+    config_rel_path = Path("config") / "project.yml"
+    config_path = target / config_rel_path
+    if config_path.exists():
+        destination_path = backup_dir / config_rel_path
+        ensure_directory(destination_path.parent)
+        shutil.copy2(config_path, destination_path)
+        entries.append({
+            "kind": "config_snapshot",
+            "path": str(config_rel_path),
+            "backup_path": str(destination_path),
+            "action": action.get("action"),
+        })
+    return entries
+
+
+def migration_action_apply_archive_legacy_concept_summary(
+    target: Path,
+    action: dict,
+    page_records_by_id: dict[str, dict],
+    live_claims_by_id: dict[str, dict],
+    live_reviews_by_id: dict[str, dict],
+) -> dict:
+    removed_page_ids_for_action: list[str] = []
+    changed_page_records: list[dict] = []
+
+    for legacy_page_id in action.get("legacy_page_ids", []):
+        page_record = page_records_by_id.get(legacy_page_id)
+        if page_record is None:
+            continue
+        page_record = ensure_page_lifecycle_defaults(dict(page_record))
+        if page_record.get("lifecycle_status") == "removed":
+            continue
+
+        page_record["removed"] = True
+        page_record["archived_at"] = utc_now_iso()
+        page_record["lifecycle_status"] = "removed"
+        page_record["updated"] = utc_now_iso()
+        page_records_by_id[legacy_page_id] = page_record
+        changed_page_records.append(page_record)
+        removed_page_ids_for_action.append(legacy_page_id)
+
+        page_path = target / page_record.get("page_path", "")
+        if page_path.exists():
+            page_path.unlink()
+
+        remove_page_id_from_claim_records(live_claims_by_id, legacy_page_id)
+        remove_page_id_from_review_records(live_reviews_by_id, legacy_page_id)
+
+    if not removed_page_ids_for_action:
+        return {
+            "status": "skipped",
+            "removed_legacy_page_ids": [],
+            "changed_page_records": [],
+        }
+
+    return {
+        "status": "applied",
+        "removed_legacy_page_ids": removed_page_ids_for_action,
+        "changed_page_records": changed_page_records,
+    }
+
+
+def migration_action_apply_upgrade_workspace_schema_to_v1(
+    target: Path,
+    action: dict,
+    page_records_by_id: dict[str, dict],
+    live_claims_by_id: dict[str, dict],
+    live_reviews_by_id: dict[str, dict],
+) -> dict:
+    del page_records_by_id, live_claims_by_id, live_reviews_by_id
+    update_workspace_schema_version(target, WORKSPACE_SCHEMA_VERSION)
+    return {
+        "status": "applied",
+        "removed_legacy_page_ids": [],
+        "changed_page_records": [],
+        "updated_schema_version": WORKSPACE_SCHEMA_VERSION,
+        "previous_schema_version": action.get("from_schema_version"),
+    }
+
+
+MIGRATION_ACTION_HANDLERS = {
+    "upgrade_workspace_schema_to_v1": {
+        "backup_entries": migration_action_backup_entries_upgrade_workspace_schema_to_v1,
+        "apply": migration_action_apply_upgrade_workspace_schema_to_v1,
+    },
+    "archive_legacy_concept_summary": {
+        "backup_entries": migration_action_backup_entries_archive_legacy_concept_summary,
+        "apply": migration_action_apply_archive_legacy_concept_summary,
+    },
+}
+
+
+def migration_report_dir(target: Path) -> Path:
+    return target / "reports" / "migrate"
+
+
+def migration_backup_root_dir(target: Path) -> Path:
+    return target / "state" / "backups"
+
+
+def migration_backup_latest_path(target: Path) -> Path:
+    return migration_backup_root_dir(target) / "migrate_latest.json"
+
+
+def write_migrate_plan_report(target: Path, payload: dict, mode: str) -> dict:
+    ensure_directory(migration_report_dir(target))
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    report_dir = migration_report_dir(target) / f"{timestamp}_{mode}"
+    ensure_directory(report_dir)
+
+    summary = payload.get("summary", {})
+    planned_actions = payload.get("planned_actions", [])
+    manual_followups = payload.get("manual_followups", [])
+    lines = [
+        "# Migration Report",
+        "",
+        f"- generated_at: {utc_now_iso()}",
+        f"- workspace: {target}",
+        f"- mode: {mode}",
+        f"- schema_planned_actions: {summary.get('schema_planned_action_count', 0)}",
+        f"- schema_manual_followups: {summary.get('schema_manual_followup_count', 0)}",
+        f"- compatibility_planned_actions: {summary.get('compatibility_planned_action_count', 0)}",
+        f"- compatibility_manual_followups: {summary.get('compatibility_manual_followup_count', 0)}",
+        f"- planned_actions: {summary.get('planned_action_count', 0)}",
+        f"- manual_followups: {summary.get('manual_followup_count', 0)}",
+        f"- migration_candidates: {summary.get('migration_candidate_count', 0)}",
+        f"- legacy_pages: {summary.get('legacy_page_count', 0)}",
+        "",
+        "## Schema Migration",
+        "",
+    ]
+    schema_actions = payload.get("schema_migration", {}).get("planned_actions", [])
+    schema_followups = payload.get("schema_migration", {}).get("manual_followups", [])
+    compatibility_actions = payload.get("compatibility_cleanup", {}).get("planned_actions", [])
+    compatibility_followups = payload.get("compatibility_cleanup", {}).get("manual_followups", [])
+    if schema_actions:
+        for action in schema_actions:
+            lines.append(
+                f"- planned {action['canonical_id']}: {action['action']} "
+                f"(steps={action.get('path_length', 0)}, risk={action.get('risk_level') or 'unknown'})"
+            )
+    else:
+        lines.append("- planned: none")
+    if schema_followups:
+        for action in schema_followups:
+            lines.append(
+                f"- followup {action['canonical_id']}: {action['suggested_action']} "
+                f"(risk={action.get('risk_level') or 'unknown'})"
+            )
+    else:
+        lines.append("- followup: none")
+    lines.append("")
+    lines.extend([
+        "## Compatibility Cleanup",
+        "",
+    ])
+    if compatibility_actions:
+        for action in compatibility_actions:
+            lines.append(
+                f"- planned {action['canonical_id']}: {action['action']} "
+                f"(legacy={','.join(action['legacy_types'])} -> current={','.join(action['current_types']) or 'none'})"
+            )
+    else:
+        lines.append("- planned: none")
+    if compatibility_followups:
+        for action in compatibility_followups:
+            lines.append(
+                f"- followup {action['canonical_id']}: {action['action']} "
+                f"(legacy={','.join(action['legacy_types'])} -> current={','.join(action['current_types']) or 'none'})"
+            )
+    else:
+        lines.append("- followup: none")
+    lines.append("")
+
+    report_payload = {
+        "generated_at": utc_now_iso(),
+        "workspace": str(target),
+        "mode": mode,
+        "plan": payload,
+    }
+    report_json_path = report_dir / "report.json"
+    report_md_path = report_dir / "report.md"
+    write_json(report_json_path, report_payload)
+    atomic_write_text(report_md_path, "\n".join(lines), encoding="utf-8")
+
+    latest_json_path = migration_report_dir(target) / "latest.json"
+    latest_md_path = migration_report_dir(target) / "latest.md"
+    write_json(
+        latest_json_path,
+        {
+            "generated_at": report_payload["generated_at"],
+            "workspace": str(target),
+            "mode": mode,
+            "report_dir": str(report_dir),
+            "report_json_path": str(report_json_path),
+            "report_md_path": str(report_md_path),
+        },
+    )
+    atomic_write_text(latest_md_path, "\n".join(lines), encoding="utf-8")
+
+    return {
+        "generated_at": report_payload["generated_at"],
+        "mode": mode,
+        "report_dir": str(report_dir),
+        "report_json_path": str(report_json_path),
+        "report_md_path": str(report_md_path),
+        "latest_json_path": str(latest_json_path),
+        "latest_md_path": str(latest_md_path),
+    }
+
+
+def build_migration_run_record(
+    target: Path,
+    mode: str,
+    payload: dict,
+    status: str,
+    backup: dict | None = None,
+    report: dict | None = None,
+) -> dict:
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    schema_guard = payload.get("schema_guard") if isinstance(payload, dict) else None
+    if not isinstance(schema_guard, dict):
+        schema_guard = workspace_schema_guard_payload(target)
+    return {
+        "run_id": f"migration_run_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "mode": mode,
+        "status": status,
+        "workspace": str(target),
+        "schema_guard": schema_guard,
+        "summary": {
+            "planned_action_count": summary.get("planned_action_count", 0),
+            "manual_followup_count": summary.get("manual_followup_count", 0),
+            "migration_candidate_count": summary.get("migration_candidate_count", 0),
+            "schema_migration_candidate_count": summary.get("schema_migration_candidate_count", 0),
+            "applied_action_count": summary.get("applied_action_count", 0),
+            "removed_legacy_page_count": summary.get("removed_legacy_page_count", 0),
+            "restored_entry_count": summary.get("restored_entry_count", 0),
+        },
+        "backup_dir": backup.get("backup_dir") if isinstance(backup, dict) else None,
+        "backup_manifest_path": backup.get("manifest_path") if isinstance(backup, dict) else None,
+        "report_path": report.get("report_json_path") if isinstance(report, dict) else None,
+        "created_at": utc_now_iso(),
+    }
+
+
+def write_migrate_backup_snapshot(target: Path, payload: dict) -> dict:
+    ensure_directory(migration_backup_root_dir(target))
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_dir = migration_backup_root_dir(target) / f"migrate_{timestamp}"
+    ensure_directory(backup_dir)
+
+    manifest_entries: list[dict] = []
+    backup_targets = [
+        Path("state") / "pages.jsonl",
+        Path("state") / "claims.jsonl",
+        Path("state") / "reviews.jsonl",
+        ALIAS_INDEX_REL_PATH,
+        SEARCH_PAGES_INDEX_REL_PATH,
+    ]
+    for rel_path in backup_targets:
+        source_path = target / rel_path
+        if not source_path.exists():
+            continue
+        destination_path = backup_dir / rel_path
+        ensure_directory(destination_path.parent)
+        shutil.copy2(source_path, destination_path)
+        manifest_entries.append({
+            "kind": "state_snapshot",
+            "path": str(rel_path),
+            "backup_path": str(destination_path),
+        })
+
+    page_records = []
+    pages_path = target / "state" / "pages.jsonl"
+    if pages_path.exists():
+        page_records = [
+            ensure_page_lifecycle_defaults(record)
+            for record in load_jsonl(pages_path)
+        ]
+    page_records_by_id = {record.get("page_id"): record for record in page_records}
+
+    for action in payload.get("planned_actions", []):
+        handler = MIGRATION_ACTION_HANDLERS.get(str(action.get("action", "")).strip())
+        if not handler:
+            continue
+        backup_entries_fn = handler.get("backup_entries")
+        if backup_entries_fn is None:
+            continue
+        manifest_entries.extend(
+            backup_entries_fn(target, action, page_records_by_id, backup_dir)
+        )
+
+    manifest_payload = {
+        "created_at": utc_now_iso(),
+        "workspace": str(target),
+        "planned_action_count": payload.get("summary", {}).get("planned_action_count", 0),
+        "schema_guard_before": workspace_schema_guard_payload(target),
+        "entries": manifest_entries,
+    }
+    manifest_path = backup_dir / "manifest.json"
+    write_json(manifest_path, manifest_payload)
+
+    backup_payload = {
+        "created_at": manifest_payload["created_at"],
+        "backup_dir": str(backup_dir),
+        "manifest_path": str(manifest_path),
+        "entry_count": len(manifest_entries),
+        "entries": manifest_entries,
+    }
+    write_json(
+        migration_backup_latest_path(target),
+        {
+            **backup_payload,
+            "workspace": str(target),
+            "schema_guard_before": manifest_payload.get("schema_guard_before", {}),
+        },
+    )
+    return backup_payload
+
+
+def expand_planned_migration_actions(planned_actions: list[dict]) -> list[dict]:
+    expanded_actions: list[dict] = []
+    for action in planned_actions:
+        transition_path = action.get("transition_path", [])
+        if action.get("migration_scope") == "workspace_schema" and isinstance(transition_path, list) and transition_path:
+            for step_index, step in enumerate(transition_path, start=1):
+                step_contract = migration_action_contract(step.get("action"))
+                expanded_actions.append({
+                    **action,
+                    "action": step.get("action"),
+                    "action_class": step_contract.get("action_class", action.get("action_class")),
+                    "execution_mode": step_contract.get("execution_mode", action.get("execution_mode")),
+                    "migration_class": step_contract.get("migration_class", action.get("migration_class")),
+                    "risk_level": step_contract.get("risk_level", action.get("risk_level")),
+                    "from_schema_version": step.get("from_version", action.get("from_schema_version")),
+                    "to_schema_version": step.get("to_version", action.get("to_schema_version")),
+                    "transition_step_index": step_index,
+                    "transition_step_count": len(transition_path),
+                })
+            continue
+        expanded_actions.append(dict(action))
+    return expanded_actions
+
+
+def restore_migrate_backup_snapshot(target: Path, backup_dir: Path) -> dict:
+    manifest_path = backup_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(f"Missing migration backup manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    restored_entries: list[dict] = []
+    for entry in manifest.get("entries", []):
+        source_path = Path(str(entry.get("backup_path", "")).strip())
+        target_rel_path = Path(str(entry.get("path", "")).strip())
+        if not str(target_rel_path):
+            continue
+        destination_path = target / target_rel_path
+        if source_path.exists():
+            ensure_directory(destination_path.parent)
+            shutil.copy2(source_path, destination_path)
+            restored_entries.append({
+                "kind": entry.get("kind"),
+                "path": str(target_rel_path),
+                "status": "restored",
+            })
+    return {
+        "workspace": str(target),
+        "backup_dir": str(backup_dir),
+        "manifest_path": str(manifest_path),
+        "restored_entries": restored_entries,
+        "summary": {
+            "restored_entry_count": len(restored_entries),
+        },
+    }
+
+
+def apply_migrate_plan(target: Path, target_schema_version: str | None = None) -> dict:
+    payload = build_migrate_plan_payload_for_target(target, target_schema_version=target_schema_version)
+    payload["migration_report"] = write_migrate_plan_report(target, payload, mode="apply-plan")
+    planned_actions = payload.get("planned_actions", [])
+
+    if not planned_actions:
+        payload["applied_actions"] = []
+        payload["summary"] = {
+            **payload.get("summary", {}),
+            "applied_action_count": 0,
+            "removed_legacy_page_count": 0,
+        }
+        append_migration_run_record(
+            target,
+            build_migration_run_record(
+                target=target,
+                mode="apply",
+                payload=payload,
+                status="no_op",
+                report=payload.get("migration_report"),
+            ),
+        )
+        return payload
+
+    expanded_planned_actions = expand_planned_migration_actions(planned_actions)
+    payload["backup"] = write_migrate_backup_snapshot(
+        target,
+        {
+            **payload,
+            "planned_actions": expanded_planned_actions,
+        },
+    )
+
+    pages_path = target / "state" / "pages.jsonl"
+    page_records = [
+        ensure_page_lifecycle_defaults(record)
+        for record in load_jsonl(pages_path)
+    ]
+    page_records_by_id = {record["page_id"]: dict(record) for record in page_records}
+
+    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
+    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+
+    removed_legacy_page_ids: list[str] = []
+    applied_actions: list[dict] = []
+    changed_page_records: list[dict] = []
+    unknown_actions: list[dict] = []
+
+    for action in expanded_planned_actions:
+        handler = MIGRATION_ACTION_HANDLERS.get(str(action.get("action", "")).strip())
+        if not handler or handler.get("apply") is None:
+            unknown_actions.append({
+                **action,
+                "status": "unsupported_action",
+            })
+            continue
+        apply_result = handler["apply"](
+            target,
+            action,
+            page_records_by_id,
+            live_claims_by_id,
+            live_reviews_by_id,
+        )
+        changed_page_records.extend(apply_result.get("changed_page_records", []))
+        removed_page_ids_for_action = apply_result.get("removed_legacy_page_ids", [])
+        removed_legacy_page_ids.extend(removed_page_ids_for_action)
+        applied_actions.append({
+            **action,
+            "status": apply_result.get("status", "unknown"),
+            "removed_legacy_page_ids": removed_page_ids_for_action,
+        })
+
+    write_jsonl(pages_path, list(page_records_by_id.values()))
+
+    claim_state_records = build_ordered_claim_state_records(
+        live_claims_by_id=live_claims_by_id,
+        historical_claims_by_id=historical_claims_by_id,
+    )
+    write_jsonl(target / "state" / "claims.jsonl", claim_state_records)
+    for claim_record in claim_state_records:
+        write_claim_file(target, claim_record)
+
+    review_state_records = build_ordered_review_state_records(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    write_jsonl(target / "state" / "reviews.jsonl", review_state_records)
+    for review_record in review_state_records:
+        write_review_file(target, review_record)
+
+    refreshed_page_records = list(page_records_by_id.values())
+    rebuild_wiki_index(target, refreshed_page_records)
+    alias_index, _, _ = refresh_alias_conflict_reviews(
+        target=target,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+        page_records=refreshed_page_records,
+    )
+    updated_review_state_records = build_ordered_review_state_records(
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+    )
+    write_jsonl(target / "state" / "reviews.jsonl", updated_review_state_records)
+    for review_record in updated_review_state_records:
+        write_review_file(target, review_record)
+
+    previous_search_index_records = load_search_pages_index(target)
+    write_search_pages_index(
+        target=target,
+        page_records=refreshed_page_records,
+        claim_records_by_id=live_claims_by_id,
+        previous_records=previous_search_index_records,
+    )
+    append_wiki_log(
+        target,
+        task_id=f"migrate-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        changed_pages=changed_page_records,
+    )
+
+    result_payload = build_migrate_plan_payload_for_target(target, target_schema_version=target_schema_version)
+    result_payload["migration_report"] = payload.get("migration_report")
+    result_payload["backup"] = payload.get("backup")
+    result_payload["applied_actions"] = applied_actions
+    if unknown_actions:
+        result_payload["unsupported_actions"] = unknown_actions
+    result_payload["alias_index"] = {
+        "index_path": str(ALIAS_INDEX_REL_PATH),
+        "canonical_count": len(alias_index.get("canonical_map", {})),
+        "conflict_count": len(alias_index.get("conflicts", [])),
+    }
+    result_payload["summary"] = {
+        **result_payload.get("summary", {}),
+        "applied_action_count": len(applied_actions),
+        "removed_legacy_page_count": len(removed_legacy_page_ids),
+    }
+    append_migration_run_record(
+        target,
+        build_migration_run_record(
+            target=target,
+            mode="apply",
+            payload=result_payload,
+            status="applied",
+            backup=result_payload.get("backup"),
+            report=result_payload.get("migration_report"),
+        ),
+    )
+    return result_payload
+
+
+def rollback_migrate_plan(target: Path, backup_dir_arg: str | None = None) -> dict:
+    latest_backup_meta = {}
+    latest_backup_path = migration_backup_latest_path(target)
+    if latest_backup_path.exists():
+        latest_backup_meta = json.loads(latest_backup_path.read_text(encoding="utf-8"))
+
+    if backup_dir_arg:
+        backup_dir = Path(backup_dir_arg).expanduser().resolve()
+    else:
+        backup_dir_value = str(latest_backup_meta.get("backup_dir", "")).strip()
+        if not backup_dir_value:
+            raise ValueError("No migration backup snapshot found. Run `migrate --apply` first or provide --backup-dir.")
+        backup_dir = Path(backup_dir_value).expanduser().resolve()
+
+    payload = restore_migrate_backup_snapshot(target, backup_dir)
+    payload["latest_backup_meta"] = latest_backup_meta
+
+    pages_path = target / "state" / "pages.jsonl"
+    if pages_path.exists():
+        page_records = [
+            ensure_page_lifecycle_defaults(record)
+            for record in load_jsonl(pages_path)
+        ]
+        rebuild_wiki_index(target, page_records)
+        live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
+        live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+        alias_index, _, _ = refresh_alias_conflict_reviews(
+            target=target,
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+            page_records=page_records,
+        )
+        review_state_records = build_ordered_review_state_records(
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+        write_jsonl(target / "state" / "reviews.jsonl", review_state_records)
+        for review_record in review_state_records:
+            write_review_file(target, review_record)
+        claim_state_records = build_ordered_claim_state_records(
+            live_claims_by_id=live_claims_by_id,
+            historical_claims_by_id=historical_claims_by_id,
+        )
+        write_jsonl(target / "state" / "claims.jsonl", claim_state_records)
+        for claim_record in claim_state_records:
+            write_claim_file(target, claim_record)
+        previous_search_index_records = load_search_pages_index(target)
+        write_search_pages_index(
+            target=target,
+            page_records=page_records,
+            claim_records_by_id=live_claims_by_id,
+            previous_records=previous_search_index_records,
+        )
+        payload["alias_index"] = {
+            "index_path": str(ALIAS_INDEX_REL_PATH),
+            "canonical_count": len(alias_index.get("canonical_map", {})),
+            "conflict_count": len(alias_index.get("conflicts", [])),
+        }
+    payload["workspace_summary"] = build_workspace_summary(target)
+    append_migration_run_record(
+        target,
+        build_migration_run_record(
+            target=target,
+            mode="rollback",
+            payload=payload,
+            status="restored",
+            backup={"backup_dir": str(backup_dir), "manifest_path": payload.get("manifest_path")},
+        ),
+    )
+    return payload
 
 
 def build_query_documents(
@@ -7388,7 +10280,7 @@ def build_source_trail(claim_matches: list[dict], chunk_matches: list[dict]) -> 
     )
 
 
-def query_reading_focus(query_intent: str) -> str:
+def query_reading_focus(query_intent: str, page_type: str = "") -> str:
     if query_intent == "overview":
         return "workspace_overview"
     if query_intent == "compare":
@@ -7396,15 +10288,20 @@ def query_reading_focus(query_intent: str) -> str:
     if query_intent == "timeline":
         return "timeline_evidence"
     if query_intent == "how_to":
-        return "procedural_chunks"
+        return "guide_steps" if page_type == "guide" else "procedural_chunks"
     if query_intent == "evidence":
         return "source_evidence"
+    if page_type == "example":
+        return "worked_examples"
+    if page_type == "topic":
+        return "topic_orientation"
     return "general_lookup"
 
 
 def build_answer_guardrails(
     query_intent: str,
     page_status: str,
+    page_type: str,
     review_ids: list[str],
     matched_claims: list[dict],
     matched_chunks: list[dict],
@@ -7435,6 +10332,7 @@ def build_answer_guardrails(
 
     can_answer_from_summary_only = (
         query_intent in {"lookup", "definition", "overview"}
+        and page_type not in {"guide", "example"}
         and page_status not in {"needs_review", "disputed", "outdated"}
         and not review_ids
     )
@@ -7453,7 +10351,7 @@ def build_answer_guardrails(
     }
 
 
-def build_answer_handoff(query_intent: str, answer_guardrails: dict) -> dict:
+def build_answer_handoff(query_intent: str, answer_guardrails: dict, page_type: str) -> dict:
     if query_intent in {"timeline", "evidence"}:
         answer_mode = "sources_first"
         recommended_read_order = [
@@ -7462,6 +10360,30 @@ def build_answer_handoff(query_intent: str, answer_guardrails: dict) -> dict:
             "evidence_context.matched_chunks",
             "evidence_context.timeline_sources" if query_intent == "timeline" else "evidence_context.source_trail",
             "page_context.summary",
+        ]
+    elif page_type == "guide":
+        answer_mode = "chunks_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "page_context.summary",
+            "evidence_context.matched_chunks",
+            "evidence_context.matched_claims",
+        ]
+    elif page_type == "example":
+        answer_mode = "claims_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "page_context.summary",
+            "evidence_context.matched_claims",
+            "evidence_context.matched_chunks",
+        ]
+    elif page_type == "topic" and query_intent in {"lookup", "definition", "overview"}:
+        answer_mode = "summary_first"
+        recommended_read_order = [
+            "retrieval_context.focus",
+            "page_context.summary",
+            "evidence_context.matched_claims",
+            "evidence_context.matched_chunks",
         ]
     elif query_intent == "how_to":
         answer_mode = "chunks_first"
@@ -7604,7 +10526,8 @@ def build_result_reading_pack(
     reading_depth = result.get("reading_depth", "standard")
     source_trail = build_source_trail(trimmed_claims, trimmed_chunks) if reading_depth == "deep" else []
     timeline_sources = build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else []
-    focus = query_reading_focus(query_intent)
+    page_type = result.get("type", "")
+    focus = query_reading_focus(query_intent, page_type=page_type)
     ranking_reasons = []
     if result.get("exact_match_reasons"):
         ranking_reasons.extend(result["exact_match_reasons"])
@@ -7614,6 +10537,7 @@ def build_result_reading_pack(
     answer_guardrails = build_answer_guardrails(
         query_intent=query_intent,
         page_status=result.get("status", ""),
+        page_type=page_type,
         review_ids=result.get("review_ids", []),
         matched_claims=trimmed_claims,
         matched_chunks=trimmed_chunks,
@@ -7623,6 +10547,7 @@ def build_result_reading_pack(
     answer_handoff = build_answer_handoff(
         query_intent=query_intent,
         answer_guardrails=answer_guardrails,
+        page_type=page_type,
     )
 
     return {
@@ -7648,6 +10573,8 @@ def build_result_reading_pack(
             "title": result.get("title", ""),
             "page_path": result.get("page_path", ""),
             "type": result.get("type", ""),
+            "page_type_profile": page_type_profile(result.get("type", "")),
+            "compat_mode": page_type_compat_mode(result.get("type", "")),
             "status": result.get("status", ""),
             "summary": result.get("summary", ""),
             "canonical_id": result.get("canonical_id"),
@@ -7685,6 +10612,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         "alternatives": [],
         "agent_brief": {
             "answer_mode": "no_match",
+            "page_type_profile": "unknown",
             "recommended_read_order": [],
             "required_evidence_paths": [],
             "should_cite_sources": False,
@@ -7694,6 +10622,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         },
         "answer_context": {
             "page_summary": "",
+            "answer_shape": "unknown",
             "key_claims": [],
             "key_chunks": [],
             "key_sources": [],
@@ -7722,6 +10651,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
     if weak_match:
         base_payload["agent_brief"] = {
             "answer_mode": "no_match",
+            "page_type_profile": "unknown",
             "recommended_read_order": [],
             "required_evidence_paths": [],
             "should_cite_sources": False,
@@ -7739,6 +10669,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "summary": top_result.get("summary", ""),
             "score": top_result.get("score"),
             "focus": reading_pack.get("focus"),
+            "page_type_profile": "unknown",
             "ready_state": "answer_with_uncertainty",
         }
         base_payload["alternatives"] = [
@@ -7757,6 +10688,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "Top query result is too weak to serve as a safe answer anchor. "
             "Broaden or rephrase the query before attempting an answer."
         )
+        base_payload["answer_context"]["answer_shape"] = "unknown"
         return base_payload
 
     key_claims = [
@@ -7795,6 +10727,20 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             for source_ref in claim.get("source_refs", [])
         ][:5]
     )
+    page_type = str(top_result.get("type", "")).strip().lower()
+    page_profile = page_type_profile(page_type)
+    compat_mode = page_type_compat_mode(page_type)
+    answer_shape = (
+        "step_by_step" if answer_handoff.get("answer_mode") == "chunks_first"
+        else "worked_example" if page_profile == "example"
+        else "topic_orientation" if page_profile == "topic"
+        else "reference_sheet" if page_profile == "reference"
+        else "timeline_evidence" if page_profile == "timeline"
+        else "evidence_trace" if answer_handoff.get("answer_mode") == "sources_first"
+        else "legacy_evidence_summary" if page_profile == "legacy_concept_evidence"
+        else "concept_summary" if page_profile == "concept"
+        else "generic_summary"
+    )
 
     if answer_handoff.get("fallback_action") == "answer_with_uncertainty":
         ready_state = "answer_with_uncertainty"
@@ -7825,6 +10771,8 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "summary": top_result.get("summary", ""),
             "score": top_result.get("score"),
             "focus": reading_pack.get("focus"),
+            "page_type_profile": page_profile,
+            "compat_mode": compat_mode,
             "ready_state": ready_state,
         },
         "alternatives": [
@@ -7841,6 +10789,8 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         ],
         "agent_brief": {
             "answer_mode": answer_handoff.get("answer_mode"),
+            "page_type_profile": page_profile,
+            "compat_mode": compat_mode,
             "recommended_read_order": answer_handoff.get("recommended_read_order", []),
             "required_evidence_paths": answer_handoff.get("required_evidence_paths", []),
             "should_cite_sources": answer_handoff.get("should_cite_sources", False),
@@ -7850,6 +10800,7 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         },
         "answer_context": {
             "page_summary": reading_pack.get("page_summary", top_result.get("summary", "")),
+            "answer_shape": answer_shape,
             "key_claims": key_claims,
             "key_chunks": key_chunks,
             "key_sources": key_sources,
@@ -7881,6 +10832,9 @@ def render_answer_ready_message(answer_ready_payload: dict) -> str:
         f"  path: {selected_result.get('page_path')}",
         f"  ready_state: {selected_result.get('ready_state')}",
         f"  answer_mode: {agent_brief.get('answer_mode')}",
+        f"  page_type_profile: {agent_brief.get('page_type_profile')}",
+        f"  compat_mode: {agent_brief.get('compat_mode')}",
+        f"  answer_shape: {answer_context.get('answer_shape')}",
         f"  fallback_action: {agent_brief.get('fallback_action')}",
         f"  read_order: {' -> '.join(agent_brief.get('recommended_read_order', []))}",
     ])
@@ -7943,6 +10897,9 @@ def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
         "",
         "## Handoff",
         f"- answer_mode: {agent_brief.get('answer_mode', '')}",
+        f"- page_type_profile: {agent_brief.get('page_type_profile', '')}",
+        f"- compat_mode: {agent_brief.get('compat_mode', '')}",
+        f"- answer_shape: {answer_context.get('answer_shape', '')}",
         f"- fallback_action: {agent_brief.get('fallback_action', '')}",
         f"- should_cite_sources: {agent_brief.get('should_cite_sources', False)}",
         f"- should_surface_uncertainty: {agent_brief.get('should_surface_uncertainty', False)}",
@@ -8015,6 +10972,14 @@ def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
         "",
         "## Answer Instruction",
         "Write a concise answer for the user grounded only in the handoff above.",
+        "If `page_type_profile` is `guide` or `answer_shape` is `step_by_step`, prefer a procedural step-by-step answer.",
+        "If `page_type_profile` is `example` or `answer_shape` is `worked_example`, prefer explaining through a concrete example.",
+        "If `page_type_profile` is `topic` or `answer_shape` is `topic_orientation`, first orient the user to the topic, then cite the most relevant claims.",
+        "If `page_type_profile` is `reference` or `answer_shape` is `reference_sheet`, prefer a structured reference-style answer with concise keyed items.",
+        "If `page_type_profile` is `timeline` or `answer_shape` is `timeline_evidence`, present events in chronological order and foreground dated evidence.",
+        "If `answer_shape` is `evidence_trace`, foreground sources, chunks, and provenance instead of giving a bare summary.",
+        "If `answer_shape` is `concept_summary`, prefer a concise definition-first explanation.",
+        "If `compat_mode` is `legacy`, treat the page as a compatibility evidence view rather than the preferred long-term presentation layer.",
         "If `should_cite_sources` is true, mention the supporting source paths or sections in the answer.",
         "If `should_surface_uncertainty` is true, include a short uncertainty note.",
         "If `fallback_action` is not `answer_from_summary_and_claims`, obey that fallback instead of overclaiming.",
@@ -8212,6 +11177,7 @@ def build_query_payload(
 def command_query(args: argparse.Namespace) -> CommandResult:
     # query 的 V1 目标是“先给出靠谱候选页 + 可解释排序原因”，而不是直接替用户写答案。
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
     if reading_depth not in QUERY_READING_DEPTH_LIMITS:
         reading_depth = "standard"
@@ -8402,6 +11368,7 @@ def command_query(args: argparse.Namespace) -> CommandResult:
 
 def command_answer_query(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
     if reading_depth not in QUERY_READING_DEPTH_LIMITS:
         reading_depth = "standard"
@@ -8505,7 +11472,12 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
     items = []
     for review_record in sorted(
         review_records,
-        key=lambda item: (item.get("created_at", ""), review_display_id(item)),
+        key=lambda item: (
+            1 if item.get("lifecycle_status") == "active" else 0,
+            1 if item.get("status") == "open" else 0,
+            item.get("created_at", ""),
+            review_display_id(item),
+        ),
         reverse=True,
     ):
         candidate_claims = []
@@ -8524,7 +11496,8 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
             })
 
         items.append({
-            "review_id": review_record["review_id"],
+            "review_id": review_display_id(review_record),
+            "state_review_id": review_record["review_id"],
             "display_id": review_display_id(review_record),
             "kind": review_record.get("kind"),
             "status": review_record.get("status"),
@@ -8553,6 +11526,7 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
 
 def command_review_list(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     payload = build_review_list_payload(target, status_filter=args.status)
     if args.json:
         return CommandResult(
@@ -8901,6 +11875,12 @@ def build_review_auto_escalation_entry(
             if alias_value
             else "有一个别名同时指向多个页面，当前还不能安全地自动决定归属。"
         )
+    elif review_record.get("kind") == "migration_followup":
+        followup_meta = review_record.get("migration_followup", {})
+        issue_summary = (
+            f"迁移后续项 `{followup_meta.get('canonical_id')}` 仍待处理，"
+            f"当前队列动作是 `{followup_meta.get('queue_action')}`。"
+        )
     elif review_record.get("kind") == "claim_duplicate":
         issue_summary = "这组 claim 可能在说同一件事，但当前仍需要人确认是否真的该合并。"
     else:
@@ -8910,10 +11890,12 @@ def build_review_auto_escalation_entry(
         why_human_needed = "多个页面都可能拥有这个 alias，自动分配存在误伤风险。"
     elif plan.get("reason") == "duplicate_review_needs_human_merge_choice":
         why_human_needed = "候选 claim 不止两条，或主次关系不够明确，自动合并风险偏高。"
+    elif plan.get("reason") == "migration_followup_requires_explicit_followup_workflow":
+        why_human_needed = "这是迁移后续动作，需要明确决定是否创建 current successor 或继续排队，当前不应被普通 review 自动规则误处理。"
     else:
         why_human_needed = "当前证据还不足以支持保守自动裁决。"
 
-    return {
+    entry = {
         "review_id": review_record["review_id"],
         "display_id": review_display_id(review_record),
         "kind": review_record.get("kind"),
@@ -8928,6 +11910,13 @@ def build_review_auto_escalation_entry(
             "如果你已经知道怎么处理，可以直接告诉我保留、合并、归档，或先手工修改再继续。"
         ),
     }
+    if review_record.get("kind") == "migration_followup":
+        entry["migration_followup"] = review_record.get("migration_followup", {})
+        entry["suggested_user_prompt"] = (
+            f"请帮我判断迁移后续项 {entry['migration_followup'].get('canonical_id')}。"
+            "如果你已经补好 current successor，可以继续推进；否则可以保留待办。"
+        )
+    return entry
 
 
 def build_review_auto_agent_handoff(
@@ -9233,6 +12222,10 @@ def propose_review_auto_action(
         )
         return agent_plan or plan
 
+    if kind == "migration_followup":
+        plan["reason"] = "migration_followup_requires_explicit_followup_workflow"
+        return plan
+
     agent_plan = maybe_get_agent_assisted_review_plan(
         target=target,
         review_record=review_record,
@@ -9248,6 +12241,7 @@ def propose_review_auto_action(
 
 def command_review_auto(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     claims_path = target / "state" / "claims.jsonl"
     reviews_path = target / "state" / "reviews.jsonl"
     config = load_workspace_config(target)
@@ -10224,6 +13218,7 @@ def apply_review_action(
 
 def command_review_apply(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     claims_path = target / "state" / "claims.jsonl"
     reviews_path = target / "state" / "reviews.jsonl"
 
@@ -10249,6 +13244,16 @@ def command_review_apply(args: argparse.Namespace) -> CommandResult:
         )
 
     review_record = live_reviews_by_id.get(args.review_id) or historical_reviews_by_id.get(args.review_id)
+    if review_record is None:
+        matched_live_review = next(
+            (
+                record for record in live_reviews_by_id.values()
+                if review_display_id(record) == args.review_id
+            ),
+            None,
+        )
+        if matched_live_review is not None:
+            review_record = matched_live_review
     if review_record is None:
         raise KeyError(f"Unknown review_id: {args.review_id}")
     if review_record["review_id"] not in live_reviews_by_id:
@@ -10387,6 +13392,8 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "normalized",
         "chunks",
         "claims",
+        "semantic",
+        "semantic/batches",
         "wiki",
         "indexes",
         "state",
@@ -10425,6 +13432,11 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         target_dir / "state" / "claims.jsonl": [],
         target_dir / "state" / "reviews.jsonl": [],
         target_dir / "state" / "pages.jsonl": [],
+        target_dir / SEMANTIC_DECISIONS_REL_PATH: [],
+        target_dir / MIGRATION_DECISIONS_REL_PATH: [],
+        target_dir / MIGRATION_FOLLOWUPS_REL_PATH: [],
+        target_dir / MIGRATION_RUNS_REL_PATH: [],
+        target_dir / SCHEMA_CONFIRMATIONS_REL_PATH: [],
         target_dir / SEARCH_PAGES_INDEX_REL_PATH: [],
     }
     for path, records in metadata_files.items():
@@ -10451,6 +13463,8 @@ def command_init(args: argparse.Namespace) -> CommandResult:
                     "normalized",
                     "chunks",
                     "claims",
+                    "semantic",
+                    "semantic/batches",
                     "wiki",
                     "indexes",
                     "state",
@@ -10485,8 +13499,12 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     # ingest 是第一条真正处理用户资料的流水线命令。
     # 它现在包含五步：来源登记、标准化、切块、Claim 草稿抽取、Wiki 页面生成。
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     config = load_workspace_config(target)
     post_ingest_config = load_post_ingest_review_auto_config(config)
+    document_analysis_config = load_semantic_task_config(config, "document_analysis")
+    claim_role_config = load_semantic_task_config(config, "claim_role")
+    page_intent_config = load_semantic_task_config(config, "page_intent")
     readable_concept_render_config = load_readable_concept_render_config(config)
     overview_render_config = load_page_render_config(config, "overview")
     raw_dir = resolve_workspace_path(target, config["paths"]["raw"])
@@ -10745,8 +13763,22 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             },
         )
 
+    normalized_records = load_jsonl(normalized_path)
+    if normalized_records and document_analysis_config.enabled:
+        run_semantic_batch_task(
+            target=target,
+            task_name="document_analysis",
+            dry_run=False,
+        )
+        normalized_records = apply_document_analysis_decisions_to_normalized_records(
+            target=target,
+            normalized_records=normalized_records,
+            task_config=document_analysis_config,
+        )
+        existing_normalized = {record["source_id"]: record for record in normalized_records}
+
     # 标准化完成后，继续把合格文档切成 chunk，作为 claim / query 的基础证据单元。
-    for normalized_record in load_jsonl(normalized_path):
+    for normalized_record in normalized_records:
         if normalized_record["source_id"] in existing_chunked:
             continue
 
@@ -10997,6 +14029,31 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         for claim_record in claim_state_records:
             write_claim_file(target, claim_record)
 
+    current_claim_records = [ensure_claim_lifecycle_defaults(record) for record in load_jsonl(claims_path)]
+    if current_claim_records and claim_role_config.enabled:
+        run_semantic_batch_task(
+            target=target,
+            task_name="claim_role",
+            dry_run=False,
+        )
+        current_claim_records = apply_claim_role_decisions_to_claim_records(
+            target=target,
+            claim_records=current_claim_records,
+            task_config=claim_role_config,
+        )
+        live_existing_claims = filter_live_claim_records(current_claim_records)
+        historical_existing_claims = [
+            record for record in current_claim_records
+            if not is_live_claim_record(record)
+        ]
+        claims_by_id = {record["claim_id"]: record for record in live_existing_claims}
+        historical_claims_by_id = {record["claim_id"]: record for record in historical_existing_claims}
+        claims_by_normalized_text = {record["normalized_text"]: record for record in live_existing_claims}
+        claims_by_similarity_bucket = {}
+        for record in live_existing_claims:
+            claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
+        claim_similarity_index = rebuild_claim_similarity_index(live_existing_claims)
+
     if reingested_source_ids or purged_review_ids:
         review_state_records = build_ordered_review_state_records(
             live_reviews_by_id=existing_reviews,
@@ -11019,6 +14076,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
 
     if can_skip_page_regeneration:
         existing_pages = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)] if pages_path.exists() else []
+        existing_pages = apply_page_alias_overrides_to_records(target, existing_pages)
         live_existing_pages = filter_live_page_records(existing_pages)
         page_records_by_id = {record["page_id"]: record for record in existing_pages}
         all_chunk_records = load_jsonl(chunks_path)
@@ -11059,6 +14117,8 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     post_ingest_review_auto_payload = None
 
     if can_skip_page_regeneration:
+        write_jsonl(pages_path, existing_pages)
+        alias_index = write_alias_index(target, existing_pages)
         previous_search_index_records = load_search_pages_index(target)
         search_index = {
             "index_path": str(SEARCH_PAGES_INDEX_REL_PATH),
@@ -11081,6 +14141,13 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             "claimed_sources": claimed_sources,
             "generated_pages": generated_pages,
             "search_index": search_index,
+            "alias_index": {
+                "index_path": str(ALIAS_INDEX_REL_PATH),
+                "canonical_count": len(alias_index.get("canonical_map", {})),
+                "alias_key_count": len(alias_index.get("alias_map", {})),
+                "conflict_count": len(alias_index.get("conflicts", [])),
+                "index_version": alias_index.get("index_version"),
+            },
             "review_items": review_items,
             "error_items": error_items,
             "summary": {
@@ -11128,6 +14195,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
 
     # 先生成来源摘要页，形成 source -> claim -> page 的第一层闭环。
     page_records = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)] if pages_path.exists() else []
+    page_records = apply_page_alias_overrides_to_records(target, page_records)
     page_records_by_id = {record["page_id"]: record for record in page_records}
     all_claim_records = build_ordered_claim_state_records(
         live_claims_by_id=claims_by_id,
@@ -11259,6 +14327,17 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         bucket_key = build_concept_group_key(claim_record)
         concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
     concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
+    if concept_claim_groups and page_intent_config.enabled:
+        run_semantic_batch_task(
+            target=target,
+            task_name="page_intent",
+            dry_run=False,
+        )
+    page_intents_by_bucket = apply_page_intent_decisions_to_claim_groups(
+        target=target,
+        concept_claim_groups=concept_claim_groups,
+        task_config=page_intent_config,
+    )
 
     changed_bucket_keys = set()
     for claim_record in all_claim_records:
@@ -11288,7 +14367,10 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
         if bucket_key not in changed_bucket_keys:
             continue
-        if should_generate_concept_page(grouped_claims):
+        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        if page_intent == "reject":
+            continue
+        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
             group_topic_label = choose_group_topic_label(grouped_claims)
             canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
             concept_page_id = build_concept_page_id(bucket_key)
@@ -11341,8 +14423,48 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
                         )
                     )
 
+        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
+            page_id = page_intent_page_id(bucket_key, page_intent)
+            page_title_source = choose_group_topic_label(grouped_claims) or choose_canonical_claim(grouped_claims).get("text", "")
+            page_rel_path = page_intent_page_path(page_intent, page_id, page_title_source)
+            page_text, page_record = build_intent_routed_page(
+                target=target,
+                config=config,
+                bucket_key=bucket_key,
+                page_intent=page_intent,
+                page_rel_path=page_rel_path,
+                claim_records=grouped_claims,
+                page_records_by_id=page_records_by_id,
+                review_records=review_records,
+            )
+            page_record = apply_page_alias_overrides(target, page_record)
+            page_record["page_path"] = str(page_rel_path)
+            stored_page_record, page_changed = upsert_wiki_page(
+                target=target,
+                page_records_by_id=page_records_by_id,
+                page_record=page_record,
+                page_text=page_text,
+            )
+            if page_changed:
+                generated_pages.append(stored_page_record)
+                dirty_claim_ids.update(
+                    link_claims_to_page_in_memory(
+                        grouped_claims,
+                        stored_page_record["page_id"],
+                        claims_by_id,
+                    )
+                )
+                dirty_review_ids.update(
+                    link_reviews_to_page_in_memory(
+                        review_records=review_records,
+                        page_id=stored_page_record["page_id"],
+                        claim_ids=stored_page_record["claim_ids"],
+                        reviews_by_id=existing_reviews,
+                    )
+                )
+
         stable_claims = filter_live_stable_claim_records(grouped_claims)
-        if stable_claims:
+        if page_intent == "concept" and stable_claims:
             readable_page_id = build_readable_concept_page_id(bucket_key)
             readable_page_rel_path = readable_concept_page_path(readable_page_id)
             readable_page_text, readable_page_record = build_readable_concept_page(
@@ -11430,9 +14552,12 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         if claims_by_source_id.get(source_id) or chunks_by_source_id.get(source_id)
     }
     for bucket_key, grouped_claims in concept_claim_groups.items():
-        if should_generate_concept_page(grouped_claims):
+        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
             desired_auto_page_ids.add(build_concept_page_id(bucket_key))
-        if filter_live_stable_claim_records(grouped_claims):
+        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
+            desired_auto_page_ids.add(page_intent_page_id(bucket_key, page_intent))
+        if page_intent == "concept" and filter_live_stable_claim_records(grouped_claims):
             desired_auto_page_ids.add(build_readable_concept_page_id(bucket_key))
     if should_generate_workspace_overview_page(overview_concept_pages):
         desired_auto_page_ids.add(build_workspace_overview_page_id())
@@ -11593,7 +14718,16 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             "templates/project/config/project.yml.tmpl",
         ]
     else:
+        schema_guard_payload = workspace_schema_guard_payload(target)
         add_check("workspace_target", True, f"Linting initialized workspace: {target}", severity="info")
+        add_check(
+            name="workspace_schema_supported",
+            ok=schema_guard_payload.get("status") == "supported",
+            details=(
+                f"workspace.schema_version={schema_guard_payload.get('workspace_schema_version')} "
+                f"(expected={schema_guard_payload.get('expected_schema_version')})"
+            ),
+        )
         required_paths = [
             "wiki/index.md",
             "wiki/log.md",
@@ -11907,6 +15041,25 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 details=concept_quality_preview,
                 severity="warning",
             )
+            semantic_consistency_issues = {
+                record["page_id"]: page_semantic_consistency_issues(record, claim_records_by_id)
+                for record in live_page_records
+            }
+            semantic_consistency_issues = {
+                page_id: issues
+                for page_id, issues in semantic_consistency_issues.items()
+                if issues
+            }
+            semantic_consistency_preview = ", ".join(
+                f"{page_id}:{'/'.join(issues[:2])}"
+                for page_id, issues in list(semantic_consistency_issues.items())[:8]
+            ) or "All semantic page types remain consistent with their linked claim roles."
+            add_check(
+                name="page_semantic_consistency",
+                ok=len(semantic_consistency_issues) == 0,
+                details=semantic_consistency_preview,
+                severity="warning",
+            )
 
             alias_index = load_alias_index(target) if alias_index_path(target).exists() else {}
             alias_conflicts = alias_index.get("conflicts", []) if alias_index else []
@@ -11932,6 +15085,40 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 name="search_index_covers_live_pages",
                 ok=expected_live_page_ids.issubset(indexed_page_ids),
                 details="Search index should contain every live page.",
+            )
+            compat_payload = build_compat_report_payload(target)
+            migration_candidates = compat_payload.get("migration_candidates", [])
+            candidate_contracts = [
+                migration_action_contract(candidate.get("suggested_action"))
+                for candidate in migration_candidates
+            ]
+            lint_name = next(
+                (
+                    contract.get("lint_check_name")
+                    for contract in candidate_contracts
+                    if contract.get("lint_check_name")
+                ),
+                "legacy_migration_candidates_absent",
+            )
+            lint_severity = next(
+                (
+                    contract.get("lint_severity")
+                    for contract in candidate_contracts
+                    if contract.get("lint_severity")
+                ),
+                "warning",
+            )
+            migration_preview = ", ".join(
+                (
+                    f"{candidate['canonical_id']}:{candidate.get('suggested_action')}"
+                )
+                for candidate in migration_candidates[:8]
+            ) or "No legacy/current mixed families require migration planning."
+            add_check(
+                name=lint_name,
+                ok=len(migration_candidates) == 0,
+                details=migration_preview,
+                severity=lint_severity,
             )
 
     if target != root:
@@ -11987,6 +15174,7 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
 
 def command_render_page(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     render_target = args.render_target
     render_target_spec = PAGE_RENDER_TARGETS.get(render_target)
     if render_target_spec is None:
@@ -12052,8 +15240,639 @@ def command_render_readable_concept(args: argparse.Namespace) -> CommandResult:
     return command_render_page(delegated_args)
 
 
+def command_semantic_batch(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
+    payload = run_semantic_batch_task(
+        target=target,
+        task_name=args.task,
+        dry_run=bool(args.dry_run),
+    )
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            f"Semantic batch completed: {args.task}",
+            target_dir=target,
+            extra_lines=[
+                (
+                    "Summary: "
+                    f"items={payload['summary']['item_count']}, "
+                    f"cache_hits={payload['summary']['cache_hits']}, "
+                    f"pending_batches={payload['summary']['pending_batch_count']}, "
+                    f"written_decisions={payload['summary']['written_decision_count']}, "
+                    f"dry_run={'yes' if payload['summary']['dry_run'] else 'no'}"
+                ),
+            ],
+        ),
+    )
+
+
+def command_compat_report(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    target_schema_version = normalize_optional_cli_string(getattr(args, "to_schema_version", None))
+    payload = build_compat_report_payload(target, target_schema_version=target_schema_version)
+    if args.json:
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Compatibility report completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Target schema version: {payload.get('target_schema_version')}",
+                    (
+                        "Summary: "
+                        f"schema_candidates={payload['summary']['schema_migration_candidate_count']}, "
+                        f"schema_report_only={payload['summary'].get('schema_report_only_candidate_count', 0)}, "
+                        f"legacy_pages={payload['summary']['legacy_page_count']}, "
+                        f"migration_candidates={payload['summary']['migration_candidate_count']}, "
+                        f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                        f"current_only_families={payload['summary']['current_only_family_count']}"
+                    ),
+                ],
+            ),
+        )
+
+    lines = [
+        render_workspace_summary_message(
+            "Compatibility report completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Target schema version: {payload.get('target_schema_version')}",
+                (
+                    "Summary: "
+                    f"schema_candidates={payload['summary']['schema_migration_candidate_count']}, "
+                    f"schema_report_only={payload['summary'].get('schema_report_only_candidate_count', 0)}, "
+                    f"legacy_pages={payload['summary']['legacy_page_count']}, "
+                    f"migration_candidates={payload['summary']['migration_candidate_count']}, "
+                    f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                    f"auto_applicable={payload['summary']['auto_applicable_candidate_count']}, "
+                    f"report_only={payload['summary']['report_only_candidate_count']}, "
+                    f"current_only_families={payload['summary']['current_only_family_count']}"
+                ),
+            ],
+        ),
+        "",
+        "Action catalog:",
+    ]
+    if payload["action_catalog"]:
+        for item in payload["action_catalog"]:
+            lines.append(
+                f"- {item['action']}: decision={item['planning_decision']}, "
+                f"execution={item['execution_mode']}, class={item['action_class']}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Schema migration candidates:",
+    ])
+    schema_candidates = [
+        candidate for candidate in payload["migration_candidates"]
+        if candidate.get("migration_scope") == "workspace_schema"
+    ]
+    compatibility_candidates = [
+        candidate for candidate in payload["migration_candidates"]
+        if candidate.get("migration_scope") != "workspace_schema"
+    ]
+    if schema_candidates:
+        for candidate in schema_candidates:
+            lines.append(
+                f"- {candidate['canonical_id']}: from={candidate.get('from_schema_version') or 'unknown'} -> "
+                f"to={candidate.get('to_schema_version') or 'unknown'} "
+                f"(steps={candidate.get('path_length', 0)}, {candidate['suggested_action']}, decision={candidate['planning_decision']})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Compatibility cleanup candidates:",
+    ])
+    if compatibility_candidates:
+        for candidate in compatibility_candidates:
+            lines.append(
+                f"- {candidate['canonical_id']}: legacy={','.join(candidate['legacy_types'])} -> "
+                f"current={','.join(candidate['current_types']) or 'none'} "
+                f"({candidate['suggested_action']}, decision={candidate['planning_decision']})"
+            )
+    else:
+        lines.append("- none")
+    return CommandResult(payload=payload, message="\n".join(lines))
+
+
+def command_migrate(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    target_schema_version = normalize_optional_cli_string(getattr(args, "to_schema_version", None))
+    if getattr(args, "rollback", False):
+        payload = rollback_migrate_plan(target, getattr(args, "backup_dir", None))
+        if args.json:
+            return CommandResult(
+                payload=payload,
+                message=render_workspace_summary_message(
+                    "Migration rollback completed.",
+                    target_dir=target,
+                    extra_lines=[
+                        f"Backup: {payload.get('backup_dir', 'none')}",
+                        (
+                            "Summary: "
+                            f"restored_entries={payload.get('summary', {}).get('restored_entry_count', 0)}"
+                        ),
+                    ],
+                ),
+            )
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Migration rollback completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Backup: {payload.get('backup_dir', 'none')}",
+                    (
+                        "Summary: "
+                        f"restored_entries={payload.get('summary', {}).get('restored_entry_count', 0)}"
+                    ),
+                ],
+            ),
+        )
+    if getattr(args, "apply", False):
+        payload = apply_migrate_plan(target, target_schema_version=target_schema_version)
+        if args.json:
+            return CommandResult(
+                payload=payload,
+                message=render_workspace_summary_message(
+                    "Migration apply completed.",
+                    target_dir=target,
+                    extra_lines=[
+                    (
+                        "Summary: "
+                        f"schema_planned_actions={payload['summary'].get('schema_planned_action_count', 0)}, "
+                        f"schema_manual_followups={payload['summary'].get('schema_manual_followup_count', 0)}, "
+                        f"applied_actions={payload['summary']['applied_action_count']}, "
+                        f"compatibility_removed_legacy_pages={payload['summary']['removed_legacy_page_count']}, "
+                        f"removed_legacy_pages={payload['summary']['removed_legacy_page_count']}, "
+                        f"remaining_candidates={payload['summary']['migration_candidate_count']}, "
+                        f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                        f"legacy_pages={payload['summary']['legacy_page_count']}"
+                    ),
+                    f"Backup: {payload.get('backup', {}).get('backup_dir', 'none')}",
+                    f"Migration report: {payload.get('migration_report', {}).get('report_md_path', 'none')}",
+                ],
+            ),
+        )
+
+        lines = [
+            render_workspace_summary_message(
+                "Migration apply completed.",
+                target_dir=target,
+                extra_lines=[
+                    (
+                        "Summary: "
+                        f"schema_planned_actions={payload['summary'].get('schema_planned_action_count', 0)}, "
+                        f"schema_manual_followups={payload['summary'].get('schema_manual_followup_count', 0)}, "
+                        f"applied_actions={payload['summary']['applied_action_count']}, "
+                        f"compatibility_removed_legacy_pages={payload['summary']['removed_legacy_page_count']}, "
+                        f"removed_legacy_pages={payload['summary']['removed_legacy_page_count']}, "
+                        f"remaining_candidates={payload['summary']['migration_candidate_count']}, "
+                        f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                        f"legacy_pages={payload['summary']['legacy_page_count']}"
+                    ),
+                    f"Backup: {payload.get('backup', {}).get('backup_dir', 'none')}",
+                    f"Migration report: {payload.get('migration_report', {}).get('report_md_path', 'none')}",
+                ],
+            ),
+            "",
+            "Action catalog:",
+        ]
+        if payload["action_catalog"]:
+            for item in payload["action_catalog"]:
+                lines.append(
+                    f"- {item['action']}: decision={item['planning_decision']}, "
+                    f"execution={item['execution_mode']}, class={item['action_class']}"
+                )
+        else:
+            lines.append("- none")
+        lines.extend([
+            "",
+            "Schema migration actions:",
+        ])
+        schema_actions = [
+            action for action in payload["applied_actions"]
+            if action.get("migration_scope") == "workspace_schema"
+        ]
+        compatibility_actions = [
+            action for action in payload["applied_actions"]
+            if action.get("migration_scope") != "workspace_schema"
+        ]
+        if schema_actions:
+            for action in schema_actions:
+                lines.append(
+                    f"- {action['canonical_id']}: {action['action']} "
+                    f"(status={action.get('status')}, risk={action.get('risk_level') or 'unknown'})"
+                )
+        else:
+            lines.append("- none")
+        lines.extend([
+            "",
+            "Compatibility cleanup actions:",
+        ])
+        if compatibility_actions:
+            for action in compatibility_actions:
+                lines.append(
+                    f"- {action['canonical_id']}: removed legacy pages "
+                    f"{','.join(action['removed_legacy_page_ids'])} "
+                    f"(current={','.join(action['current_types'])})"
+                )
+        else:
+            lines.append("- none")
+        return CommandResult(payload=payload, message="\n".join(lines))
+
+    payload = build_migrate_plan_payload(target, target_schema_version=target_schema_version)
+    payload["migration_report"] = write_migrate_plan_report(target, payload, mode="plan")
+    append_migration_run_record(
+        target,
+        build_migration_run_record(
+            target=target,
+            mode="plan",
+            payload=payload,
+            status="planned",
+            report=payload.get("migration_report"),
+        ),
+    )
+    handoff_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
+    if handoff_format != "summary":
+        handoff_payload = build_migrate_batch_handoff_payload(payload, max(coerce_int(getattr(args, "batch_size", 8), 8), 1))
+        if handoff_format == "prompt":
+            handoff_payload["prompt_text"] = render_migrate_batch_prompt(handoff_payload)
+        elif handoff_format == "messages":
+            handoff_payload["messages"] = build_migrate_batch_messages(handoff_payload)
+        elif handoff_format == "chatml":
+            handoff_payload["messages"] = build_migrate_batch_messages(handoff_payload)
+            handoff_payload["chatml_text"] = render_migrate_batch_chatml(handoff_payload)
+        if args.json:
+            return CommandResult(
+                payload=handoff_payload,
+                message=render_workspace_summary_message(
+                    "Migration handoff completed.",
+                    target_dir=target,
+                    extra_lines=[
+                        f"Target schema version: {handoff_payload.get('target_schema_version')}",
+                        f"Format: {handoff_format}",
+                        f"Batch size: {handoff_payload.get('batching', {}).get('batch_size')}",
+                        (
+                            "Summary: "
+                            f"planned_actions={handoff_payload['summary']['planned_action_count']}, "
+                            f"manual_followups={handoff_payload['summary']['manual_followup_count']}, "
+                            f"migration_candidates={handoff_payload['summary']['migration_candidate_count']}, "
+                            f"batch_count={handoff_payload.get('batching', {}).get('batch_count', 0)}"
+                        ),
+                    ],
+                ),
+            )
+        if handoff_format == "prompt":
+            return CommandResult(payload=handoff_payload, message=handoff_payload["prompt_text"])
+        if handoff_format == "messages":
+            return CommandResult(
+                payload=handoff_payload,
+                message=json.dumps(handoff_payload["messages"], ensure_ascii=False, indent=2),
+            )
+        if handoff_format == "chatml":
+            return CommandResult(payload=handoff_payload, message=handoff_payload["chatml_text"])
+        return CommandResult(payload=handoff_payload, message=render_migrate_handoff_summary(handoff_payload))
+    if args.json:
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Migration plan completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Target schema version: {payload.get('target_schema_version')}",
+                    (
+                        "Summary: "
+                        f"schema_planned_actions={payload['summary'].get('schema_planned_action_count', 0)}, "
+                        f"schema_manual_followups={payload['summary'].get('schema_manual_followup_count', 0)}, "
+                        f"planned_actions={payload['summary']['planned_action_count']}, "
+                        f"manual_followups={payload['summary']['manual_followup_count']}, "
+                        f"migration_candidates={payload['summary']['migration_candidate_count']}, "
+                        f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                        f"legacy_pages={payload['summary']['legacy_page_count']}"
+                    ),
+                    f"Migration report: {payload.get('migration_report', {}).get('report_md_path', 'none')}",
+                ],
+            ),
+        )
+
+    lines = [
+        render_workspace_summary_message(
+            "Migration plan completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Target schema version: {payload.get('target_schema_version')}",
+                (
+                    "Summary: "
+                    f"schema_planned_actions={payload['summary'].get('schema_planned_action_count', 0)}, "
+                    f"schema_manual_followups={payload['summary'].get('schema_manual_followup_count', 0)}, "
+                    f"planned_actions={payload['summary']['planned_action_count']}, "
+                    f"manual_followups={payload['summary']['manual_followup_count']}, "
+                    f"migration_candidates={payload['summary']['migration_candidate_count']}, "
+                    f"catalog_actions={len(payload.get('action_catalog', []))}, "
+                    f"legacy_pages={payload['summary']['legacy_page_count']}"
+                ),
+                f"Migration report: {payload.get('migration_report', {}).get('report_md_path', 'none')}",
+            ],
+        ),
+        "",
+        "Action catalog:",
+    ]
+    if payload["action_catalog"]:
+        for item in payload["action_catalog"]:
+            lines.append(
+                f"- {item['action']}: decision={item['planning_decision']}, "
+                f"execution={item['execution_mode']}, class={item['action_class']}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Schema migration actions:",
+    ])
+    schema_actions = payload.get("schema_migration", {}).get("planned_actions", [])
+    schema_followups = payload.get("schema_migration", {}).get("manual_followups", [])
+    compatibility_actions = payload.get("compatibility_cleanup", {}).get("planned_actions", [])
+    compatibility_followups = payload.get("compatibility_cleanup", {}).get("manual_followups", [])
+    if schema_actions:
+        for action in schema_actions:
+            lines.append(
+                f"- {action['canonical_id']}: {action['action']} "
+                f"(steps={action.get('path_length', 0)}, risk={action.get('risk_level') or 'unknown'})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Schema migration follow-ups:",
+    ])
+    if schema_followups:
+        for action in schema_followups:
+            lines.append(
+                f"- {action['canonical_id']}: {action['action']} "
+                f"(suggested={action.get('suggested_action')}, risk={action.get('risk_level') or 'unknown'})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Compatibility cleanup actions:",
+    ])
+    if compatibility_actions:
+        for action in compatibility_actions:
+            lines.append(
+                f"- {action['canonical_id']}: {action['action']} "
+                f"(legacy={','.join(action['legacy_types'])} -> current={','.join(action['current_types'])})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Compatibility cleanup follow-ups:",
+    ])
+    if compatibility_followups:
+        for action in compatibility_followups:
+            lines.append(
+                f"- {action['canonical_id']}: {action['action']} "
+                f"(legacy={','.join(action['legacy_types'])} -> current={','.join(action['current_types']) or 'none'})"
+            )
+    else:
+        lines.append("- none")
+    return CommandResult(payload=payload, message="\n".join(lines))
+
+
+def command_migrate_decisions(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
+    plan_payload = build_migrate_plan_payload(target)
+    handoff_payload = build_migrate_batch_handoff_payload(
+        plan_payload,
+        max(coerce_int(getattr(args, "batch_size", 8), 8), 1),
+    )
+
+    if getattr(args, "apply", False):
+        decision_records = load_migration_decisions(target)
+        payload = apply_migration_decision_records(target, decision_records)
+        if args.json:
+            return CommandResult(
+                payload=payload,
+                message=render_workspace_summary_message(
+                    "Migration decisions apply completed.",
+                    target_dir=target,
+                    extra_lines=[
+                        (
+                            "Summary: "
+                            f"applied_decisions={payload['summary']['applied_decision_count']}, "
+                            f"promoted_actions={payload['summary']['promoted_action_count']}, "
+                            f"followup_queue={payload['summary']['followup_queue_count']}, "
+                            f"unresolved={payload['summary']['unresolved_decision_count']}"
+                        ),
+                    ],
+                ),
+            )
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Migration decisions apply completed.",
+                target_dir=target,
+                extra_lines=[
+                    (
+                        "Summary: "
+                        f"applied_decisions={payload['summary']['applied_decision_count']}, "
+                        f"promoted_actions={payload['summary']['promoted_action_count']}, "
+                        f"followup_queue={payload['summary']['followup_queue_count']}, "
+                        f"unresolved={payload['summary']['unresolved_decision_count']}"
+                    ),
+                    f"Follow-up queue: {payload.get('followup_queue_path', 'none')}",
+                ],
+            ),
+        )
+
+    input_path = Path(args.input).expanduser().resolve()
+    hook_result = json.loads(input_path.read_text(encoding="utf-8"))
+    normalized_records = normalize_migration_handoff_results(handoff_payload, hook_result if isinstance(hook_result, dict) else {})
+    if not args.dry_run:
+        for record in normalized_records:
+            append_jsonl(migration_decisions_path(target), record)
+
+    payload = {
+        "ledger_version": MIGRATION_DECISION_LEDGER_VERSION,
+        "workspace": str(target),
+        "workspace_summary": build_workspace_summary(target),
+        "input_path": str(input_path),
+        "dry_run": bool(args.dry_run),
+        "written_decisions": [] if args.dry_run else normalized_records,
+        "summary": {
+            "normalized_decision_count": len(normalized_records),
+            "written_decision_count": 0 if args.dry_run else len(normalized_records),
+            "dry_run": bool(args.dry_run),
+        },
+    }
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Migration decisions ingest completed.",
+            target_dir=target,
+            extra_lines=[
+                f"Input: {input_path}",
+                (
+                    "Summary: "
+                    f"normalized_decisions={payload['summary']['normalized_decision_count']}, "
+                    f"written_decisions={payload['summary']['written_decision_count']}, "
+                    f"dry_run={'yes' if payload['summary']['dry_run'] else 'no'}"
+                ),
+            ],
+        ),
+    )
+
+
+def command_migrate_followups(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
+
+    if getattr(args, "complete", None):
+        payload = complete_migration_followup(target, str(args.complete).strip())
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Migration follow-up completed.",
+                target_dir=target,
+                extra_lines=[
+                    f"Canonical id: {payload['canonical_id']}",
+                    f"Queue action: {payload['completed_followup'].get('queue_action')}",
+                ],
+            ),
+        )
+
+    if getattr(args, "promote_to_review", None):
+        records = load_migration_followups(target)
+        followup_record = next(
+            (
+                record for record in records
+                if str(record.get("canonical_id", "")).strip() == str(args.promote_to_review).strip()
+            ),
+            None,
+        )
+        if followup_record is None:
+            raise KeyError(f"Unknown migration follow-up canonical_id: {args.promote_to_review}")
+        review_record = ensure_migration_followup_review(target, followup_record)
+        return CommandResult(
+            payload={
+                "workspace": str(target),
+                "canonical_id": str(args.promote_to_review).strip(),
+                "review_id": review_record["review_id"],
+                "display_id": review_display_id(review_record),
+                "review_record": review_record,
+            },
+            message=render_workspace_summary_message(
+                "Migration follow-up promoted to review.",
+                target_dir=target,
+                extra_lines=[
+                    f"Canonical id: {args.promote_to_review}",
+                    f"Review id: {review_record['review_id']}",
+                ],
+            ),
+        )
+
+    payload = build_migration_followups_payload(
+        target,
+        status_filter=str(args.status).strip() if getattr(args, "status", None) else None,
+    )
+    if args.json:
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Migration follow-ups listed.",
+                target_dir=target,
+                extra_lines=[
+                    (
+                        "Summary: "
+                        f"followups={payload['summary']['followup_count']}, "
+                        f"pending={payload['summary']['pending_count']}, "
+                        f"completed={payload['summary']['completed_count']}"
+                    ),
+                ],
+            ),
+        )
+
+    lines = [
+        render_workspace_summary_message(
+            "Migration follow-ups listed.",
+            target_dir=target,
+            extra_lines=[
+                (
+                    "Summary: "
+                    f"followups={payload['summary']['followup_count']}, "
+                    f"pending={payload['summary']['pending_count']}, "
+                    f"completed={payload['summary']['completed_count']}"
+                ),
+            ],
+        ),
+        "",
+        "Follow-up queue:",
+    ]
+    if payload["items"]:
+        for item in payload["items"]:
+            lines.append(
+                f"- {item['canonical_id']}: {item['queue_action']} "
+                f"(status={item['status']}, confidence={item.get('confidence', 0.0)})"
+            )
+    else:
+        lines.append("- none")
+    return CommandResult(payload=payload, message="\n".join(lines))
+
+
+def command_migrate_schema_confirm(args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    if getattr(args, "confirm", False):
+        payload = confirm_workspace_schema_transition_path(
+            target=target,
+            from_version=str(args.from_version).strip(),
+            to_version=str(args.to_version).strip(),
+            path_signature=str(args.path_signature).strip() if getattr(args, "path_signature", None) else None,
+            notes=str(args.notes).strip() if getattr(args, "notes", None) else None,
+        )
+        return CommandResult(
+            payload=payload,
+            message=render_workspace_summary_message(
+                "Schema migration confirmation recorded.",
+                target_dir=target,
+                extra_lines=[
+                    f"Path: {payload['confirmation_record'].get('from_schema_version')} -> {payload['confirmation_record'].get('to_schema_version')}",
+                    (
+                        "Summary: "
+                        f"schema_planned_actions={payload['summary']['schema_planned_action_count']}, "
+                        f"schema_manual_followups={payload['summary']['schema_manual_followup_count']}"
+                    ),
+                ],
+            ),
+        )
+    payload = {
+        "workspace": str(target),
+        "records": load_schema_confirmations(target),
+        "summary": {
+            "record_count": len(load_schema_confirmations(target)),
+        },
+    }
+    return CommandResult(
+        payload=payload,
+        message=render_workspace_summary_message(
+            "Schema migration confirmations listed.",
+            target_dir=target,
+            extra_lines=[
+                f"Records: {payload['summary']['record_count']}",
+            ],
+        ),
+    )
+
+
 def command_claim_set_status(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    ensure_workspace_schema_supported(target)
     live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
     live_reviews_by_id, _, _ = load_review_state_maps(target)
 
@@ -12142,6 +15961,123 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--json", action="store_true", help="Output JSON.")
     lint_parser.set_defaults(handler=command_lint)
 
+    compat_report_parser = subparsers.add_parser(
+        "compat-report",
+        help="Report legacy/current page compatibility and migration candidates.",
+    )
+    compat_report_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    compat_report_parser.add_argument(
+        "--to-schema-version",
+        help="Optional target workspace schema version to plan toward. Defaults to the current CLI schema version.",
+    )
+    compat_report_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    compat_report_parser.set_defaults(handler=command_compat_report)
+
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Generate a migration plan for legacy/current page families.",
+    )
+    migrate_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    migrate_parser.add_argument(
+        "--to-schema-version",
+        help="Optional target workspace schema version to plan/apply toward. Defaults to the current CLI schema version.",
+    )
+    migrate_mode_group = migrate_parser.add_mutually_exclusive_group()
+    migrate_mode_group.add_argument(
+        "--plan",
+        action="store_true",
+        help="Show planned migration actions without mutating workspace data. This is the default mode.",
+    )
+    migrate_mode_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply migration actions after writing a migration report and backup snapshot.",
+    )
+    migrate_mode_group.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Restore the latest migration backup snapshot or a specified backup directory.",
+    )
+    migrate_parser.add_argument(
+        "--format",
+        choices=("summary", "prompt", "messages", "chatml"),
+        default="summary",
+        help="In plan mode, choose summary view or direct Agent handoff format for report_only migration candidates.",
+    )
+    migrate_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="In handoff formats, group report_only migration candidates into batches of this size.",
+    )
+    migrate_parser.add_argument(
+        "--backup-dir",
+        help="With --rollback, restore from a specific backup directory instead of the latest snapshot metadata.",
+    )
+    migrate_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    migrate_parser.set_defaults(handler=command_migrate)
+
+    migrate_decisions_parser = subparsers.add_parser(
+        "migrate-decisions",
+        help="Ingest or apply structured migration follow-up decisions returned from a batched Agent/LLM handoff.",
+    )
+    migrate_decisions_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    migrate_decisions_mode = migrate_decisions_parser.add_mutually_exclusive_group(required=True)
+    migrate_decisions_mode.add_argument(
+        "--ingest",
+        action="store_true",
+        help="Normalize and persist external migration handoff decisions from an input JSON file.",
+    )
+    migrate_decisions_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the latest persisted migration decisions into promoted follow-up actions.",
+    )
+    migrate_decisions_parser.add_argument("--input", help="Path to an external migration handoff decision JSON file.")
+    migrate_decisions_parser.add_argument("--batch-size", type=int, default=8, help="Match the handoff batch size when normalizing decisions.")
+    migrate_decisions_parser.add_argument("--dry-run", action="store_true", help="Normalize decisions without writing the ledger.")
+    migrate_decisions_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    migrate_decisions_parser.set_defaults(handler=command_migrate_decisions)
+
+    migrate_followups_parser = subparsers.add_parser(
+        "migrate-followups",
+        help="List or complete queued migration follow-up actions derived from migration decisions.",
+    )
+    migrate_followups_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    migrate_followups_parser.add_argument(
+        "--status",
+        choices=("pending", "completed"),
+        help="Optional follow-up status filter.",
+    )
+    migrate_followups_parser.add_argument(
+        "--complete",
+        help="Canonical id of a queued migration follow-up to mark completed.",
+    )
+    migrate_followups_parser.add_argument(
+        "--promote-to-review",
+        help="Canonical id of a queued migration follow-up to materialize as a review item.",
+    )
+    migrate_followups_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    migrate_followups_parser.set_defaults(handler=command_migrate_followups)
+
+    migrate_schema_confirm_parser = subparsers.add_parser(
+        "migrate-schema-confirm",
+        help="Record explicit confirmations for schema migration paths that require approval before auto-apply.",
+    )
+    migrate_schema_confirm_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    migrate_schema_confirm_mode = migrate_schema_confirm_parser.add_mutually_exclusive_group()
+    migrate_schema_confirm_mode.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm a schema migration path so it can re-enter automatic planning.",
+    )
+    migrate_schema_confirm_parser.add_argument("--from-version", help="Required with --confirm.")
+    migrate_schema_confirm_parser.add_argument("--to-version", help="Required with --confirm.")
+    migrate_schema_confirm_parser.add_argument("--path-signature", help="Optional exact path signature when multiple paths share from/to versions.")
+    migrate_schema_confirm_parser.add_argument("--notes", help="Optional confirmation notes.")
+    migrate_schema_confirm_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    migrate_schema_confirm_parser.set_defaults(handler=command_migrate_schema_confirm)
+
     # query: 在现有 wiki/claim/page 产物上执行多字段 BM25 检索。
     query_parser = subparsers.add_parser("query", help="Search generated wiki pages with weighted BM25 ranking.")
     query_parser.add_argument("text", help="Search query text.")
@@ -12222,6 +16158,21 @@ def build_parser() -> argparse.ArgumentParser:
     render_selector_group.add_argument("--claim-id", help="Render the readable concept page that references this claim.")
     render_readable_concept_parser.add_argument("--json", action="store_true", help="Output JSON.")
     render_readable_concept_parser.set_defaults(handler=command_render_readable_concept)
+
+    semantic_batch_parser = subparsers.add_parser(
+        "semantic-batch",
+        help="Run one semantic analysis batch task and persist structured semantic decisions.",
+    )
+    semantic_batch_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    semantic_batch_parser.add_argument(
+        "--task",
+        choices=SEMANTIC_TASK_NAMES,
+        required=True,
+        help="Semantic task family to run.",
+    )
+    semantic_batch_parser.add_argument("--dry-run", action="store_true", help="Plan batches without writing semantic decisions.")
+    semantic_batch_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    semantic_batch_parser.set_defaults(handler=command_semantic_batch)
 
     # claim-set-status: 手工把某条 claim 提升或调整到目标状态，并触发页面重建。
     claim_status_parser = subparsers.add_parser("claim-set-status", help="Update one claim status and rebuild dependent pages.")

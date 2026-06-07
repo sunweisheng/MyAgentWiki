@@ -46,6 +46,35 @@ def load_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def inject_shared_alias_override(workspace_dir: Path, shared_alias: str) -> list[str]:
+    live_pages = [
+        record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
+        if not record.get("removed")
+        and record.get("lifecycle_status", "active") == "active"
+        and record.get("type") in {"concept-summary", "concept", "topic", "guide", "example"}
+    ]
+    page_ids = [record["page_id"] for record in live_pages[:2]]
+    assert len(page_ids) >= 2
+
+    overrides_path = workspace_dir / "state" / "page_alias_overrides.json"
+    overrides = {"page_aliases": {}}
+    if overrides_path.exists():
+        overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+    page_aliases = overrides.setdefault("page_aliases", {})
+    live_page_map = {record["page_id"]: record for record in live_pages}
+
+    for page_id in page_ids:
+        page_record = live_page_map[page_id]
+        page_override = page_aliases.setdefault(page_id, {})
+        aliases = sorted(set(page_override.get("aliases", page_record.get("aliases", []))))
+        if shared_alias not in aliases:
+            aliases.append(shared_alias)
+        page_override["aliases"] = sorted(set(aliases))
+
+    overrides_path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return page_ids
+
+
 def run_git(cwd: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -92,6 +121,8 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert init_result["workspace_summary"]["raw_dir"] == str(source_dir.resolve())
     assert init_result["workspace_summary"]["entry_page_path"] == str((workspace_dir / "wiki" / "index.md").resolve())
     assert init_result["workspace_summary"]["lint_report_exists"] is False
+    assert init_result["workspace_summary"]["schema_version"] == "v1"
+    assert init_result["workspace_summary"]["schema_guard"]["status"] == "supported"
     assert not (workspace_dir / "raw").exists()
     tracked_files = set(run_git(workspace_dir, "ls-files").splitlines())
     assert not any(path.startswith("raw/") for path in tracked_files)
@@ -109,21 +140,9 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert query_result["workspace_summary"]["entry_page_path"] == str((workspace_dir / "wiki" / "index.md").resolve())
     assert query_result["results"][0]["reading_pack"]["query_intent"] == "definition"
 
-    pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
-    concept_pages = [record for record in pages if record.get("type") == "concept-summary"]
-    assert len(concept_pages) >= 2
-
     # 这里手工制造 alias 冲突，再走 review-list / review-apply / ingest / lint 闭环。
     shared_alias = "共享术语"
-    concept_pages[0]["aliases"] = sorted(set(concept_pages[0].get("aliases", []) + [shared_alias]))
-    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + [shared_alias]))
-    all_pages = {record["page_id"]: record for record in pages}
-    all_pages[concept_pages[0]["page_id"]] = concept_pages[0]
-    all_pages[concept_pages[1]["page_id"]] = concept_pages[1]
-    (workspace_dir / "state" / "pages.jsonl").write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in all_pages.values()) + "\n",
-        encoding="utf-8",
-    )
+    inject_shared_alias_override(workspace_dir, shared_alias)
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     review_list = run_cli("review-list", "--target-dir", str(workspace_dir))
@@ -366,6 +385,58 @@ def test_wiki_index_escapes_paths_with_spaces(tmp_path: Path) -> None:
     index_text = (workspace_dir / "wiki" / "index.md").read_text(encoding="utf-8")
     assert "wiki/concepts/" in index_text
     assert "Chunk%20Lint.md" in index_text
+
+
+def test_workspace_summary_text_surfaces_legacy_compatibility_hint(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "claim.md").write_text(
+        "# Claim\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+    (source_dir / "chunk.md").write_text(
+        "# Chunk\n\n"
+        "Chunk 是用于承载局部原文切片的证据单元。\n\n"
+        "Chunk 用于把原始资料拆成可追踪、可回链的阅读片段。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "WorkspaceCompatibilityHint",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    for claim_id in [
+        record["claim_id"]
+        for record in claim_records
+        if record.get("claim_type") == "definition"
+    ]:
+        run_cli("claim-set-status", claim_id, "stable", "--target-dir", str(workspace_dir))
+
+    query_stdout = run_cli_text("query", "Claim", "--target-dir", str(workspace_dir))
+    assert "Compatibility: legacy_pages=" in query_stdout
+
+    compat_stdout = run_cli_text("compat-report", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in compat_stdout
+    assert "Migration candidates:" in compat_stdout
+
+    migrate_stdout = run_cli_text("migrate", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in migrate_stdout
+    assert "Planned actions:" in migrate_stdout
+
+    migrate_apply_stdout = run_cli_text("migrate", "--apply", "--target-dir", str(workspace_dir))
+    assert f"Workspace: {workspace_dir.resolve()}" in migrate_apply_stdout
+    assert "Applied actions:" in migrate_apply_stdout
 
 
 def test_ingest_skips_hidden_files_and_hidden_directories_in_raw(tmp_path: Path) -> None:

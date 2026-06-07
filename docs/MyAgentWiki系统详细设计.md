@@ -2,34 +2,79 @@
 
 ## 概要 Summary
 
-本设计将 `MyAgentWiki` 定义为一个由 Python 脚本和 Agent 协同驱动的本地 LLM Wiki 系统，服务于 Codex 和 Claude Code 两类 Agent。  
+本设计将 `MyAgentWiki` 定义为一个 **evidence-first semantic compiler**：它不是“传统脚本流水线上补几处 Agent hook”的工具，而是一个把原始资料持续编译成结构化证据层、语义角色层和可读知识视图层的本地知识系统，服务于 Codex 和 Claude Code 两类 Agent。  
 本文中的 `MyAgentWiki` 统一指母仓库 / 产品名；若需要举用户初始化后的工作区目录名示例，统一使用 `MyNotesWiki`。  
-V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条链路打通，其中 `raw -> normalized` 为最高优先级，并优先用 `Python 3.12+` 脚本完成文档格式转换；只有脚本无法稳定提取时，才允许 Agent 作为补充。当前产品定位已经进一步明确为 `agent_driven_local_llm_wiki`：默认假设系统运行在 Codex 或 Claude Code 这类 Agent 环境中，由脚本负责可重复、可回滚的确定性流水线，由 Agent / LLM hook 负责语义判断、审核裁决、stable 提升、概念页和综述页的 grounded 改写。
+系统的主线仍然是 `raw -> normalized -> chunk -> claim -> wiki`，但这条线不应再被理解成“从文件一路生成页面”的单向流水线，而应理解为：
+
+1. `raw -> normalized -> chunks -> claims`：构建 evidence IR（证据中间表示）
+2. `semantic analysis passes`：为证据赋予结构角色、知识角色、页面意图和编译约束
+3. `wiki / indexes / reading packs`：把证据与语义产物编译成不同 presentation layers
+
+在这个方向下，`wiki` 页面不再是唯一核心产物，而只是 evidence graph 之上的一种展示视图；真正的系统真相应优先落在结构化证据层和语义决策层。
 
 系统的关键能力是：
 - 从用户原始知识目录同级初始化一个新的 Wiki 工程。
 - 支持 `Word / Excel / PDF / Markdown / 图片` 五类输入。
-- 引入独立的 `Claim` 知识声明层，建立 `page -> claim -> chunk -> source` 可追踪链路。
-- 支持 Claim 到 Wiki 页面的反向引用统计与检索。
+- 引入独立的 `Claim` 知识声明层，并逐步演进为更宽泛的 `Knowledge Unit` 抽象，建立 `page -> claim -> chunk -> source` 可追踪链路。
+- 支持 Claim / Knowledge Unit 到 Wiki 页面、阅读包和索引视图的反向引用统计与检索。
 - 使用多字段 BM25 打分，并叠加页面类型权重和页面状态权重。
 - 对冲突、近重复、替换稳定结论等高风险更新，进入结构化人工审核队列。
+- 通过受限 LLM 语义分析 pass 处理脚本难以稳定解决的角色判定、页型判定、保守重命名和 grounded 改写。
+- 对大批量语义判断采用 batch scheduler，而不是把 LLM 调用分散成高频单条小请求。
 
-当前实现采用 `deterministic first`：
+当前设计哲学采用 `deterministic evidence first, semantic where needed`：
 - 事实层、证据层、状态层优先由 Python 脚本和显式账本生成。
-- LLM 主要参与页面可读性改写、导览组织、审核自动裁决和 stable 提升判断。
-- LLM 产物不能成为新的事实来源；若改写或裁决无法 grounded 到既有 Claim/Page/Review，则必须自动回退到 deterministic fallback 或升级人工判断。
+- LLM 不作为事实来源，而作为 **受限语义分析器** 和 **grounded 表达器**。
+- LLM 只能在已有 `normalized / chunks / claims / pages / reviews` 证据上做分类、选择、重命名、汇总和可读化。
+- 若语义判定或改写无法 grounded 到既有证据，则必须自动回退到 deterministic fallback、`abstain` 或升级人工判断。
 
-当前自动化哲学已经固定为：
-- scripts own deterministic pipeline：扫描、标准化、切块、账本更新、索引重建、页面落盘、状态恢复都由 CLI 收口。
-- Agent hooks own semantic judgment：冲突是否可保守自动处理、Claim 是否可提升为 `stable`、概念页/综述页如何在 grounded 前提下改写，由 Agent hook 提供高置信判断。
-- human only for irreducible ambiguity：只有高风险冲突、归属不清、hook 未达置信阈值，或涉及敏感边界时才升级人工。
+当前自动化哲学应明确为：
+- scripts own evidence pipeline：扫描、标准化、切块、Claim/Knowledge Unit 落盘、账本更新、索引重建、页面依赖重建、状态恢复都由 CLI 收口。
+- semantic analyzers own bounded judgment：文档结构判定、Claim 角色判定、页面意图判定、稳定化保守判断、overview 候选收口等受限语义任务由结构化 LLM pass 提供判断。
+- grounded rewriters own expression only：在页型和证据已经确定后，LLM 才参与可读化表达。
+- human only for irreducible ambiguity：只有高风险冲突、证据不足、模型 `abstain`、多页型都成立或涉及敏感边界时才升级人工。
 
-当前默认工程策略进一步固定为：
-- `init` 生成的新工作区会默认把 `review_auto`、`stable_promotion`、`readable_concept` 与 `overview` 四类任务统一接到包内 Agent hook。
-- 因而“自动审核 -> 自动提稳 -> 自动生成概念页 -> 自动生成综述页”不再只是可选能力，而是默认推荐工作流的一部分。
-- 默认 hook 本身也遵守 grounded-first：只做可读性重写和保守裁决；一旦输出不通过校验，就回退到 deterministic 产物或升级人工。
+当前默认工程策略应进一步固定为：
+- `init` 生成的新工作区默认开启语义编译流程，而不只是若干零散 hook。
+- 默认链路应是“证据编译 -> 语义分析 -> 结构化审核 / 提稳 -> 页面编译 -> 查询与阅读包生成”。
+- 默认 LLM 能力必须分成两类接口：
+  - semantic analyzer interface
+  - grounded rewrite interface
+- 默认所有 LLM 任务都应优先走 batch scheduler、schema 校验、语义账本缓存和 grounded 收口。
 
 ## 系统结构 System Structure
+
+### 编译器视角 / Compiler View
+
+若按本设计重构，MyAgentWiki 的核心结构不再是“一个能调用 Agent hook 的 CLI”，而是一个由三套产物和一组编译 pass 组成的系统：
+
+1. Evidence Products
+- `normalized/`
+- `chunks/`
+- `claims/`
+
+2. Semantic Products
+- `semantic decisions`
+- `role labels`
+- `page intents`
+- `semantic caches`
+
+3. Presentation Products
+- `wiki/`
+- `indexes/`
+- `reading packs`
+- `answer-ready payloads`
+
+编译 pass 至少包括：
+
+1. document analysis pass
+2. chunk policy pass
+3. claim role pass
+4. page intent pass
+5. grounded rewrite pass
+6. overview synthesis pass
+
+因此，语义判定不再是“页面生成前的一次附加判断”，而是正式的一组语义分析阶段。
 
 ### 母仓库职责
 母仓库是开源 Skill 项目本体，负责交付：
@@ -40,6 +85,8 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - `agents/openai.yaml`：Skill UI 元数据。
 - `pyproject.toml`：Python 依赖、可选依赖和 CLI 入口定义。
 - Python 包与统一 CLI。
+- 统一的语义分析接口定义与 schema。
+- 统一的 batch scheduler 与语义决策缓存协议。
 - 初始化模板工程。
 - 运行环境清单与平台兼容说明。
 - 项目自身知识沉淀目录 `docs/`。
@@ -49,10 +96,11 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 ### 用户工程职责
 用户运行 `init` 后生成 sibling Wiki 工程，负责承载：
 - 外部 sibling `raw/` 原始资料目录引用。
-- 标准化中间产物。
-- Chunk 与 Claim 层。
-- Wiki 页面。
-- 本地索引、状态、日志、审核队列。
+- 标准化与 chunk 等 evidence IR。
+- Claim / Knowledge Unit 层。
+- 语义判定结果与缓存账本。
+- Wiki 页面、索引、阅读包等 presentation 产物。
+- 本地状态、日志、审核队列和编译历史。
 - Git 版本历史。
 
 ### 母仓库与用户工程的生命周期边界
@@ -64,12 +112,39 @@ V1 的首要目标是先把 `raw -> normalized -> chunk -> claim -> wiki` 这条
 - 母仓库升级时，默认不直接覆盖现有用户工程中的 `state/`、`claims/`、`reviews/`、`wiki/`。
 - 用户工作区外部的 sibling `raw/` 视为原始资料区，不因为母仓库升级而自动重写。
 - 模板演进优先通过“新工作区生成 + 老工作区渐进迁移”吸收，而不是要求 Agent 直接跳过 CLI 手改账本。
-- 在未发生破坏性账本变更的前提下，工程目标是尽量保持旧工作区可继续被新版本 CLI 读取并执行 `ingest / query / lint / review-apply`；但这一点在当前 V1 里主要仍属于约定目标，尚未由工作区 schema 版本标记或统一版本守卫机制强制保证。
+- 在未发生破坏性账本变更的前提下，工程目标是尽量保持旧工作区可继续被新版本 CLI 读取并执行 `ingest / query / lint / review-apply`；当前 V1 已补上工作区级 `schema_version`、显式迁移入口、最小 schema 升级动作与 rollback 骨架，但还没有形成完整的通用跨版本迁移框架。
 
 V1 当前约束：
 - V1 不实现完整的自动迁移器。
 - V1 文档必须清楚区分“母仓库升级”和“用户知识库内容更新”两类操作。
-- V1 当前尚未完成工作区级 `schema_version`、统一兼容性检查或 `migrate` 命令；因此这里不应把跨版本安全读写表述成已落地能力。
+- V1 当前已经补上工作区级 `schema_version` 与统一版本守卫机制，也已提供工作区兼容性检查以及 `compat-report` / `migrate --plan` 级别的迁移规划入口；但这里仍不应把跨版本安全读写表述成“已具备完整自动迁移执行器”。
+- 当前 `migrate` 已会在计划阶段落迁移报告，并在 `--apply` 前对关键状态文件、`config/project.yml` 与将被移除的 wiki 页面写入快照备份；这解决了“显式迁移前要先留痕和先保底”的 V1.1 基础要求。
+- 当前 `migrate --rollback` 已可基于最近一次 migration backup snapshot 恢复这些关键文件；但这仍属于最小恢复骨架，不等于通用跨版本回滚系统。
+- 当前迁移规划还会区分 `auto_plan` 与 `report_only`：前者只覆盖“已有 current successor 的 legacy concept-summary 收口”，后者只做报告与人工后续提示，不应被脚本静默执行。
+- 当前 schema 迁移集合也已进入同一条迁移主链：例如旧 `workspace.schema_version` 可以被归类为 `workspace_schema_upgrade_to_v1`，并通过统一 action registry / dispatcher 执行，而不是另写一套散落逻辑。
+- 当前 schema 迁移还不再只是单条 if/else：系统已预留 `transition graph` 与 classifier，用于把 schema 情况区分成“deterministic auto_plan”“report_only follow-up”“unsupported outside transition graph”等不同类别，为后续 `v2 / v3` 跃迁保留骨架。
+- 当前 schema 迁移还已开始返回 `transition_path / path_length`，即使现阶段只注册了 `unversioned -> v1`，输出模型也已经按“未来可能是多步跃迁”来设计，而不是把迁移永久绑定为单个最终 action。
+- 当前 `compat-report` / `migrate` 还已支持显式 `to-schema-version`：迁移规划入口不再默认只能朝 CLI 当前 schema 版本推进，而是可以显式面向已注册的未来目标版本做 path planning，为后续 `v2 / v3` 扩展保留统一协议。
+- 当前显式目标版本的灰区也已开始分层：若目标版本根本不在已知 schema registry 中，会先落到“inspect target schema version”；只有当目标版本已知但 transition graph 里尚无路径时，才落到“schema transition not registered”。
+- 当前还已补上 schema registry 自校验：至少会检查 `WORKSPACE_SCHEMA_VERSION_ORDER`、`WORKSPACE_SCHEMA_TRANSITIONS` 与对应 action contract 是否一致，防止后续补版本时图谱、版本序列和 contract 漂移。
+- 当前 `apply_migrate_plan` 也已开始消费 `transition_path`：schema migration 若未来需要 `v0 -> v1 -> v2` 这样的多步跃迁，执行器会按路径顺序展开，而不是只尝试执行最终一步。
+- 当前 transition registry 还已开始携带版本跃迁元数据：如 `prerequisites`、`rollback_strategy`、`requires_confirmation`、`notes`。这意味着未来版本升级不只是“找到一条路”，而是可以逐步表达“这一步执行前要满足什么、出了问题靠什么恢复、是否必须显式确认”。
+- 当前 `requires_confirmation` 也已开始真正影响迁移规划：若 schema transition path 中出现确认步，系统会先把该路径降级为 `report_only` follow-up，而不是继续把整条路径视为可静默自动执行。
+- 当前还已补上 `state/schema_confirmations.jsonl` 与 `migrate-schema-confirm`：显式确认不再只是口头约定，而是会落入独立 ledger，并在后续重新规划时把对应 schema path 从 `report_only` 恢复到 `auto_plan`。
+- 当前 `legacy concept-summary` 之类的兼容清理，应被视为迁移框架下的 `compatibility cleanup` 子类，而不是 Phase 6 的中心目标；Phase 6 的中心应是未来版本之间的新旧 schema / state / page taxonomy 跃迁框架。
+- 当前迁移执行侧已补上最小 action registry / dispatcher：`planned_actions` 不再要求全部写死在 `apply_migrate_plan` 内部，而是按动作名分发到对应 handler；这为后续真实 schema 迁移补更多 action 留出了结构位置。
+- 当前迁移动作还补上了中心 contract 定义：候选页的 `suggested_action`、计划里的 `action_class / execution_mode`、手工后续动作、lint 告警名与严重级别，都应从同一份动作元数据派生，避免规则漂移。
+- 当前这些 contract 元数据还显式暴露 `risk_level`，并进入 `action_catalog`、计划结果与 handoff prompt，方便上层 Agent/LLM 共享同一份迁移风险语义，而不是各自猜测哪些动作更危险。
+- 当前 `compat-report` 与 `migrate` 还会输出 `action_catalog`，显式告诉上层有哪些迁移动作、哪些可自动执行、哪些只做提示，以便后续接 LLM 批量判断或 UI 展示时不必猜测系统能力边界。
+- 当前 `compat-report` / `migrate` 的结果模型也已重排为“schema migration first, compatibility cleanup second”，使未来真正发布后的版本跃迁继续沿同一视图扩展，而不被当前未发布阶段的 legacy 清理事项绑架。
+- 当前 `state/migration_runs.jsonl` 还会记录 `plan / apply / rollback` 的最小运行账本，串起 report、backup 和最终动作结果，方便 Agent 接力和后续排障。
+- 当前 `migrate` 还支持 handoff 格式输出：`--format prompt|messages|chatml` 应只服务 report-only migration candidates，把动作目录、规则已收口的 planned actions、以及需要语义判断的 manual follow-ups 一并打包给上层 Agent/LLM；确定性 `apply_supported` 动作不应重新交给 LLM 判定。
+- 当前 migrate handoff 还支持批次切分：`--batch-size` 用于把多条 report-only candidates 聚成若干批，以便外部 LLM 在共享静态上下文时一次处理多个 canonical family，而不是一条一调。
+- 当前 migration 灰区协同还补上了独立 decision ledger：外部 LLM/Agent 的批量判断结果应先写入 `state/migration_decisions.jsonl`，再由 `migrate-decisions --apply` 读取最新裁决并转成脚本可继续消费的后续动作，而不是直接跳过账本改写页面状态。
+- 当前 `migrate-decisions --apply` 还会把已接受的灰区判断落入 `state/migration_followups.jsonl` 队列；这个队列用于承接“需要补 current successor”之类的后续脚本动作，避免 decision ledger 和执行队列混在同一层。
+- 当前 `migrate-followups` 提供该队列的最小消费入口：先支持列出与标记完成，保持“灰区判断账本”和“后续执行队列”分层；是否把 follow-up queue 深度接入 review queue 或页面生成主链，可在后续版本继续演进。
+- 当前 `migrate-followups --promote-to-review` 已提供第一步桥接：它会把队列项转成 `migration_followup` review item，方便沿用现有 review-list / review-auto / review-apply 体系继续管理迁移后续事项，而不强行把页面生成逻辑塞进同一命令。
+- 当前 `review-auto` 已显式识别 `migration_followup` 这类 review kind：默认把它视为需要明确 follow-up workflow 的升级项，而不是尝试套用普通 claim duplicate / claim conflict 的保守自动规则。
 - 若未来引入状态结构破坏性升级，应通过显式迁移命令或版本检查阻止静默写入。
 
 V1.1 的推荐推进方式：
@@ -99,11 +174,12 @@ V1.1 的推荐推进方式：
 若需要举具体目录名示例，统一使用 `MyNotesWiki/` 表示用户工作区，使用其同级 `raw/` 表示原始资料目录。
 
 - `../raw/`：与工作区平级的原始资料目录。
-- `normalized/`：标准化后的 Markdown 文本。
-- `chunks/`：按来源展开的切块结果。
-- `claims/`：单条 Claim 的展开 JSON 文件。
-- `wiki/`：面向人阅读的 Wiki 页面。
-- `indexes/`：搜索索引、别名索引等派生索引。
+- `normalized/`：标准化后的文档 IR。
+- `chunks/`：按来源展开的 chunk IR。
+- `claims/`：单条 Claim / Knowledge Unit 的展开 JSON 文件。
+- `semantic/`：语义分析结果、批量任务缓存和编译决策中间产物。
+- `wiki/`：面向人阅读的知识页面。
+- `indexes/`：搜索索引、别名索引、阅读包索引等派生索引。
 - `state/`：结构化账本。
 - `reviews/`：单条审核项的展开 JSON 文件。
 - `logs/`：预留的结构化运行日志目录。
@@ -118,36 +194,41 @@ V1.1 的推荐推进方式：
 - `CLAUDE.md`：工作区 Claude Code 入口规则。
 
 ### 工作区分层与写入边界
-用户工程内部目录按职责分为四层：
+用户工程内部目录按职责分为五层：
 
 1. 原始资料层
 - `raw/`
 - 位于工作区外部并与工作区平级，保存用户自己维护的原始资料及其目录结构。
 - Agent 不自动修改该层内容。
 
-2. 编译中间层
+2. 证据编译层
 - `normalized/`
 - `chunks/`
 - `claims/`
-- 这些目录保存可重建但又需要稳定落盘的中间产物。
+- 这些目录保存 evidence IR，是系统主真相的一部分，而不只是“可有可无的中间文件”。
 
-3. 知识呈现层
+3. 语义分析层
+- `semantic/`
+- `state/semantic_*.jsonl`
+- 保存文档结构判定、Claim 角色判定、页面意图判定、批处理缓存和语义决策历史。
+
+4. 知识呈现层
 - `wiki/`
-- 对人可读、可链接、可引用。
-- 允许自动页与后续人工维护页并存，但需要通过 `page_id / canonical_id` 纳入统一状态管理。
-
-4. 状态与控制层
-- `state/`
 - `indexes/`
+- 对人可读、可链接、可引用，也服务 query、reading pack 和 answer-ready 输出。
+- 允许多种页面类型并存，不应再默认把所有非概念内容塞回 `source-summary`。
+
+5. 状态与控制层
+- `state/`
 - `reviews/`
 - `reports/`
 - `logs/`
 - 负责保存账本真相、检索索引、审核单、lint 报告和执行痕迹。
 
-V1 约定：
-- 自动流程主要写入第 2、3、4 层。
-- 第 4 层中以 `state/*.jsonl` 为核心账本，以 `claims/*.json`、`reviews/*.json`、`wiki/*.md` 为面向人和 Agent 的展开视图。
-- 若出现多份数据不一致，以账本与生命周期规则优先，再由 `ingest / review-apply / lint` 收敛。
+当前方向约定：
+- 自动流程主要写入第 2、3、4、5 层。
+- `state/*.jsonl` 负责 evidence 与 live object 的结构化账本；`semantic` 负责语义决策账本；`wiki/*.md`、`claims/*.json`、`reviews/*.json` 负责面向人和 Agent 的展开视图。
+- 若出现多份数据不一致，应优先区分是“证据层不一致”还是“语义层不一致”，再分别通过 re-ingest、semantic rebuild、review-apply、lint 收敛。
 
 ### 运行依赖清单文件
 母仓库需要额外提供：
@@ -164,6 +245,21 @@ V1 约定：
 - 系统级软件依赖：优先检测，缺失时提示安装，不默认强制自动安装。
 
 ## 核心数据模型 Core Data Model
+
+### 数据模型总则
+
+在新的架构方向下，数据模型不应只围绕“页面如何生成”来设计，而应围绕三类真相分层：
+
+1. Evidence Truth
+- 来源、标准化文档、chunks、claims
+
+2. Semantic Truth
+- 角色标签、页面意图、批量语义裁决、模型/提示词版本
+
+3. Presentation Truth
+- 页面、索引、阅读包、answer-ready 载荷
+
+因此，后续字段设计应尽量避免把所有可变语义都塞回 `Claim` 或 `WikiPage` 本体，而应允许语义决策拥有自己的正式账本。
 
 ### 原始来源 Source
 表示原始来源文件。
@@ -196,11 +292,14 @@ V1 当前实现说明：
 - `raw_hash`（原始内容哈希）
 - `normalized_hash`（标准化内容哈希）
 - `normalizer_version`（标准化器版本）
+- `document_kind`（文档类型）
+- `structure_quality`（结构质量）
+- `chunk_strategy_hint`（建议切块策略）
 
 V1 当前实现说明：
 - 标准化后的正文会保存成 `normalized/*.md` 文件，状态记录里只保存这个文件的路径和提取元数据。
 - 这样做可以避免把大段正文塞进 `state/normalized.jsonl`，也方便人和 Agent 直接打开 Markdown 查看。
-- `sections`、`artifacts` 这类更细的结构信息暂时不是 V1 必填项，后续需要更精细的章节或附件处理时再扩展。
+- 若按新方向推进，`normalized` 还应被视作文档 IR，而不只是清洗后的 Markdown 文件；`sections`、`artifacts`、轻量结构语义都可在这一层逐步补齐。
 
 ### 文档切块 Chunk
 表示从 normalized 文档切分出的处理单元和证据单元。
@@ -222,9 +321,11 @@ V1 当前实现说明：
 - `overlap_from_previous`（与前一切块的重叠内容）
 - `hash`（切块内容哈希）
 - `chunker_version`（切块器版本）
+- `chunk_kind`（切块角色）
+- `topicworthiness_hint`（主题承载潜力）
 
 ### 知识声明 Claim
-表示独立知识声明，是系统的核心知识枢纽层。
+表示独立知识声明，是系统当前对外暴露的核心知识枢纽层；从长期方向看，它会逐步向更宽泛的 `Knowledge Unit` 演进。
 最小字段：
 - `claim_id`（声明ID）
 - `text`（声明原文）
@@ -238,6 +339,9 @@ V1 当前实现说明：
 - `duplicate_candidates`（重复候选列表）
 - `review_reason`（进入审核的原因）
 - `claim_type`（声明类型）
+- `knowledge_role`（知识角色）
+- `page_intent_hints`（页面意图提示）
+- `concept_candidate_score`（概念页候选分）
 - `source_refs`（来源引用）
 - `lifecycle_status`（生命周期状态）
 - `superseded_by`（被哪些声明替代）
@@ -250,6 +354,7 @@ V1 当前实现说明：
 - `state/claims.jsonl` 则保存一份可快速扫描的总账，供 ingest、query、lint 和 review 流程读取。
 - Claim 被合并、归档或被新来源版本替代时，不会直接消失，而是转成历史记录。
 - 历史记录会保留原始 Claim 的线索，例如 `original_claim_id`，并用带时间戳的历史 ID 记录它曾经存在过。
+- 如果按新方向演进，`Claim` 不再隐含“所有 Claim 都适合直接长成页面”的假设；其中一部分会被语义分析判定为 procedure/example/conclusion/structural_shell 等角色。
 
 ### Wiki页面 WikiPage
 表示对用户可读的知识页面。
@@ -261,6 +366,7 @@ V1 当前实现说明：
 - `status`（页面状态）
 - `automation_level`（自动化等级）
 - `review_reason`（进入审核的原因）
+- `page_intent`（页面意图）
 - `summary`（页面摘要）
 - `aliases`（别名列表）
 - `redirect_to`（重定向目标）
@@ -274,10 +380,34 @@ V1 当前实现说明：
 - `updated`（更新时间）
 
 V1 当前实现说明：
-- V1 目前主要自动生成两类页面：来源摘要页 `source-summary` 和概念摘要页 `concept-summary`。
+- 当前代码基线仍保留 `source-summary`、`concept-summary` 等早期自动页类型，但新架构不再把它们当作唯一中心。
 - 页面本体保存为 `wiki/**/*.md`，页面清单和生命周期记录保存在 `state/pages.jsonl`。
 - 如果某个自动页面因为来源变化或概念合并而不再需要，它会在账本里留下历史记录，但不会继续进入查询、索引和 wiki 目录。
-- 概念页生成时会先按相似内容分组，再按最终的 `canonical_key` 做一次合并，尽量避免同一个概念长出多张活跃页面。
+- 正式设计应先由 `page_intent` 决定“是否值得成页、应该成什么页”，再落到 `concept`、`guide`、`example`、`topic`、`timeline`、`reference`、`overview`、`source-summary` 等正式 taxonomy。
+- `source-summary` 在新架构中应被收缩为“来源入口页 / 来源视图”，而不是所有灰区内容的默认宿主。
+
+### 语义决策 SemanticDecision
+表示系统对某批输入做出的结构化语义判断。它不是页面，也不是 Claim 本体字段的简单附庸，而是正式账本对象。
+
+最小字段：
+- `decision_id`（决策ID）
+- `task_type`（任务类型）
+- `item_type`（目标对象类型）
+- `item_ids`（目标对象ID列表）
+- `decision`（决策结果）
+- `confidence`（置信度）
+- `reason_code`（原因代码）
+- `prompt_version`（提示词版本）
+- `model_key`（模型标识）
+- `schema_version`（返回结构版本）
+- `input_fingerprint`（输入指纹）
+- `created_at`（创建时间）
+- `superseded_by`（后续替代决策）
+
+当前方向说明：
+- 语义决策账本既承担缓存作用，也承担可追踪历史作用。
+- 它与 evidence ledger 并列存在，避免模型升级或 prompt 变更直接污染证据层真相。
+- 页面、Claim、overview 候选等对象可通过 `semantic_decision_id` 反查自己为什么被允许生成、重命名或拒绝。
 
 ### 审核项 ReviewItem
 表示人工审核单。
@@ -502,14 +632,25 @@ CLI 入口固定为：
 - `automation.mode: safe_auto`
 - `automation.philosophy: prefer_agent_automation_until_human_judgment_is_required`
 - `automation.post_ingest.review_auto: true`
-- `automation.review_auto.*`：控制审核自动处理 hook 的策略、命令、超时和置信阈值
-- `automation.stable_promotion.*`：控制 Claim 提升为 `stable` 的 hook 策略、命令、超时和置信阈值
-- `rendering.readable_concept / overview / qa_note / concept_update`：控制概念页、综述页、问答沉淀页的 `llm_assisted` 渲染
+- `semantic.batch_scheduler.*`：控制语义批处理的分桶、分片、重试、缓存和预算
+- `semantic.document_analysis.*`：控制文档结构判定 pass 的策略、命令、超时、模型和 schema 版本
+- `semantic.claim_role.*`：控制 Claim / Knowledge Unit 角色判定 pass 的策略、命令、超时、模型和 schema 版本
+- `semantic.page_intent.*`：控制页面意图判定 pass 的策略、命令、超时、模型和 schema 版本
+- `automation.review_auto.*`：控制审核自动处理 pass 的策略、命令、超时和置信阈值
+- `automation.stable_promotion.*`：控制 Claim 提升为 `stable` 的保守判断 pass
+- `rendering.readable_concept / overview / qa_note / guide / topic`：控制不同页面类型的 grounded rewrite 行为
 
 当前默认模板还会把这些任务统一指向包内入口：
 - `python3 -m myagentwiki.agent_hook`
-- 该统一入口会按 `task` 分发 `review_auto_decision`、`claim_stable_promotion`、`review_concept_candidate`、`render_readable_concept_page`、`render_workspace_overview_page`
-- 用户若有更强的外部 Agent / LLM 编排器，仍可在工作区配置里覆盖成自己的命令
+- 该统一入口在新方向下不应只是若干零散 hook，而应至少支持按 `task` 分发：
+  - `review_document_structure_batch`
+  - `review_claim_candidates_batch`
+  - `review_page_intent_batch`
+  - `review_auto_decision_batch`
+  - `claim_stable_promotion_batch`
+  - `render_readable_concept_page`
+  - `render_workspace_overview_page`
+- 用户若有更强的外部 Agent / LLM 编排器，仍可在工作区配置里覆盖成自己的命令，但建议继续遵守统一 schema、batch scheduler 和 grounded-first 约束
 
 CLI 输出约定：
 - 这些主命令的 JSON 输出应优先保持“上层 Agent 可直接消费”的稳定结构。
@@ -530,11 +671,12 @@ CLI 输出约定：
 - 具备可读取的 `config/project.yml` 与 `config/runtime_manifest.yml`。
 - 具备空账本或占位账本文件，避免后续命令依赖“文件不存在”分支。
 - 具备初始 alias registry、wiki 首页、wiki 日志页。
+- 具备 semantic ledger 与 batch scheduler 所需的初始状态文件或目录占位。
 - 具备 Git 基线提交，保证后续 ingest 结果可 diff、可回滚、可审计。
 
 V1 当前实现优先级：
 - “先生成完整骨架并能立即跑 ingest/lint/query”优先于“初始化时就生成复杂默认内容”。
-- 初始化模板应尽量简洁，复杂知识结构通过后续 ingest 和 review 自然长出来。
+- 初始化模板应尽量简洁，但必须把 evidence ledger、semantic ledger、presentation layer 之间的边界提前搭好，避免后续再做破坏性目录迁移。
 
 ### 环境自检与初始化
 V1 增加两个环境命令：
@@ -602,11 +744,24 @@ V1 当前实现说明：
 
 ## 标准化层 Normalization Layer
 
+### 在编译器中的角色
+
+在新架构中，标准化层不只是“把原文件转成 Markdown”，而是构建 **document IR** 的第一步。
+
+它的职责是：
+- 把异构原始资料转换成统一可处理结构。
+- 尽可能保留文档结构、位置映射和回链信息。
+- 为后续 `chunk policy pass` 与 `document analysis pass` 提供足够稳定的输入。
+
+因此，`normalized` 产物应同时满足两种需求：
+- 机器可继续编译
+- 人与 Agent 可直接打开检查
+
 ### 总体原则
 - `raw -> normalized` 为 V1 第一优先级。
 - 优先纯 Python 实现。
 - 外部办公软件不是前提依赖。
-- Agent 只做 Python 失败后的补充解析。
+- LLM / Agent 不直接替代标准化器，只在结构质量灰区上提供受限判定。
 
 ### 统一转换架构
 标准化层采用“统一抽象 + 多转换器”设计：
@@ -628,6 +783,7 @@ V1 当前实现说明：
 - 标准化层只做输入整理，不生成正式 Wiki 页面，不做页面合并，不改写知识结论。
 - Chunking 只能读取 `normalized/` 产物，不能直接以 `raw/` 作为默认输入。
 - 标准化输出必须保留“从 normalized 回到 raw 的路径”，不能只产出干净正文。
+- 标准化层允许补充轻量结构语义，例如 `document_kind`、`structure_quality`、`chunk_strategy_hint`，但不直接做页面意图或概念判断。
 
 ### Markdown 文档 Markdown
 行为：
@@ -750,9 +906,20 @@ V1 当前实现说明：
 - 当前已实现第一版 query normalization：规范化查询、alias 精确命中扩展、canonical 目标回传。
 - 当前已实现轻量意图识别，主要覆盖 `lookup / definition / compare / timeline / how_to / evidence`。
 - 当前意图识别主要服务检索增强与页面类型轻量调权，尚未发展为复杂问句分析器。
-- 当前 `evidence` 类查询已明确优先 `source-summary` 页面，而不是只做轻微偏向。
+- 当前 `evidence` 类查询已明确优先来源视图与证据链入口；在历史兼容层里，这通常表现为提升 `source-summary`，但正式设计目标是按 `page_intent` 与 evidence density 调权，而不是把某个旧页型写死成长期中心。
 
 ## 切块设计 Chunking Design
+
+### 在编译器中的角色
+
+切块层不是单纯的“把文档切小”，而是把 document IR 进一步编译成 **evidence units**。
+
+它的职责是：
+- 生成稳定、可追踪、可引用的 chunk IR。
+- 为 Claim / Knowledge Unit 抽取提供边界清晰的输入。
+- 为 query、reading pack、review 和 future page generation 提供统一证据粒度。
+
+在新架构中，chunk 不应再被视为纯粹的长度切分结果，而应被视为带有语义提示的证据单元。
 
 ### 切分规则
 默认切分策略：
@@ -761,6 +928,12 @@ V1 当前实现说明：
 - 过短块与相邻块合并。
 - V1 预留 overlap 字段，但当前不启用实际重叠文本。
 - 代码块、表格、引用块尽量整体保留。
+
+如果 document analysis pass 已给出 `chunk_strategy_hint`，切块层应允许覆盖默认策略，例如：
+- FAQ 文档优先按问答对切
+- timeline 文档优先按事件切
+- table-heavy 文档优先按表格行组切
+- chat log 优先按轮次切
 
 ### 默认参数
 - `target_tokens: 1000`（目标 Token 数）：单个 chunk 尽量接近的长度。
@@ -784,6 +957,7 @@ V1 当前实现说明：
 - 尽量不切断代码块、表格、引用块。
 - 对 OCR 结果或结构噪声较大的文档，允许保守合并短块，避免制造碎片 chunk。
 - 每次 chunking 后都应通过 `chunk lint`，否则不得进入 claim 抽取。
+- 每个 chunk 允许被标注 `chunk_kind` / `topicworthiness_hint`，供后续 claim role pass 与 page intent pass 使用。
 
 ### 作用
 Chunk 同时承担：
@@ -792,20 +966,32 @@ Chunk 同时承担：
 - Claim 抽取单元
 - 溯源单元
 - 增量更新单元
+- 语义分析单元
 
 ## 声明层设计 Claim Layer Design
+
+### 在编译器中的角色
+
+当前对外术语仍保留 `Claim`，但在新方向下，它应被理解为 Knowledge Unit 的第一版实现，而不是默认等于“可直接落页的知识声明”。
+
+这一层的核心职责是：
+- 从 chunk IR 中抽取可追踪的知识单元。
+- 把“文本看起来像一句话”与“它在知识系统里扮演什么角色”区分开。
+- 为后续 semantic analysis pass 提供统一对象，而不是让页面生成阶段反复从原文猜语义。
 
 ### 设计原则
 - Claim（知识声明）是从原始资料中提炼出的独立结论，不依附于某一个具体 Wiki 页面。
 - Wiki 页面不直接把“结论”只绑到 source（来源），而是先绑定到 Claim，再由 Claim 追踪到 chunk 和 source。
-- 同一条 Claim 可以被多个页面复用，例如一个概念页、一个综述页和一个来源摘要页可以共同引用同一条结论。
+- 同一条 Claim 可以被多个页面复用，例如一个概念页、一个综述页和一个来源视图页可以共同引用同一条结论。
 - Claim 必须支持正向和反向引用：既能从 Claim 找到来源，也能从页面反查自己引用了哪些 Claim。
+- 并非所有 Claim 都应被视为“候选知识页核心结论”；其中相当一部分会在语义分析后被判为 `procedure / example / conclusion / structural_shell / meta`。
 
 ### 文件与索引
 - `claims/`：保存单条 Claim 的展开文件，方便人工查看、编辑和参与 review。
 - `state/claims.jsonl`：保存 Claim 总账，方便 CLI 快速扫描全部 Claim。
 - `indexes/claims.jsonl` 或等价索引：后续可用于加速“某条 Claim 被哪些页面引用”等反查。
 - 权威源指“判断当前 Claim 是否存在、是否活跃、引用关系是什么时优先相信的数据”。V1 中 Claim 的权威信息主要由 `claims/*.json` 与 `state/claims.jsonl` 共同维护，索引只是可重建的派生数据。
+- 若按新方向推进，Claim 的语义角色判定不应直接混入 Claim 权威文本本体，而应允许由独立的 semantic decision ledger 保存其判定来源、prompt 版本和模型版本。
 
 V1 当前实现说明：
 - 当前尚未单独落地 `indexes/claims.jsonl`。
@@ -838,6 +1024,22 @@ V1 建议支持：
 - `evaluation`（评价类）：表达判断、建议、优先级或取舍。
 - `warning`（风险提示类）：提示限制、风险、反例、注意事项或不适用场景。
 
+### 知识角色 Knowledge Role
+
+`claim_type` 主要回答“这句话像哪类句子”，而 `knowledge_role` 应回答“这个 unit 在知识系统里扮演什么角色”。
+
+建议长期支持：
+- `definition`
+- `fact`
+- `procedure`
+- `example`
+- `conclusion`
+- `opinion`
+- `meta`
+- `structural_shell`
+
+这组角色更直接服务于后续 page intent pass。
+
 V1 当前实现说明：
 - 当前自动抽取阶段主要先生成通用 Claim，声明类型可以先为空或使用粗粒度规则补充。
 - 当前规则抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再在长句中只挑可独立理解的子句作为补充候选，避免把逗号后的从句残片直接提升成 Claim。
@@ -847,13 +1049,28 @@ V1 当前实现说明：
 - 当前当整段文本在句级切分后全部被判定为噪声时，不再把整段原文作为 fallback Claim 硬塞回去，避免会议记录、日志元信息或目录碎片继续误入概念页。
 - 例外是：如果正文抽不出 Claim，但章节标题本身是 `YYYY-MM-DD` 这样的完整日期，系统会补一条日期型 Claim，保留时间线入口与日期概念页。
 - 后续 Agent 增强抽取时，可以根据句式和上下文补全 `claim_type`，再用于页面组织、检索加权和 review 判断。
+- 后续 semantic analyzer 应优先批量补齐 `knowledge_role`、`page_intent_hints` 与 `concept_candidate_score`，而不是等到 concept page 生成时再临时猜测。
 
 ## 检索设计 Retrieval Design
+
+### 在编译器中的角色
+
+检索层不只是“查页面”，而是 evidence graph 与 presentation layer 上的统一读取接口。
+
+在新方向下，检索应同时支持三类读取目标：
+- presentation-first：优先从 `wiki` 页面进入
+- evidence-first：优先从 claims / chunks / sources 进入
+- hybrid：先页后证据，或先证据后页
+
+因此 query 的责任不应局限于排序，还应负责输出稳定的阅读路径与回答交接契约。
 
 ### 默认查询顺序
 - 先检索 `wiki pages`
 - 再下钻 `claims`
 - 最后按需回读 `chunks`
+
+这是默认体验顺序，而不是唯一顺序。
+对于 `evidence / timeline / how_to / review-risk` 等意图，系统应允许直接提升 evidence-first 路径。
 
 V1 当前实现说明：
 - 当前 query 已实现这种读取顺序，并能返回 `reading_pack`（阅读包）。
@@ -868,6 +1085,8 @@ V1 当前实现说明：
 - `body`（页面正文）
 - `claim_text`（页面关联 Claim 文本）
 - `source_refs`（来源引用）
+
+若后续页面 taxonomy 扩展为 `guide / example / topic / timeline / reference`，检索层也应相应扩展页面类型权重，而不是继续围绕少数早期遗留页型做硬编码。
 
 总分公式固定为：
 `final_score = Σ(field_weight * bm25(field)) * page_type_weight * page_status_weight`
@@ -886,7 +1105,7 @@ V1 当前实现说明：
 - `alias / title / canonical` 精确命中会额外加权：别名、标题或规范 ID 直接命中时，说明用户很可能在找这个页面。
 - 当前已实现六类轻量查询意图：`lookup`（查找）、`definition`（定义）、`compare`（对比）、`timeline`（时间线）、`how_to`（操作方法）、`evidence`（证据来源）。
 - `timeline` 查询会额外返回 `timeline_sources`（时间线来源分组），帮助 Agent 按来源组织时间线证据。
-- `evidence` 查询会更强地提升 `source-summary`（来源摘要页），并相对压低 `concept-summary`（概念摘要页），确保“先看出处”的阅读顺序更稳定。
+- `evidence` 查询会更强地提升来源视图、source trail 和可回链页面入口，确保“先看出处”的阅读顺序更稳定；在兼容现状时，这通常映射为提升 `source-summary`，但不应再把 `concept-summary` 当作默认对位物。
 
 ### 查询结果契约 Query Output Contract
 V1 的 query 不只是返回排序结果，还必须返回一个足够驱动 Agent 继续阅读的结构化包。
@@ -1114,12 +1333,13 @@ V1 建议的 guardrail 推导规则：
 - hook 只有返回 `decision=promote` 且 `confidence` 达到配置阈值时，CLI 才会把该 claim 提升为 `stable`。
 - 若 hook 未启用、未返回 promote、或置信度不足，则 claim 保持原状，不会因为自动流程“顺手”被提稳。
 - `review-auto` 的最终 payload 会把本轮自动提升为 `stable` 的 claim 汇总到 `promoted_claims`，供上层 Agent 判断后续是否继续生成概念页、综述页，或仍需人工确认。
+- `review-auto` 的最终 payload 会把本轮自动提升为 `stable` 的 claim 汇总到 `promoted_claims`，供上层 Agent 或后续编译链判断这些稳定输入是否足以支撑 `concept / guide / topic / overview` 等正式页面。
 
 当前默认触发链已经进一步收口为：
 - `review-auto` 自动提升 claim 为 `stable` 后，不需要再等人工单独触发页面生成。
-- 页面重建链会立刻把这些稳定 claim 编译为可读 `concept` 页。
-- 当工作区里至少已有两个可读 `concept` 页时，同一条重建链会继续生成或刷新工作区级 `overview` 页。
-- 因此 `stable` 不只是状态标签，也直接成为更高层可读页面自动生成的触发条件。
+- 页面重建链会立刻把这些稳定 claim 送入 `page_intent` 收口流程，再决定是生成 `concept`、`guide`、`topic`、`reference` 还是仅保留在 evidence/source 视图中。
+- 当工作区里已经积累出足够稳定、且可聚合的正式页面家族时，同一条重建链会继续生成或刷新工作区级 `overview` 页。
+- 因此 `stable` 不只是状态标签，也直接成为更高层 presentation rebuild 的触发条件，但它不再隐含“稳定 claim 必然长成概念页”。
 
 ### 查询读取规则 Query Reading Rules
 - 查询时先读 `index`（索引）、`frontmatter`（页面元数据）、`summary`（摘要）、`aliases`（别名）、`headings`（标题层级）。
@@ -1146,11 +1366,20 @@ V1 建议的 guardrail 推导规则：
 页面类型权重：
 - `overview: 1.25`（综述页）：适合回答宏观问题，默认优先级最高。
 - `concept: 1.15`（概念页）：适合解释概念和主题。
-- `concept-summary: 1.15`（概念摘要页）：V1 自动生成的概念页，权重与概念页接近。
 - `entity: 1.10`（实体页）：适合回答人物、项目、工具、组织等对象问题。
-- `source-summary: 1.00`（来源摘要页）：适合证据和出处问题，普通查询中保持中性权重。
+- `topic: 1.08`（主题页）：适合收束跨来源但不完全等于单一概念的主题。
+- `guide: 1.05`（指南页）：适合 how-to / procedure 类问题。
+- `reference: 1.00`（参考页）：适合查参数、术语表、规则表。
+- `timeline: 1.00`（时间线页）：适合时间序列问题，常结合时间意图额外调权。
+- `source-summary: 0.98`（来源入口页）：普通主题查询中略后排，但在 evidence 查询中可被意图加权显著提升。
+- `example: 0.95`（示例页）：适合案例与样例问题，但不应默认压过正式概念页。
 - `qa: 0.95`（问答页）：适合具体问答，但不应默认压过正式概念页。
 - `draft: 0.70`（草稿页）：内容还不稳定，默认后排。
+
+额外约束：
+- 默认权重只表达“无明确意图时的常规排序偏好”。
+- 一旦 query intent 明确落到 `evidence / how_to / timeline / compare`，检索层应优先按 `page_intent` 与 evidence coverage 做二次调权，而不是继续依赖固定页型常量。
+- 历史页型如 `concept-summary` 若仍存在，应通过兼容映射并入 `concept` 或 `topic` 家族，而不是继续作为长期一级类型参与设计。
 
 页面状态权重：
 - `stable: 1.10`（稳定）：可靠页面适当加权。
@@ -1167,6 +1396,17 @@ V1 不实现复杂动态预算器，但规则文件中必须明确轻量阅读�
 
 ## 更新与审核 Update And Review
 
+### 在编译器中的角色
+
+更新不应被理解为“重新跑一次脚本并修修页面”，而应被理解为 **incremental recompilation**。
+
+核心目标是：
+- 只重编译受影响的 evidence IR
+- 只重算受影响的 semantic decisions
+- 只重建受影响的 presentation layers
+
+审核层则是这套编译器中的人工与模型共治边界，用来处理受限语义分析仍无法安全收口的对象。
+
 ### 自动写入默认策略
 默认采用“常规自动写入 + 全程留痕”。
 
@@ -1181,6 +1421,7 @@ V1 的 ingest 必须被定义为“增量编译”，而不是每次都把整个
 
 中间层规则：
 - `normalized/chunks/claims/pages/indexes` 的 live 集合只围绕当前活跃来源重建。
+- `semantic decisions` 的 live 集合只围绕当前活跃 evidence 集合与当前模型/提示词版本重建。
 - 由旧来源导出的 live Claim、自动页和索引项，在新版本来源稳定接管后进入历史态或移除态。
 - 任何一次 ingest 都要优先保证“live 集合自洽”，再保留历史痕迹。
 
@@ -1199,6 +1440,13 @@ V1 暂不承诺：
 - `ingest` 的 JSON 输出会额外附带 `post_ingest_review_auto`，纯文本输出也会单独打印一段 post-ingest auto-review 摘要，避免上层 Agent 误以为 ingest 已经完全结束。
 - 在默认模板下，这条复合流程还隐含了后续页面自动收口：`ingest -> review-auto -> stable promotion -> readable concept render -> workspace overview render`。
 - 其中后两步不需要上层 Agent 再单独补一条 `render-page` 命令；它们已经被纳入同一套页面重建链里。
+
+如果按新方向继续推进，这条链最终应进一步收口为：
+- `ingest -> evidence rebuild`
+- `semantic batch scheduling`
+- `semantic decisions writeback`
+- `review / stable promotion`
+- `presentation rebuild`
 
 ### 更新模式
 页面更新策略与页面创建策略分离，V1 固定支持：
@@ -1245,7 +1493,7 @@ V1 当前实现说明：
 - 当前 `assign_alias / remove_alias` 会先预演 alias 覆盖结果并重建 alias index，确认 alias 真正收敛后才写回账本，避免出现“命令成功但冲突仍存在”的假收敛。
 - 当前 `assign_alias / remove_alias` 已补充“重复 ingest 后仍然保持人工裁决结果”与“过期 alias review 自动收口”的回归测试。
 - 当前 `assign_alias` 的成功条件已经从“目标 alias 最终只落到某个 `page_id`”提升为“最终只收敛到目标 `canonical_id` 家族”。
-- 这意味着同一个规范主题下允许 `concept` 与 `concept-summary` 等页面类型共存；只要 alias 最终只归属于同一 canonical family，就应视为成功收敛，而不是误报冲突未解。
+- 这意味着同一个规范主题下允许多种页面视图或页型共存；只要 alias 最终只归属于同一 canonical family，就应视为成功收敛，而不是因为存在不同 presentation 页面就误报冲突未解。
 
 ### 自动化分级
 V1 引入四级自动化边界：
@@ -1255,6 +1503,13 @@ V1 引入四级自动化边界：
 - `locked`（锁定）：默认不允许自动修改，除非用户明确要求。
 
 页面可通过 `automation_level` 声明是否允许自动修改。
+
+对于 semantic analyzer，还应独立增加：
+- `auto_apply`
+- `abstain`
+- `require_review`
+
+避免把“页面可否自动改”与“模型是否应强行裁决”混成同一概念。
 
 ### 审核单内容
 Review item 不只保存动作名，还必须保存：
@@ -1269,42 +1524,46 @@ Review item 不只保存动作名，还必须保存：
 V1 把问答沉淀拆成三类：
 - `qa-note`（问答笔记）：保存一次高质量问答，但不直接变成正式知识页。
 - `overview`（综述页）：面向一个主题的高层总结页面。
-- `concept-update`（概念页更新）：把问答中稳定的新结论补充到已有概念页。
+- `page-update`（页面更新）：把问答中稳定的新结论按 `page_intent` 路由到已有 `concept / guide / topic / reference` 等正式页面。
 
 默认规则：
 - 高质量问答可自动沉淀为 `qa-note`。
-- `qa-note` 不自动提升为正式 `concept`。
-- 提升为正式概念页或综述页必须进入 review。
+- `qa-note` 不自动提升为正式页面。
+- 提升为正式页面或综述页必须进入 review，并经过 `page_intent` 收口。
 
 ### 页面模板
-V1 为三类页面提供固定模板：
-- 概念页：定义、为什么重要、工作原理、适用场景、局限性、相关概念、来源。
-- 实体页：是谁/是什么、核心信息、相关项目/概念、在本知识库中的定位、来源。
-- 来源摘要页：原文概览、核心观点、提取到的概念、提取到的实体、与现有页面的联系/冲突、后续建议。
+V1 应把模板体系从“固定三类页面”升级为“按 page intent 选择模板族”：
+- 概念页：定义、核心机制、边界条件、相关概念、来源。
+- 指南页：目标、前置条件、步骤、变体、注意事项、来源。
+- 示例页：场景、输入、过程、结果、可迁移点、来源。
+- 主题页 / 综述页：问题空间、关键子主题、主要证据入口、相关页面、来源。
+- 参考页：术语表、规则表、参数或结构清单、来源。
+- 来源摘要页：原文概览、核心观点、可下钻证据、与现有页面的联系/冲突、后续建议。
 
 V1 当前实现说明：
+- 当前实现里，概念页与综述页已经是最先被打磨的正式可读页面，因此相关细节描述仍以这两类页面为主。
 - 当前概念页选择 canonical claim 时，不再只按来源数、置信度和文本长度排序，还会综合“是否像定义句”“是否能脱离上下文独立理解”“是否属于从句/元描述”这些可读性信号。
 - 当前概念页展示层会优先把定义短语渲染成“概念名 + 定义短语”的形式，例如把 `一种利用 LLM 构建个人知识库的模式` 展示成 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`，避免代表陈述只剩下孤立短语或半句话。
-- 当前概念页标题生成已改为四层收口：
+- 但从正式设计看，这套收口不应只服务概念页标题，而应升级为 page intent compiler 的统一四层机制：
   - 第一层：强规则过滤明显坏标题，例如 `示例`、`总结`、单字中文标题、问句壳标题
-  - 第二层：标题质量评分，综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号
-  - 第三层：仅对灰区标题调用 Agent / LLM hook 做受限判别，hook 只允许返回 `accept / reject / rename`
-  - 第四层：`lint` 把低质量概念标题显式报成 warning，而不是静默留在工作区里
-- 当前 `concept_update` 渲染配置除了用于后续概念页更新，也复用于灰区概念标题判别；它承担的是“受限决策”而不是自由改写 canonical_id 的角色。
-- 这意味着系统不再单纯依赖 `section_path` 最后一段命名概念页，而是把章节标题当作候选线索之一，再由质量评分和灰区判别决定是否真正提升为概念页。
+  - 第二层：候选页型与标题质量联合评分，综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号
+  - 第三层：仅对灰区候选调用 Agent / LLM hook 做受限判别，hook 只允许返回 `accept / reject / rename / reroute`
+  - 第四层：`lint` 把“页型不合适、标题质量过低、来源视图被滥用”等问题显式报成 warning，而不是静默留在工作区里
+- 当前 `concept_update` 渲染配置除了用于后续概念页更新，也复用于灰区概念标题判别；在新架构里它应逐步收敛到更通用的 `page_update / page_intent_review` 角色，而不是长期只服务 concept。
+- 这意味着系统不再单纯依赖 `section_path` 最后一段命名概念页，而是把章节标题当作候选线索之一，再由页型判定、质量评分和灰区判别决定是否真正提升为正式页面。
 - 当前概念页中的 `Source Pages`（来源页面）与 `Source Evidence`（来源证据）已经不再只平铺内部 ID，而是优先展示适合人工阅读的入口：
   - 来源摘要页链接
   - 原始来源文件链接
   - 覆盖到的 claim / chunk 数量
   - 逐条展开的证据 chunk 链接，以及对应 `section_path`（章节路径）和行号
 - `page_id / source_id / chunk_id` 等内部标识仍然保留，但会降到次级信息，避免压过真正用于阅读和下钻的页面标题、原始路径与证据位置。
-- 当前来源摘要页中的 `Chunks`（证据切块）列表也会直接链接到 `chunks/<source_id>.jsonl`，方便从来源页继续下钻切块文件本体。
+- 当前来源摘要页中的 `Chunks`（证据切块）列表也会直接链接到 `chunks/<source_id>.jsonl`，方便从来源视图继续下钻切块文件本体。
 - 当前已存在第二层可读页体系：`concept`（人类可读概念页）与 `overview`（工作区综述页）。
 - 当前这两类页面默认渲染模式都是 `llm_assisted`，但底座仍然是 deterministic：先由脚本计算 canonical claim、稳定主题、source coverage、推荐阅读路径等结构，再允许 LLM 在 grounded 约束下做可读性改写。
 - `concept` 与 `overview` 页面都必须记录 `render_target / render_mode / render_status`。
 - `overview` 在 `llm_assisted` 成功时，会额外生成折叠式 `Rewrite Traceability` 区块，显式展示改写句与其回绑页面，避免综述页长出新的“幻觉层”。
-- 因而当前页面生成的产品方向已经明确不是“只产出 source-summary + concept-summary 的中间草稿”，而是进一步支持 Agent 协同生成正式可读的概念页与工作区综述页；它们依旧由脚本先搭好 grounded 骨架，再由 LLM 做受控改写。
-- 当前默认模板也已经把这两类页面的 `command` 指向统一 Agent hook，因此对新工作区来说，“允许 LLM 辅助改写”已经不再是需要额外配置才能开启的能力，而是默认启用、按 grounded 校验自动回退的标准行为。
+- 因而当前页面生成的产品方向已经明确不是“先堆一批概念摘要页与来源摘要页再说”，而是进一步支持 Agent 协同生成正式可读页面；它们依旧由脚本先搭好 grounded 骨架，再由 LLM 做受控改写。
+- 当前默认模板也已经把这些正式页面的 `command` 指向统一 Agent hook，因此对新工作区来说，“允许 LLM 辅助改写”已经不再是需要额外配置才能开启的能力，而是默认启用、按 grounded 校验自动回退的标准行为。
 
 ### 恢复机制
 - 自动流程写入 review item 后暂停危险动作。
@@ -1349,6 +1608,15 @@ V1 当前实现说明：
 
 ## 状态与日志 State And Logging
 
+### 在编译器中的角色
+
+状态层的职责不再只是记录 ingest 走到了哪里，而是同时承载：
+- evidence ledger
+- semantic ledger
+- presentation ledger 的 live 集合与恢复入口
+
+因此，状态与日志设计必须支持“只重跑 semantic pass”“只重建页面视图”“只重建索引”这类局部重编译。
+
 ### 状态机
 最小状态流：
 `new -> normalized -> chunked -> claimed -> generated -> linked -> indexed -> linted -> done`
@@ -1372,6 +1640,15 @@ V1 当前实现说明：
 - `failed`（失败）：流程在某个阶段失败，需要查看错误日志。
 - `review_required`（需要审核）：流程遇到高风险变化，已暂停危险动作并生成审核项。
 - `review_resolved`（审核已解决）：人工或 Agent 已处理审核项，可以继续恢复后续步骤。
+
+在新方向下，还建议补一组语义层阶段概念：
+- `semantic_pending`
+- `semantic_batched`
+- `semantic_decided`
+- `semantic_abstained`
+- `semantic_superseded`
+
+这些状态不一定都进入同一个 `ingest_state` 文件，但在系统设计上必须被视为一等阶段。
 
 V1 当前实现说明：
 - 当前 `state/ingest_state.jsonl` 已实现的核心状态以 `normalized / chunked / claimed / generated / failed / review_required` 为主。
@@ -1404,6 +1681,7 @@ V1 最小持久化文件：
 - `state/reviews.jsonl`：审核账本，记录待处理和已解决的 review。
 - `state/pages.jsonl`：页面账本，记录 Wiki 页面、页面类型、路径和生命周期。
 - `state/ingest_state.jsonl`：流程账本，记录 ingest 阶段、失败点和恢复线索。
+- `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl`：语义决策账本，记录模型对文档结构、Claim 角色、页面意图等做出的结构化裁决。
 
 展开视图：
 - `claims/*.json`：单条 Claim 的人工可读展开文件。
@@ -1415,6 +1693,7 @@ V1 最小持久化文件：
 V1 规则：
 - query 可以优先读取索引与页面，因为这样更快、更适合排序。
 - 恢复流程和一致性判断必须以账本为准，因为账本保存对象身份、生命周期和跨文件关系。
+- 语义决策与证据账本必须分层保存，避免模型升级、prompt 升级或 schema 升级直接污染 evidence truth。
 - 人工编辑 Claim/Review 时，可以先修改展开文件；随后必须通过 `review-apply ... edit_then_resume` 等命令把改动纳入账本闭环。
 - 若索引与账本不一致，允许重建索引；若页面与账本不一致，优先按页面账本和生命周期规则收敛。
 
@@ -1454,6 +1733,15 @@ V1 保证的边界：
 
 ## 巡检设计 Lint Design
 
+### 在编译器中的角色
+
+Lint 不应只被理解为“质量检查”，而应被理解为 **compiler verification pass**。
+
+它至少要验证三件事：
+- evidence layer 是否自洽
+- semantic layer 是否可解释、可回放、可回链
+- presentation layer 是否与前两层一致
+
 ### 巡检范围 Lint Scope
 V1 的 lint 至少分为：
 - `normalize lint`（标准化巡检）：检查 normalized 文件、提取质量、哈希和位置映射是否可靠。
@@ -1463,6 +1751,8 @@ V1 的 lint 至少分为：
 - `source_refs lint`（来源引用巡检）：检查 Claim 和页面是否能追溯到 source/chunk。
 - `alias/canonical lint`（别名与规范名巡检）：检查别名冲突、重复规范页和重定向失效。
 - `page quality lint`（页面质量巡检）：检查页面摘要、长度、状态和低质量内容风险。
+- `semantic decision lint`（语义决策巡检）：检查 semantic decision schema、版本、目标对象覆盖率与失效状态。
+- `page intent consistency lint`（页面意图一致性巡检）：检查 Claim 角色、page intent 与最终页面类型是否冲突。
 
 V1 当前实现说明：
 - 当前 `lint` 已经能检查工作区目录结构、状态文件是否存在、核心 ID 是否唯一，以及 Claim、Page、Review 之间的基础追踪关系。
@@ -1487,8 +1777,21 @@ V1 当前实现说明：
 - Alias / Canonical（别名 / 规范名）：检查 alias（别名）冲突、重复 canonical（规范页）、redirect（重定向）失效、疑似重复页。
 - Page quality（页面质量）：检查 summary（摘要）过泛、页面过长、长期 draft（草稿）、稳定页含低置信度推论等问题。
 - 对概念页还应额外关注标题质量：结构词标题、过短标题、问句壳标题，以及仅由低质量单来源 Claim 支撑的概念页，应优先进入 warning 视图。
+- 对语义编译结果还应额外关注：
+  - semantic decision 是否缺失
+  - semantic decision 是否过期
+  - `knowledge_role` 与 `page_intent` 是否冲突
+  - `procedure / example / conclusion / structural_shell` 是否被误编译为 `concept`
+  - 来源视图是否被错误用作杂项回收页
 
 ## 测试设计 Testing
+
+### 测试总原则
+
+在新架构下，测试不应只覆盖“命令能不能跑通”，还必须覆盖：
+- evidence IR 是否稳定
+- semantic pass 是否可批量、可缓存、可回放
+- presentation layer 是否正确消费 semantic decisions
 
 ### 初始化
 - 能创建 sibling 工程。
@@ -1513,12 +1816,32 @@ V1 当前实现说明：
 - `claim -> page` 可反查。
 - 删除或归档页面后引用计数更新。
 - review 解决后，自动页面、页面索引和反向引用关系应即时刷新。
+- semantic decision 能反查到输入对象、模型版本与 prompt 版本。
 
 ### 检索
 - 标题命中高于正文命中。
 - 高权重页面类型优先于低权重类型。
 - Query 默认遵循先页后声明再 chunk。
 - Query normalization（查询标准化）能完成 aliases（别名）扩展、canonical（规范页）归一和基本意图识别。
+- `definition / compare / timeline / how_to / evidence` 等意图应触发不同的 evidence-first 或 presentation-first 阅读路径。
+
+### 语义分析与批处理
+- document analysis batch 能稳定输出 `document_kind / structure_quality / chunk_strategy_hint`。
+- claim role batch 能稳定输出 `knowledge_role / page_intent_hints / concept_candidate_score`。
+- page intent batch 能稳定区分 `concept / guide / example / topic / reference / source-summary / reject`，并把 `section / conclusion / structural_shell` 等非正式页面候选稳定拦截或改道。
+- semantic batch scheduler 能做按任务类型分桶、按 token 预算分片、局部失败重试与缓存命中复用。
+- `abstain` 结果不会被错误当成 `accept` 或 `reject` 写入页面账本。
+
+### 语义账本与回放
+- semantic decision ledger 能记录 `task_type / item_ids / model_key / prompt_version / schema_version / input_fingerprint`。
+- 相同输入重复执行时可命中缓存。
+- prompt 或 schema 版本变化时，旧语义决策能正确失效。
+- 只重跑 semantic pass 时，不会污染 evidence ledger。
+
+### 页面类型与视图层
+- `concept` 候选不会因为章节标题、示例名、总结段而误生成。
+- `guide / example / topic / overview` 等页面类型一旦引入，query 与 lint 能正确识别其权重和职责。
+- 来源视图不会长期承担所有非 concept 内容的宿主职责，`procedure / example / reference / topic` 都应有自己的正式落点。
 
 V1 当前实现说明：
 - 前三项当前已实现。
@@ -1570,20 +1893,35 @@ V1 当前实现说明：
 
 ## V1落地边界 Implementation Boundary
 
-### 已落地能力
+### V1 应优先落地的架构骨架
+
+- evidence-first semantic compiler 总体方向
+- `raw -> normalized -> chunks -> claims` 作为 evidence IR 主链路
+- `semantic analyzer interface` 与 `grounded rewrite interface` 的职责分离
+- `semantic batch scheduler` 的统一调度入口
+- evidence ledger / semantic ledger / presentation layer 的边界
+- `page -> claim -> chunk -> source` 证据链稳定可回溯
+- query `reading_pack` / answer-ready / review-auto handoff 的稳定 contract
+
+### 当前已落地或已有明确实现基础
 - 统一 CLI 骨架与 8 个主命令入口。
 - 工作区初始化、模板生成、Git 基线提交。
 - 多格式标准化及部分降级路径。
-- chunk（切块）、claim（声明）、自动 source/concept（来源 / 概念）页面生成。
+- chunk（切块）、claim（声明）、早期自动页生成，以及较新的可读 `concept / overview` 页面渲染基础。
 - alias registry（别名注册表）、search index（搜索索引）、query `reading_pack`（查询阅读包）。
 - Claim review（声明审核）与 alias conflict review（别名冲突审核）。
 - `review-apply` 后的页面、索引、状态收口。
 - 工作区级 lint 与 lint 报告写回。
 - 覆盖主闭环的 E2E 与若干关键回归测试。
 
-### 仍属规划或仅部分落地
+### 仍属规划、需按新方向重构或仅部分落地
+- `semantic/` 目录与 `semantic_decisions` 正式账本
+- document analysis / claim role / page intent 三类 batch semantic pass
+- `abstain`、`prompt_version`、`schema_version` 等语义决策协议
+- 页面 taxonomy 从早期遗留页型重构为 `concept / guide / example / topic / timeline / reference / overview / source-summary`
+- `source-summary` 从“默认回收站”收缩为“来源入口页 / 来源视图”
+- Claim 向更宽泛 `Knowledge Unit` 抽象的演进
 - 工作区版本守卫、显式迁移入口，以及在 schema 明确后补齐的定向迁移机制。
-- 更丰富的页面类型，如成熟的 entity（实体页）/ overview（综述页）/ qa-note（问答笔记）工作流。
 - 细分 `normalize/chunk/wikilink/page quality` 子类 lint 子命令。
 - 更复杂的动态阅读预算器与检索策略调度器。
 - 更细粒度日志系统 `logs/*.jsonl` 的体系化落地。
@@ -1604,3 +1942,7 @@ V1 当前实现说明：
 - V1 不把 LibreOffice、Pandoc、pdftotext、tesseract 这类外部工具当成必须依赖。
 - Agent 规则的权威源是 `Agent.md`，`AGENTS.md` 和 `CLAUDE.md` 只做入口适配。
 - 页面标题默认采用中文优先策略；英文术语、缩写和旧译名默认进入 `aliases`。
+- 项目尚未正式发布，因此允许对内部数据模型、目录结构、页面 taxonomy 和语义账本做根本性调整。
+- 即便允许重构，也应尽量保留对外最有解释力的主链路表达：`raw -> normalized -> chunks -> claims -> wiki`。
+- LLM 永远不是事实来源；它只能是受限语义分析器、受限裁决器和 grounded 表达器。
+- 批量语义判定优先于高频单条判定；缓存、schema 校验和 grounded 回链优先于“模型自由发挥”。

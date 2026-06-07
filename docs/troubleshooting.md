@@ -166,3 +166,66 @@ py -3.12 -m venv .venv
 
 - 我们可以在仓库里提供跨平台脚本与 Windows 验证清单
 - 但当前仓库内无法直接在真实 Windows 环境上执行验证
+
+## 11. `Workspace schema guard failed`
+
+现象：
+
+- `query`、`ingest`、`lint`、`review-apply` 等写链路或读链路命令直接报 schema guard
+
+常见原因：
+
+- `config/project.yml` 里的 `workspace.schema_version` 缺失
+- 工作区是旧版本或未显式标注版本的老工作区
+- 工作区版本高于当前 CLI 已知 schema registry
+
+建议顺序：
+
+1. 先运行 `python3 -m myagentwiki compat-report --target-dir ...`
+2. 如果只想看完整迁移计划，再运行 `python3 -m myagentwiki migrate --target-dir ...`
+3. 若 schema path 提示需要确认，再使用 `python3 -m myagentwiki migrate-schema-confirm --confirm ...`
+4. 若确实要执行迁移，再使用 `python3 -m myagentwiki migrate --apply --target-dir ...`
+
+说明：
+
+- 当前 CLI 不会在 schema guard 失败时静默继续写入
+- 这不是“命令坏了”，而是为了避免在未知或过旧工作区上直接改账本
+
+## 12. `compat-report` / `migrate` 里看到 `schema_transition_not_registered`
+
+含义：
+
+- 目标 schema 版本是已知的
+- 但当前 transition graph 里还没有从现有版本到目标版本的已注册路径
+
+建议：
+
+- 先不要手工改 `state/*.jsonl`
+- 回到当前 CLI 已支持的 schema 目标，或等待后续版本补正式 transition
+
+## 13. `compat-report` / `migrate` 里看到 `inspect_target_workspace_schema_version`
+
+含义：
+
+- 你指定的 `--to-schema-version` 根本不在当前已知 schema registry 中
+
+建议：
+
+- 先确认目标版本名是否写对
+- 如果这是未来准备中的版本，不要把它当成当前 CLI 已支持的可规划目标
+
+说明：
+
+- 当前系统会区分“目标版本未知”和“目标版本已知但 path 未注册”这两种灰区
+
+## 14. 迁移后想撤回
+
+做法：
+
+- 先查看最近一次迁移是否已经生成 backup snapshot
+- 然后运行 `python3 -m myagentwiki migrate --rollback --target-dir ...`
+
+说明：
+
+- 当前 rollback 主要恢复关键状态文件、配置与迁移前备份内容
+- 它是最小恢复骨架，不等于通用跨版本回滚系统

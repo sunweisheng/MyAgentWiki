@@ -63,6 +63,8 @@ def text_is_question_like(text: str) -> bool:
         return False
     if cleaned.endswith(("？", "?")):
         return True
+    if ("？" in cleaned or "?" in cleaned) and any(prefix in cleaned for prefix in QUESTION_PREFIXES):
+        return True
     return any(cleaned.startswith(prefix) for prefix in QUESTION_PREFIXES)
 
 
@@ -428,6 +430,129 @@ def handle_render_workspace_overview_page(payload: dict) -> dict:
     }
 
 
+def handle_document_analysis_batch(payload: dict) -> dict:
+    items = payload.get("items", []) or []
+    decisions = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id", "")).strip()
+        normalized_path = normalize_text(item.get("normalized_path", ""))
+        title = normalize_text(item.get("title", ""))
+        if not item_id:
+            continue
+        document_kind = "reference" if "faq" in normalized_path.lower() else "note"
+        chunk_strategy_hint = "heading_first"
+        if any(marker in title.lower() for marker in ("guide", "tutorial", "how")):
+            document_kind = "tutorial"
+        if "chat" in normalized_path.lower():
+            chunk_strategy_hint = "chat_turn"
+        elif "plain" in normalized_path.lower() or "note" in normalized_path.lower():
+            chunk_strategy_hint = "paragraph_first"
+        decisions.append(
+            {
+                "item_id": item_id,
+                "decision": {
+                    "document_kind": document_kind,
+                    "structure_quality": "mostly_clean",
+                    "chunk_strategy_hint": chunk_strategy_hint,
+                },
+                "confidence": 0.82,
+                "reason_code": "agent_hook_document_analysis_batch_v1",
+            }
+        )
+    return {"decisions": decisions}
+
+
+def handle_claim_role_batch(payload: dict) -> dict:
+    items = payload.get("items", []) or []
+    decisions = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id", "")).strip()
+        text = normalize_text(item.get("text", ""))
+        if not item_id or not text:
+            continue
+        role = "fact"
+        page_intent_hints = ["topic"]
+        concept_candidate_score = 0.45
+        if text_is_question_like(text):
+            role = "meta"
+            page_intent_hints = ["reject"]
+            concept_candidate_score = 0.05
+        elif any(marker in text for marker in ("步骤", "首先", "然后", "最后", "如何", "怎么")):
+            role = "procedure"
+            page_intent_hints = ["guide"]
+            concept_candidate_score = 0.2
+        elif any(marker in text for marker in ("时间线", "演变", "历史阶段", "历程", "起初", "随后", "后来")):
+            role = "fact"
+            page_intent_hints = ["timeline"]
+            concept_candidate_score = 0.22
+        elif any(marker in text for marker in ("FAQ", "清单", "列表", "参考", "规则", "参数")):
+            role = "fact"
+            page_intent_hints = ["reference"]
+            concept_candidate_score = 0.25
+        elif any(marker in text for marker in ("例如", "比如", "示例", "案例")):
+            role = "example"
+            page_intent_hints = ["example"]
+            concept_candidate_score = 0.18
+        elif any(marker in text for marker in ("是", "用于", "意味着", "是一种")) and not text_looks_fragmentary(text):
+            role = "definition"
+            page_intent_hints = ["concept", "topic"]
+            concept_candidate_score = 0.88
+        decisions.append(
+            {
+                "item_id": item_id,
+                "decision": {
+                    "knowledge_role": role,
+                    "page_intent_hints": page_intent_hints,
+                    "concept_candidate_score": concept_candidate_score,
+                },
+                "confidence": 0.84,
+                "reason_code": "agent_hook_claim_role_batch_v1",
+            }
+        )
+    return {"decisions": decisions}
+
+
+def handle_page_intent_batch(payload: dict) -> dict:
+    items = payload.get("items", []) or []
+    decisions = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id", "")).strip()
+        claim_texts = [normalize_text(text) for text in item.get("claim_texts", []) if normalize_text(text)]
+        merged = " ".join(claim_texts)
+        if not item_id:
+            continue
+        page_intent = "topic"
+        if any(text_is_question_like(text) for text in claim_texts):
+            page_intent = "reject"
+        elif any(marker in merged for marker in ("时间线", "演变", "历史阶段", "历程", "起初", "随后", "后来")):
+            page_intent = "timeline"
+        elif any(marker in merged for marker in ("FAQ", "清单", "列表", "参考", "规则", "参数")):
+            page_intent = "reference"
+        elif any(marker in merged for marker in ("步骤", "首先", "然后", "最后", "如何", "怎么")):
+            page_intent = "guide"
+        elif any(marker in merged for marker in ("例如", "比如", "示例", "案例")):
+            page_intent = "example"
+        elif any(marker in merged for marker in ("是", "用于", "意味着", "是一种")):
+            page_intent = "concept"
+        decisions.append(
+            {
+                "item_id": item_id,
+                "decision": {
+                    "page_intent": page_intent,
+                },
+                "confidence": 0.81,
+                "reason_code": "agent_hook_page_intent_batch_v1",
+            }
+        )
+    return {"decisions": decisions}
+
+
 def main() -> int:
     payload = json.load(sys.stdin)
     task = payload.get("task")
@@ -441,6 +566,12 @@ def main() -> int:
         result = handle_render_readable_concept_page(payload)
     elif task == "render_workspace_overview_page":
         result = handle_render_workspace_overview_page(payload)
+    elif task == "review_document_analysis_batch":
+        result = handle_document_analysis_batch(payload)
+    elif task == "review_claim_role_batch":
+        result = handle_claim_role_batch(payload)
+    elif task == "review_page_intent_batch":
+        result = handle_page_intent_batch(payload)
     else:
         result = {"decision": "skip", "reason": "unsupported_task"}
     json.dump(result, sys.stdout, ensure_ascii=False)

@@ -6,6 +6,9 @@ project:
   write_policy: "normal_auto_write"
   positioning: "agent_driven_local_llm_wiki"
 
+workspace:
+  schema_version: "v1"
+
 paths:
   raw: "${raw_dir_relative_path}"
   normalized: "normalized"
@@ -22,6 +25,47 @@ query:
   alias_expansion: true
   canonical_resolution: true
   preferred_language: "zh"
+
+semantic:
+  batch_scheduler:
+    default_batch_size: 12
+    max_retries: 1
+  document_analysis:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.7
+    batch_size: 10
+    model_key: "local-default"
+    prompt_version: "v1"
+    schema_version: "v1"
+  claim_role:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.72
+    batch_size: 12
+    model_key: "local-default"
+    prompt_version: "v1"
+    schema_version: "v1"
+  page_intent:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.72
+    batch_size: 8
+    model_key: "local-default"
+    prompt_version: "v1"
+    schema_version: "v1"
 
 automation:
   mode: "safe_auto"

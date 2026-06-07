@@ -36,6 +36,17 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 - 需要语义判断的步骤优先交给 Agent / LLM hook 自动推进
 - 只有在高风险冲突、归属不清或 hook 没给出高置信结论时，才升级为人工判断
 
+当前迁移与兼容层的定位也已明确：
+
+- `compat-report` / `migrate` 负责显式处理旧工作区兼容问题，而不是让兼容层继续主导日常主链路
+- 旧页型与旧 schema 只作为迁移输入存在，新工作区默认直接走新的语义编译链
+- `compat-report` / `migrate` 当前都支持显式 `--to-schema-version`，迁移规划不再被默认当前 schema 版本写死
+- `migrate --apply` 会先写 migration report、backup snapshot 与 `state/migration_runs.jsonl`
+- `migrate --rollback` 可以基于最近一次 migration backup snapshot 恢复关键状态与配置
+- 若 schema path 含确认步，系统会先降为 `report_only`，并通过 `state/schema_confirmations.jsonl` + `migrate-schema-confirm` 恢复到可继续自动规划的状态
+- migration 灰区判断结果不会直接回写页面状态，而是先进入 `state/migration_decisions.jsonl` 与 `state/migration_followups.jsonl`
+- schema registry 当前还带最小自校验，用于检查 `version order / transition graph / action contract` 是否互相对齐
+
 ## 核心理念
 
 MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知识逐步编译成一个持续维护的 Wiki：
@@ -278,6 +289,29 @@ python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format me
 - 想直接把结果交给上层回答器或 API 时，用 `answer-query`
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 - 想让 Agent 先自动收口高把握审核项，再把剩余需要你判断的部分整理成继续对话的输入时，用 `review-auto`
+
+### 6. 工作区兼容与迁移
+
+```bash
+python3 -m myagentwiki compat-report --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki compat-report --target-dir /path/to/MyNotesWiki --to-schema-version v2
+python3 -m myagentwiki migrate --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki migrate --target-dir /path/to/MyNotesWiki --format prompt
+python3 -m myagentwiki migrate --apply --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki migrate --rollback --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki migrate-schema-confirm --confirm \
+  --target-dir /path/to/MyNotesWiki \
+  --from-version unversioned \
+  --to-version v1
+python3 -m myagentwiki migrate-followups --target-dir /path/to/MyNotesWiki
+```
+
+推荐用法：
+- 想先看 schema 与旧页型兼容风险时，用 `compat-report`
+- 想拿到可执行计划、风险分层和 handoff 载荷时，用 `migrate`
+- schema path 被降成 `report_only` 且提示需要确认时，用 `migrate-schema-confirm`
+- 想恢复最近一次迁移前的关键状态与配置时，用 `migrate --rollback`
+- 想继续消费外部 LLM/Agent 回写的迁移灰区判断时，用 `migrate-decisions` 和 `migrate-followups`
 
 当前新初始化工作区默认就会把审核、stable 提升、可读概念页和综述页统一接到包内 Agent hook：
 
@@ -525,11 +559,19 @@ V1 已实现这些命令入口：
 - `myagentwiki init`
 - `myagentwiki ingest`
 - `myagentwiki query`
+- `myagentwiki answer-query`
 - `myagentwiki lint`
 - `myagentwiki doctor`
 - `myagentwiki bootstrap`
 - `myagentwiki review-list`
 - `myagentwiki review-apply`
+- `myagentwiki review-auto`
+- `myagentwiki compat-report`
+- `myagentwiki migrate`
+- `myagentwiki migrate-decisions`
+- `myagentwiki migrate-followups`
+- `myagentwiki migrate-schema-confirm`
+- `myagentwiki semantic-batch`
 
 当前实现状态：
 
@@ -605,6 +647,28 @@ V1 已实现这些命令入口：
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑
   - JSON 输出当前会附带 `workspace_summary`，纯文本输出会显式打印工作区绝对路径与当前处理的 review 标识
   - review 动作执行后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与页面检索索引
+- `myagentwiki compat-report`
+  - 已实现工作区兼容性检查与迁移候选收口，统一返回 schema migration 与 compatibility cleanup 两类候选
+  - 当前会输出 `action_catalog`、`schema_guard`、`target_schema_version`、`schema_registry` 诊断，以及 `auto_plan / report_only` 风险分层
+  - 当前支持显式 `--to-schema-version`，可直接面向已知未来版本做 path planning
+- `myagentwiki migrate`
+  - 已实现 `--plan`、`--apply`、`--rollback` 三种模式
+  - 当前 `--apply` 会先写 migration report 和 backup snapshot，再执行 schema migration / compatibility cleanup
+  - 当前 `--rollback` 可恢复最近一次或指定 backup dir 的关键状态文件与配置
+  - 当前 `--format prompt|messages|chatml` 只面向 `report_only` 灰区输出 handoff，不会把确定性 `apply_supported` 动作重新交给 LLM 判定
+  - 当前计划输出会把 schema migration 放在前面，并显式区分“目标版本未知”“目标版本已知但 path 未注册”“path 需确认”“path 可自动规划”
+- `myagentwiki migrate-schema-confirm`
+  - 已实现显式确认型 schema path 的 ledger 收口
+  - 当前确认记录写入 `state/schema_confirmations.jsonl`，后续重新规划时可把对应 schema path 从 `report_only` 恢复到 `auto_plan`
+- `myagentwiki migrate-decisions`
+  - 已实现外部 Agent / LLM 返回的 migration 灰区判断 ingest 与 apply
+  - 当前标准化结果写入 `state/migration_decisions.jsonl`，而不是直接跳过账本改状态
+- `myagentwiki migrate-followups`
+  - 已实现 migration follow-up queue 的列出、完成和提升为 review
+  - 当前 follow-up queue 写入 `state/migration_followups.jsonl`
+- `myagentwiki semantic-batch`
+  - 已实现 `document_analysis / claim_role / page_intent` 三类语义批处理入口
+  - 当前支持批处理、缓存命中、dry-run 和统一语义账本写回
 
 ## Windows 兼容性 / Windows Compatibility
 
@@ -712,9 +776,10 @@ python scripts/validate_workflow.py --keep-workspace
 
 1. `README.md`
 2. `docs/MyAgentWiki系统详细设计.md`
-3. `docs/runtime-deps.md`
-4. `docs/project-materials/` 中的学习与工程记录
-5. `docs/troubleshooting.md`
+3. `docs/全链路重构实现计划.md`
+4. `docs/runtime-deps.md`
+5. `docs/project-materials/` 中的学习与工程记录
+6. `docs/troubleshooting.md`
 
 ## 开发说明
 
@@ -722,10 +787,9 @@ V1 已经完成收口，当前仓库重点从“打通主链路”转为“保�
 
 V1.1 可以继续推进：
 
-- 工作区 schema 版本检查、版本守卫与显式迁移入口
-  - 这部分当前仍是待补齐机制，不应视为仓库已具备能力
-  - V1.1 更适合先把“能否继续安全读写旧工作区”的判断机制建起来，而不是预先实现一个没有明确目标 schema 的通用迁移器
-  - 若后续版本引入破坏性账本变更，再补具体的 `migrate` 路径、备份策略和 dry-run 机制
+- 更真实的未来 schema transition 定义与对应 action handler
+  - 当前迁移骨架、风险分层、confirmation ledger、decision/followup ledger 和 registry 自校验都已经具备
+  - 但当前仍只内建最小 `unversioned -> v1` schema 升级动作；未来 `v2 / v3` 仍需要等真实 schema 变更出现后再补定向 transition
 - 更深入的 `stable / disputed` Claim 治理
 - `qa-note` 正式页面提升流程
 - entity / overview 等更高层 Wiki 页面生成
