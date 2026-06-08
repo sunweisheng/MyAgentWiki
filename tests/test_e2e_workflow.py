@@ -323,6 +323,31 @@ def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
     assert not any(assets_dir.iterdir())
 
 
+def test_init_templates_constrain_agent_prechecks_to_known_raw(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "note.md").write_text("# 示例\n\n资料在这里。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "ScopedRawWiki"
+    run_cli(
+        "init",
+        "--project-name",
+        "ScopedRawWiki",
+        "--source-dir",
+        str(source_dir),
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
+    claude_text = (workspace_dir / "CLAUDE.md").read_text(encoding="utf-8")
+    expected_line = (
+        "默认只检查这个目录本身；不要为了确认导入范围先读取它的父目录、其他兄弟目录或整库内容"
+    )
+    assert expected_line in agents_text
+    assert expected_line in claude_text
+
+
 def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
