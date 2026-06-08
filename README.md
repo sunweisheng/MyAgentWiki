@@ -273,7 +273,9 @@ python3 -m myagentwiki lint --target-dir /path/to/MyNotesWiki
 如果 Markdown 文档里包含远程图片，还需要知道这几点：
 
 - `ingest` 会在标准化阶段尝试下载 Markdown 内的远程图片，并把文件落到工作区外部 sibling `assets/` 目录。
+- `raw/` 仍是唯一默认资料源；这个 sibling `assets/` 目录只是派生附件目录，不是独立导入源。
 - 下载后的图片会按 `source_id / image_index` 组织存放，不会写回 `raw/` 原文。
+- 只有当 `normalized metadata` 明确记录了 `asset_path` 回链时，Agent 才应按需读取对应附件。
 - 程序会先严格校验 HTTPS 证书；如果代理 / VPN 把证书链改写了，脚本会只针对“证书校验失败”自动做一次受控重试。
 - 404、超时、权限不足等非证书错误不会触发这条自动回退。
 - 如果确实走了这条回退路径，metadata 里会记录 `markdown_remote_image_download_used_insecure_retry` 与 `download_mode: insecure_retry`，便于后续排查。

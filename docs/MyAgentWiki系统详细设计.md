@@ -205,7 +205,7 @@ V1.1 的推荐推进方式：
 1.5 下载素材层
 - `assets/`
 - 位于工作区外部并与工作区平级，保存标准化阶段下载得到的远程图片等派生素材。
-- 该层不属于用户手工维护的原始资料，但也不写回 `raw/`。
+- 该层不属于用户手工维护的原始资料，也不是独立导入源，但也不写回 `raw/`。
 - Markdown 远程图片当前默认落在 `assets/<source_id>/<image_index>_<sanitized_name>.<ext>`。
 
 2. 证据编译层
@@ -236,7 +236,7 @@ V1.1 的推荐推进方式：
 - 自动流程主要写入第 2、3、4、5 层。
 - `state/*.jsonl` 负责 evidence 与 live object 的结构化账本；`semantic` 负责语义决策账本；`wiki/*.md`、`claims/*.json`、`reviews/*.json` 负责面向人和 Agent 的展开视图。
 - 若出现多份数据不一致，应优先区分是“证据层不一致”还是“语义层不一致”，再分别通过 re-ingest、semantic rebuild、review-apply、lint 收敛。
-- `assets/` 虽然位于工作区外部，但属于标准化流程生成的派生产物；其路径、哈希、内容类型和下载模式应通过 normalized metadata 回链，而不是让上层 Agent 猜测文件来源。
+- `assets/` 虽然位于工作区外部，但属于标准化流程生成的派生产物，不应被当作独立导入源；其路径、哈希、内容类型和下载模式应通过 normalized metadata 回链，而不是让上层 Agent 猜测文件来源。
 
 ### 运行依赖清单文件
 母仓库需要额外提供：
