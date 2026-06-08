@@ -351,6 +351,8 @@ def test_init_templates_constrain_agent_prechecks_to_known_raw(tmp_path: Path) -
 def test_skill_and_default_prompt_constrain_prechecks_to_known_raw() -> None:
     skill_text = Path("SKILL.md").read_text(encoding="utf-8")
     openai_agent_text = Path("agents/openai.yaml").read_text(encoding="utf-8")
+    assert "默认就把这个顶层 `raw/` 当作唯一资料源" in skill_text
+    assert "treat that top-level raw directory as the only default source" in openai_agent_text
     assert "默认检查范围也应限制在该 `raw/` 内" in skill_text
     assert "restrict pre-init and pre-ingest file checks to that raw directory" in openai_agent_text
     assert "不要主动探测附近已有工作区、兄弟目录或父目录来替用户猜测来源" in skill_text
