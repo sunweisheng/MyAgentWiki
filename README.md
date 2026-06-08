@@ -163,8 +163,10 @@ New-Item -ItemType Junction `
 安装后重启 Codex，让新的 Skill 被重新扫描。使用时可以直接说：
 
 ```text
-使用 myagentwiki skill，帮我初始化并导入这个本地知识库。
+使用 myagentwiki skill，帮我基于当前顶层 raw/ 初始化这个知识库工作区，并只导入这个 raw/ 里的资料。
 ```
+
+如果你想限制导入范围，建议在指令里直接点名资料源，例如现有顶层 `raw/`；不要只说“导入这个本地知识库”，否则上层 Agent 更容易把当前目录里的其他材料也当成候选来源。
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
 
@@ -203,7 +205,7 @@ New-Item -ItemType Junction `
 安装后重启 Claude Code。使用时可以直接说：
 
 ```text
-使用 myagentwiki skill，执行 doctor、init、ingest、query 和 lint。
+使用 myagentwiki skill，围绕当前顶层 raw/ 执行 doctor、init、ingest、query 和 lint，不要把其他目录并入导入源。
 ```
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Claude Code 还会读取根目录的 `CLAUDE.md`，它会把 Claude Code 引导到共享规则 `Agent.md` 和 review / state 恢复约定。
