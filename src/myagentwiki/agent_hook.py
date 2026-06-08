@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from pathlib import Path
 
 
 NOISY_ALIAS_VALUES = {
@@ -553,6 +554,28 @@ def handle_page_intent_batch(payload: dict) -> dict:
     return {"decisions": decisions}
 
 
+def handle_describe_image(payload: dict) -> dict:
+    image_path = str(payload.get("image_path", "")).strip()
+    image_name = str(payload.get("image_name", "")).strip() or Path(image_path).name or "image"
+    image_context = payload.get("image_context", {})
+    summary_parts = [f"图片文件: {image_name}"]
+    if isinstance(image_context, dict):
+        alt_text = normalize_text(str(image_context.get("image_alt", "")))
+        if alt_text:
+            summary_parts.append(f"alt: {alt_text}")
+        target_value = normalize_text(str(image_context.get("image_target", "")))
+        if target_value:
+            summary_parts.append(f"source: {target_value}")
+    return {
+        "decision": "report_only",
+        "confidence": 0.0,
+        "reason": "agent_hook_image_description_not_implemented",
+        "summary": "；".join(summary_parts),
+        "extracted_text": "",
+        "warnings": ["image_to_text_hook_returned_no_text"],
+    }
+
+
 def main() -> int:
     payload = json.load(sys.stdin)
     task = payload.get("task")
@@ -572,6 +595,8 @@ def main() -> int:
         result = handle_claim_role_batch(payload)
     elif task == "review_page_intent_batch":
         result = handle_page_intent_batch(payload)
+    elif task == "describe_image":
+        result = handle_describe_image(payload)
     else:
         result = {"decision": "skip", "reason": "unsupported_task"}
     json.dump(result, sys.stdout, ensure_ascii=False)

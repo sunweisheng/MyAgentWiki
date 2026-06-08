@@ -309,12 +309,18 @@ def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:
     )
 
     raw_dir = tmp_path / "raw"
+    assets_dir = tmp_path / "assets"
     assert Path(init_result["target_dir"]).resolve() == workspace_dir.resolve()
     assert Path(init_result["raw_dir"]).resolve() == raw_dir.resolve()
+    assert Path(init_result["assets_dir"]).resolve() == assets_dir.resolve()
     assert init_result["raw_dir_preexisting"] is False
+    assert init_result["assets_dir_preexisting"] is False
     assert raw_dir.exists()
     assert raw_dir.is_dir()
+    assert assets_dir.exists()
+    assert assets_dir.is_dir()
     assert not any(raw_dir.iterdir())
+    assert not any(assets_dir.iterdir())
 
 
 def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> None:
@@ -474,3 +480,34 @@ def test_ingest_skips_hidden_files_and_hidden_directories_in_raw(tmp_path: Path)
     }
     assert ingested_paths == {"../raw/notes/kept.md", "../raw/visible.md"}
     assert ingest_result["summary"]["created_count"] == 2
+
+
+def test_ingest_does_not_follow_symlinked_files_outside_raw(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    outside_dir = tmp_path / "outside_docs"
+    outside_dir.mkdir()
+    (source_dir / "visible.md").write_text("# Visible\n\n这条资料应被摄取。\n", encoding="utf-8")
+    outside_file = outside_dir / "external.md"
+    outside_file.write_text("# External\n\n这条资料不应被摄取。\n", encoding="utf-8")
+    os.symlink(outside_file, source_dir / "linked_external.md")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "NoOutsideSymlinkRead",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    ingested_paths = {
+        record["source_path"]
+        for record in load_jsonl(workspace_dir / "state" / "sources.jsonl")
+    }
+    assert ingested_paths == {"../raw/visible.md"}
+    assert ingest_result["summary"]["created_count"] == 1

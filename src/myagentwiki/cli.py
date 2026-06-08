@@ -26,7 +26,12 @@ import ast
 import tomllib
 import tempfile
 import fcntl
+import mimetypes
+import urllib.error
+import urllib.request
 from urllib.parse import quote
+from urllib.parse import unquote
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 from .semantic import (
@@ -83,6 +88,7 @@ MIGRATION_DECISIONS_REL_PATH = Path("state") / "migration_decisions.jsonl"
 MIGRATION_FOLLOWUPS_REL_PATH = Path("state") / "migration_followups.jsonl"
 MIGRATION_RUNS_REL_PATH = Path("state") / "migration_runs.jsonl"
 SCHEMA_CONFIRMATIONS_REL_PATH = Path("state") / "schema_confirmations.jsonl"
+MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 NEGATION_MARKERS = ("不", "不是", "没有", "无法", "不能", "未", "无", "禁止", "不要", "not ", "no ", "never ", "cannot ")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
@@ -976,12 +982,24 @@ def build_latest_source_record_by_path(records: list[dict]) -> dict[str, dict]:
     return latest_by_path
 
 
+def path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def collect_files(root: Path) -> list[Path]:
     # 递归遍历 raw 下所有文件，允许用户按主题、来源、年份自由分子目录管理原始资料。
     return sorted(
         path
         for path in root.rglob("*")
-        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(root).parts)
+        if (
+            path.is_file()
+            and path_is_within_root(path, root)
+            and not any(part.startswith(".") for part in path.relative_to(root).parts)
+        )
     )
 
 
@@ -1976,12 +1994,39 @@ def resolve_workspace_path(target: Path, configured_path: str) -> Path:
     return (target / path).resolve()
 
 
+def raw_assets_dir_for_workspace(target: Path, raw_dir: Path | None = None) -> Path:
+    resolved_raw_dir = raw_dir or resolve_workspace_raw_dir(target)
+    return (resolved_raw_dir.parent / "assets").resolve()
+
+
+def resolve_workspace_raw_dir(target: Path) -> Path:
+    config = load_workspace_config(target)
+    raw_dir = resolve_workspace_path(target, config["paths"]["raw"])
+    if raw_dir.name != "raw":
+        raise ValueError(f"Workspace raw directory must be named 'raw': {raw_dir}")
+    if raw_dir.parent != target.parent:
+        raise ValueError(
+            f"Workspace raw directory must be a sibling of the workspace: raw={raw_dir} target={target}"
+        )
+    return raw_dir
+
+
 def resolve_source_record_path(target: Path, source_path: str) -> Path:
     # source_path 默认按“相对工作区可访问路径”解释，这样 ../raw/... 也能稳定解析。
     path = Path(source_path).expanduser()
     if path.is_absolute():
         return path
     return (target / path).resolve()
+
+
+def ensure_path_within_raw_root(path: Path, raw_root: Path, *, purpose: str) -> Path:
+    resolved_path = path.resolve()
+    resolved_root = raw_root.resolve()
+    if not path_is_within_root(resolved_path, resolved_root):
+        raise ValueError(
+            f"{purpose} must stay within raw directory: path={resolved_path} raw={resolved_root}"
+        )
+    return resolved_path
 
 
 def alias_index_path(target: Path) -> Path:
@@ -2608,8 +2653,27 @@ def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict
     # Markdown 和纯文本是当前最稳定的一类输入，直接按文本规范化处理。
     source_type = source_record["source_type"]
     raw_path = resolve_source_record_path(target, source_record["source_path"])
+    ensure_path_within_raw_root(raw_path, resolve_workspace_raw_dir(target), purpose="Source record")
     raw_text = raw_path.read_text(encoding="utf-8")
-    normalized_text = normalize_text_content(source_type, raw_text)
+    if source_type == "markdown":
+        normalized_text, metadata = enrich_markdown_with_embedded_images(
+            target=target,
+            source_record=source_record,
+            raw_path=raw_path,
+            raw_text=raw_text,
+        )
+    else:
+        normalized_text = normalize_text_content(source_type, raw_text)
+        metadata = {
+            "content_format": "markdown",
+            "extraction_method": "python_only",
+            "extraction_quality": "good",
+            "warnings": [],
+            "location_map": {
+                "type": "line_map",
+                "source_path": source_record["source_path"],
+            },
+        }
     normalized_rel_path = Path("normalized") / f"{source_record['source_id']}.md"
     normalized_abs_path = target / normalized_rel_path
     normalized_abs_path.write_text(normalized_text, encoding="utf-8")
@@ -2617,6 +2681,9 @@ def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict
     normalized_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
     line_count = len(normalized_text.splitlines()) or 1
     title = raw_path.stem
+    location_map = dict(metadata.get("location_map", {}))
+    if location_map.get("type") == "line_map" and "normalized_line_range" not in location_map:
+        location_map["normalized_line_range"] = f"1-{line_count}"
 
     return {
         "source_id": source_record["source_id"],
@@ -2632,14 +2699,10 @@ def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict
         "document_kind": "note",
         "structure_quality": "unknown",
         "chunk_strategy_hint": "heading_first",
-        "extraction_method": "python_only",
-        "extraction_quality": "good",
-        "warnings": [],
-        "location_map": {
-            "type": "line_map",
-            "normalized_line_range": f"1-{line_count}",
-            "source_path": source_record["source_path"],
-        },
+        "extraction_method": metadata.get("extraction_method", "python_only"),
+        "extraction_quality": metadata.get("extraction_quality", "good"),
+        "warnings": metadata.get("warnings", []),
+        "location_map": location_map,
         "updated_at": utc_now_iso(),
     }
 
@@ -3453,6 +3516,389 @@ def ocr_text_is_meaningful(text: str, min_length: int = 12) -> bool:
     return len(interesting_chars) >= max(6, min_length // 2)
 
 
+def image_understanding_text_is_meaningful(text: str, min_length: int = 16) -> bool:
+    normalized = normalize_binary_snippet_text(text)
+    if len(normalized) < min_length:
+        return False
+    signal_chars = [
+        char for char in normalized
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    ]
+    return len(signal_chars) >= max(8, min_length // 2)
+
+
+def sanitize_asset_filename(value: str, default_stem: str = "asset") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    cleaned = cleaned.strip("._")
+    if not cleaned:
+        cleaned = default_stem
+    return stabilize_filename_component(cleaned, max_bytes=120, separator="_")
+
+
+def markdown_image_target_candidates(target_value: str) -> list[str]:
+    normalized = target_value.strip()
+    if not normalized:
+        return []
+    if normalized.startswith("<") and normalized.endswith(">"):
+        normalized = normalized[1:-1].strip()
+    normalized = normalized.replace("\\)", ")").replace("\\(", "(")
+    return [normalized]
+
+
+def markdown_image_asset_extension(
+    *,
+    parsed_url,
+    source_name: str,
+    content_type: str | None = None,
+) -> str:
+    candidate = Path(unquote(parsed_url.path or source_name)).suffix.lower()
+    if candidate:
+        return candidate
+    if content_type:
+        guessed = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+        if guessed:
+            return guessed.lower()
+    fallback = Path(source_name).suffix.lower()
+    return fallback or ".bin"
+
+
+def build_markdown_asset_path(assets_dir: Path, source_record: dict, image_index: int, source_name: str) -> Path:
+    stem = sanitize_asset_filename(Path(source_name).stem or f"image_{image_index}", default_stem=f"image_{image_index}")
+    suffix = Path(source_name).suffix.lower() or ".bin"
+    relative_dir = Path(source_record["source_id"])
+    relative_path = relative_dir / f"{image_index:03d}_{stem}{suffix}"
+    return assets_dir / relative_path
+
+
+def download_markdown_image_to_assets(
+    *,
+    target: Path,
+    source_record: dict,
+    raw_dir: Path,
+    image_index: int,
+    target_value: str,
+) -> dict:
+    assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
+    parsed = urlparse(target_value)
+    source_name = Path(unquote(parsed.path)).name or f"image_{image_index}"
+
+    with urllib.request.urlopen(target_value, timeout=20) as response:
+        content = response.read()
+        content_type = response.headers.get("Content-Type")
+
+    suffix = markdown_image_asset_extension(parsed_url=parsed, source_name=source_name, content_type=content_type)
+    asset_path = build_markdown_asset_path(
+        assets_dir,
+        source_record,
+        image_index,
+        f"{Path(source_name).stem}{suffix}",
+    )
+    ensure_directory(asset_path.parent)
+    asset_path.write_bytes(content)
+    asset_hash = hashlib.sha256(content).hexdigest()
+    return {
+        "storage_kind": "downloaded",
+        "asset_path": asset_path,
+        "asset_hash": asset_hash,
+        "content_type": content_type,
+    }
+
+
+def resolve_markdown_local_image_path(raw_path: Path, target_value: str, raw_dir: Path) -> Path:
+    parsed = urlparse(target_value)
+    if parsed.scheme and parsed.scheme != "file":
+        raise ValueError(f"Unsupported local image reference scheme: {target_value}")
+    if parsed.scheme == "file":
+        candidate = Path(unquote(parsed.path)).expanduser()
+    else:
+        candidate = (raw_path.parent / unquote(target_value)).expanduser()
+    return ensure_path_within_raw_root(candidate, raw_dir, purpose="Markdown image reference")
+
+
+def convert_markdown_embedded_image_to_section(
+    *,
+    target: Path,
+    asset_path: Path,
+    asset_label: str,
+    alt_text: str,
+    image_context: dict | None = None,
+) -> tuple[list[str], dict]:
+    image_markdown, image_metadata = convert_image_to_markdown(
+        asset_path,
+        target=target,
+        image_context=image_context,
+    )
+    body_lines = [line.rstrip() for line in image_markdown.splitlines()]
+    if body_lines and body_lines[0].startswith("# "):
+        body_lines = body_lines[1:]
+        if body_lines and not body_lines[0]:
+            body_lines = body_lines[1:]
+
+    lines = [
+        f"## 内嵌图片 {asset_label}",
+        "",
+        f"- alt: {alt_text or '(empty)'}",
+        f"- asset_path: {asset_path}",
+        f"- extraction_quality: {image_metadata.get('extraction_quality', 'partial')}",
+    ]
+    lines.extend(body_lines if body_lines else ["> 图片存在，但当前未生成附加文本内容。"])
+    return lines, image_metadata
+
+
+def enrich_markdown_with_embedded_images(
+    *,
+    target: Path,
+    source_record: dict,
+    raw_path: Path,
+    raw_text: str,
+) -> tuple[str, dict]:
+    raw_dir = resolve_workspace_raw_dir(target)
+    assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
+    ensure_directory(assets_dir)
+
+    warnings: list[str] = []
+    image_records: list[dict] = []
+    section_lines: list[str] = []
+    extraction_quality = "good"
+    used_downloads = False
+    used_ocr = False
+
+    matches = list(MARKDOWN_IMAGE_PATTERN.finditer(raw_text))
+    if not matches:
+        return normalize_text_content("markdown", raw_text), {
+            "content_format": "markdown",
+            "extraction_method": "python_only",
+            "extraction_quality": "good",
+            "warnings": [],
+            "location_map": {
+                "type": "line_map",
+                "source_path": source_record["source_path"],
+            },
+        }
+
+    for image_index, match in enumerate(matches, start=1):
+        alt_text = (match.group("alt") or "").strip()
+        target_value = (match.group("target") or "").strip()
+        candidate_values = markdown_image_target_candidates(target_value)
+        if not candidate_values:
+            warnings.append(f"markdown_image_invalid_target:{image_index}")
+            extraction_quality = "partial"
+            section_lines.extend([
+                f"## 内嵌图片 image_{image_index}",
+                "",
+                f"- alt: {alt_text or '(empty)'}",
+                "> 源文件包含图片，但图片地址为空或无法解析。",
+                "",
+            ])
+            continue
+
+        candidate = candidate_values[0]
+        parsed = urlparse(candidate)
+        try:
+            if parsed.scheme in {"http", "https"}:
+                asset_result = download_markdown_image_to_assets(
+                    target=target,
+                    source_record=source_record,
+                    raw_dir=raw_dir,
+                    image_index=image_index,
+                    target_value=candidate,
+                )
+                used_downloads = True
+                asset_path = asset_result["asset_path"]
+            else:
+                asset_path = resolve_markdown_local_image_path(raw_path, candidate, raw_dir)
+                asset_result = {
+                    "storage_kind": "local_raw",
+                    "asset_path": asset_path,
+                    "asset_hash": file_sha256(asset_path),
+                    "content_type": None,
+                }
+
+            section_block, image_metadata = convert_markdown_embedded_image_to_section(
+                target=target,
+                asset_path=asset_path,
+                asset_label=f"image_{image_index}",
+                alt_text=alt_text,
+                image_context={
+                    "markdown_source_path": source_record["source_path"],
+                    "image_index": image_index,
+                    "image_alt": alt_text,
+                    "image_target": candidate,
+                },
+            )
+            used_ocr = used_ocr or bool(image_metadata.get("location_map", {}).get("ocr", {}).get("used"))
+            image_quality = image_metadata.get("extraction_quality", "partial")
+            if image_quality in {"failed", "poor", "partial"}:
+                extraction_quality = "partial"
+            warnings.extend(image_metadata.get("warnings", []))
+            section_lines.extend(section_block)
+            section_lines.append("")
+            image_records.append({
+                "index": image_index,
+                "alt": alt_text,
+                "target": candidate,
+                "storage_kind": asset_result["storage_kind"],
+                "asset_path": str(asset_path),
+                "asset_hash": asset_result["asset_hash"],
+                "content_type": asset_result.get("content_type"),
+                "image_metadata": image_metadata.get("location_map", {}),
+            })
+        except Exception as exc:
+            warnings.append(f"markdown_image_conversion_failed:{image_index}:{type(exc).__name__}")
+            extraction_quality = "partial"
+            section_lines.extend([
+                f"## 内嵌图片 image_{image_index}",
+                "",
+                f"- alt: {alt_text or '(empty)'}",
+                f"- target: {candidate}",
+                "> 源文件包含图片，但内容暂时无法转换为文本。",
+                "",
+            ])
+            image_records.append({
+                "index": image_index,
+                "alt": alt_text,
+                "target": candidate,
+                "storage_kind": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    normalized_markdown = normalize_text_content("markdown", raw_text)
+    if section_lines:
+        normalized_markdown = (
+            normalized_markdown.rstrip()
+            + "\n\n## 内嵌图片内容 / Embedded Image Content\n\n"
+            + "\n".join(section_lines).strip()
+            + "\n"
+        )
+
+    extraction_method = "python_only"
+    if used_downloads:
+        extraction_method += "+remote_assets"
+    if used_ocr:
+        extraction_method += "+tesseract"
+
+    return normalized_markdown, {
+        "content_format": "markdown",
+        "extraction_method": extraction_method,
+        "extraction_quality": extraction_quality,
+        "warnings": sorted(set(warnings)),
+        "location_map": {
+            "type": "markdown_with_embedded_images",
+            "source_path": source_record["source_path"],
+            "image_count": len(image_records),
+            "images": image_records,
+        },
+    }
+
+
+def normalize_agent_assisted_image_result(hook_result: dict | None, min_confidence: float) -> tuple[str, dict]:
+    if not isinstance(hook_result, dict):
+        return "", {
+            "used": False,
+            "ok": False,
+            "quality": "unavailable",
+            "warnings": [],
+            "confidence": 0.0,
+            "reason": "image_to_text_unavailable",
+            "summary": "",
+        }
+
+    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
+    reason = str(hook_result.get("reason", "")).strip() or "image_to_text_agent_result"
+    warnings = [str(item).strip() for item in hook_result.get("warnings", []) if str(item).strip()]
+    if confidence < min_confidence:
+        return "", {
+            "used": True,
+            "ok": False,
+            "quality": "low_confidence",
+            "warnings": sorted(set([*warnings, "image_to_text_low_confidence"])),
+            "confidence": confidence,
+            "reason": reason,
+            "summary": normalize_binary_snippet_text(str(hook_result.get("summary", ""))),
+        }
+
+    extracted_text = normalize_binary_snippet_text(
+        str(hook_result.get("extracted_text") or hook_result.get("text") or "")
+    )
+    summary = normalize_binary_snippet_text(str(hook_result.get("summary", "")))
+    combined_text = extracted_text
+    if summary and summary not in combined_text:
+        combined_text = (
+            f"摘要: {summary}\n\n{extracted_text}".strip()
+            if extracted_text else summary
+        )
+
+    if not combined_text:
+        return "", {
+            "used": True,
+            "ok": False,
+            "quality": "empty",
+            "warnings": sorted(set([*warnings, "image_to_text_no_text"])),
+            "confidence": confidence,
+            "reason": reason,
+            "summary": summary,
+        }
+
+    quality = "good" if image_understanding_text_is_meaningful(combined_text) else "partial"
+    if quality == "partial":
+        warnings.append("image_to_text_low_signal")
+    return combined_text, {
+        "used": True,
+        "ok": True,
+        "quality": quality,
+        "warnings": sorted(set(warnings)),
+        "confidence": confidence,
+        "reason": reason,
+        "summary": summary,
+    }
+
+
+def run_agent_assisted_image_to_text(
+    target: Path | None,
+    raw_path: Path,
+    image_context: dict | None = None,
+) -> tuple[str, dict]:
+    if target is None:
+        return "", {
+            "used": False,
+            "ok": False,
+            "quality": "disabled",
+            "warnings": [],
+            "confidence": 0.0,
+            "reason": "image_to_text_target_missing",
+            "summary": "",
+        }
+
+    automation_config = load_automation_target_config(load_workspace_config(target), "image_to_text")
+    if not automation_config.get("enabled"):
+        return "", {
+            "used": False,
+            "ok": False,
+            "quality": "disabled",
+            "warnings": [],
+            "confidence": 0.0,
+            "reason": "image_to_text_agent_disabled",
+            "summary": "",
+        }
+
+    payload = {
+        "task": "describe_image",
+        "image_path": str(raw_path.resolve()),
+        "image_name": raw_path.name,
+        "image_context": image_context or {},
+    }
+    hook_result = run_json_automation_command(
+        target=target,
+        command=automation_config.get("command", []),
+        payload=payload,
+        timeout_seconds=automation_config.get("timeout_seconds", 45),
+    )
+    return normalize_agent_assisted_image_result(
+        hook_result,
+        automation_config.get("min_confidence", 0.8),
+    )
+
+
 def run_tesseract_ocr(raw_path: Path) -> tuple[str, dict]:
     # 图片 OCR 作为增强路径存在：
     # - 有 tesseract：尽量提取正文
@@ -3508,7 +3954,12 @@ def run_tesseract_ocr(raw_path: Path) -> tuple[str, dict]:
     }
 
 
-def convert_image_to_markdown(raw_path: Path) -> tuple[str, dict]:
+def convert_image_to_markdown(
+    raw_path: Path,
+    *,
+    target: Path | None = None,
+    image_context: dict | None = None,
+) -> tuple[str, dict]:
     # 图片标准化采用“元数据始终保底，OCR 视环境增强”的策略。
     warnings: list[str] = []
     stat = raw_path.stat()
@@ -3562,16 +4013,52 @@ def convert_image_to_markdown(raw_path: Path) -> tuple[str, dict]:
 
     ocr_text, ocr_result = run_tesseract_ocr(raw_path)
     warnings.extend(ocr_result.get("warnings", []))
+    llm_text = ""
+    llm_result = {
+        "used": False,
+        "ok": False,
+        "quality": "disabled",
+        "warnings": [],
+        "confidence": 0.0,
+        "reason": "image_to_text_not_attempted",
+        "summary": "",
+    }
+
+    should_try_llm = (
+        not ocr_text
+        or ocr_result.get("quality") in {"missing", "failed", "partial", "empty"}
+    )
+    if should_try_llm:
+        llm_text, llm_result = run_agent_assisted_image_to_text(
+            target=target,
+            raw_path=raw_path,
+            image_context=image_context,
+        )
+        warnings.extend(llm_result.get("warnings", []))
 
     extraction_quality = "partial"
+    combined_sections: list[str] = []
     if ocr_text:
-        metadata_lines.extend([
-            "",
+        combined_sections.extend([
             "## OCR 文本 / OCR Text",
             "",
             ocr_text,
         ])
         extraction_quality = "good" if ocr_result.get("quality") == "good" else "partial"
+    if llm_text:
+        combined_sections.extend([
+            "## LLM 图片理解 / LLM Image Understanding",
+            "",
+            llm_text,
+        ])
+        if llm_result.get("quality") == "good":
+            extraction_quality = "good"
+
+    if combined_sections:
+        metadata_lines.extend([
+            "",
+            *combined_sections,
+        ])
     else:
         if ocr_result.get("quality") == "failed":
             metadata_lines.extend([
@@ -3588,6 +4075,11 @@ def convert_image_to_markdown(raw_path: Path) -> tuple[str, dict]:
                 "",
                 "> 本次 OCR 未提取到稳定正文，当前保留图片元数据供后续人工或 Agent 处理。",
             ])
+        if llm_result.get("used") and not llm_text:
+            metadata_lines.extend([
+                "",
+                "> 已尝试使用 LLM 识别图片内容，但当前未得到可稳定落盘的文本结果。",
+            ])
 
     markdown = "\n".join(metadata_lines).strip() + "\n"
     location_map["image"] = {
@@ -3603,11 +4095,25 @@ def convert_image_to_markdown(raw_path: Path) -> tuple[str, dict]:
         "quality": ocr_result.get("quality"),
         "char_count": len(ocr_text),
     }
+    location_map["llm_image_understanding"] = {
+        "used": llm_result.get("used", False),
+        "ok": llm_result.get("ok", False),
+        "quality": llm_result.get("quality"),
+        "char_count": len(llm_text),
+        "confidence": llm_result.get("confidence", 0.0),
+        "reason": llm_result.get("reason"),
+        "summary": llm_result.get("summary", ""),
+    }
+    extraction_method = "python_only"
+    if ocr_result.get("used"):
+        extraction_method += "+tesseract"
+    if llm_result.get("used"):
+        extraction_method += "+agent_assisted"
     return markdown, {
         "content_format": "markdown",
-        "extraction_method": "python_only+tesseract" if ocr_result.get("used") else "python_only",
+        "extraction_method": extraction_method,
         "extraction_quality": extraction_quality,
-        "warnings": warnings if warnings else ([] if ocr_text else ["image_metadata_only"]),
+        "warnings": warnings if warnings else ([] if (ocr_text or llm_text) else ["image_metadata_only"]),
         "location_map": location_map,
     }
 
@@ -3684,6 +4190,7 @@ def normalize_source_record(target: Path, source_record: dict) -> dict | None:
         return normalize_markdown_or_text_record(target, source_record)
 
     raw_path = resolve_source_record_path(target, source_record["source_path"])
+    ensure_path_within_raw_root(raw_path, resolve_workspace_raw_dir(target), purpose="Source record")
     try:
         normalized_text, metadata = convert_source_to_normalized_markdown(raw_path, source_type)
     except Exception as exc:
@@ -13425,8 +13932,12 @@ def command_init(args: argparse.Namespace) -> CommandResult:
     # 这里即使目录不存在也没关系，mkdir 会顺手把父目录一起建出来。
     ensure_directory(target_dir)
     raw_dir_preexisting = raw_dir.exists()
+    assets_dir = (raw_dir.parent / "assets").resolve()
+    assets_dir_preexisting = assets_dir.exists()
     ensure_directory(raw_dir)
+    ensure_directory(assets_dir)
     raw_dir_relative_path = os.path.relpath(raw_dir, start=target_dir).replace(os.sep, "/")
+    assets_dir_relative_path = os.path.relpath(assets_dir, start=target_dir).replace(os.sep, "/")
 
     context = {
         "project_name": args.project_name,
@@ -13435,6 +13946,9 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "raw_dir_name": raw_dir.name,
         "raw_dir_path": str(raw_dir),
         "raw_dir_relative_path": raw_dir_relative_path,
+        "assets_dir_name": assets_dir.name,
+        "assets_dir_path": str(assets_dir),
+        "assets_dir_relative_path": assets_dir_relative_path,
         "python_executable": sys.executable,
     }
 
@@ -13503,10 +14017,12 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         "project_name": args.project_name,
         "source_dir": str(raw_dir),
         "raw_dir": str(raw_dir),
+        "assets_dir": str(assets_dir),
         "target_dir": str(target_dir),
         "workspace_summary": build_workspace_summary(target_dir, raw_dir),
         "created_directories": [
             str(raw_dir),
+            str(assets_dir),
             *[
                 str(target_dir / path)
                 for path in (
@@ -13528,6 +14044,8 @@ def command_init(args: argparse.Namespace) -> CommandResult:
         ],
         "raw_dir_relative_path": raw_dir_relative_path,
         "raw_dir_preexisting": raw_dir_preexisting,
+        "assets_dir_relative_path": assets_dir_relative_path,
+        "assets_dir_preexisting": assets_dir_preexisting,
         "metadata_files": [str(path) for path in metadata_files],
         "git_steps": git_steps,
     }
@@ -13557,7 +14075,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     page_intent_config = load_semantic_task_config(config, "page_intent")
     readable_concept_render_config = load_readable_concept_render_config(config)
     overview_render_config = load_page_render_config(config, "overview")
-    raw_dir = resolve_workspace_path(target, config["paths"]["raw"])
+    raw_dir = resolve_workspace_raw_dir(target)
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw directory does not exist: {raw_dir}")
 

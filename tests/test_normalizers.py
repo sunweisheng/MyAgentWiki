@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest import mock
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from myagentwiki.cli import (
     convert_image_to_markdown,
     convert_legacy_doc_to_markdown,
     convert_legacy_xls_to_markdown,
+    enrich_markdown_with_embedded_images,
     load_page_alias_overrides,
     sanitize_page_filename,
     sanitize_page_slug,
@@ -108,6 +110,195 @@ def test_convert_image_to_markdown_with_ocr_text_includes_ocr_section(tmp_path: 
     assert metadata["location_map"]["ocr"]["used"] is True
     assert metadata["location_map"]["ocr"]["ok"] is True
     assert metadata["location_map"]["ocr"]["char_count"] > 0
+
+
+def test_convert_image_to_markdown_uses_agent_assisted_fallback_when_ocr_missing(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "config").mkdir(parents=True)
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "agent_assisted"\n    command: ["python3", "-m", "myagentwiki.agent_hook"]\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    raw_path = tmp_path / "diagram.png"
+    raw_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\x0dIHDR"
+        + (32).to_bytes(4, "big")
+        + (16).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+    with mock.patch("myagentwiki.cli.command_exists", return_value=False), mock.patch(
+        "myagentwiki.cli.run_json_automation_command",
+        return_value={
+            "confidence": 0.92,
+            "reason": "mock_llm_image_understanding",
+            "summary": "识别到一张流程图",
+            "extracted_text": "步骤一：收集资料。步骤二：进入 normalized。",
+        },
+    ):
+        markdown, metadata = convert_image_to_markdown(raw_path, target=workspace_dir)
+
+    assert "## LLM 图片理解 / LLM Image Understanding" in markdown
+    assert "步骤一：收集资料。步骤二：进入 normalized。" in markdown
+    assert metadata["location_map"]["llm_image_understanding"]["used"] is True
+    assert metadata["location_map"]["llm_image_understanding"]["ok"] is True
+    assert metadata["extraction_method"] == "python_only+agent_assisted"
+
+
+def test_enrich_markdown_with_embedded_images_downloads_remote_assets_and_embeds_ocr(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    raw_dir = tmp_path / "raw"
+    assets_dir = tmp_path / "assets"
+    (workspace_dir / "config").mkdir(parents=True)
+    raw_dir.mkdir()
+    assets_dir.mkdir()
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    raw_path = raw_dir / "note.md"
+    raw_path.write_text("# Note\n\n![diagram](https://example.com/diagram.png)\n", encoding="utf-8")
+    source_record = {
+        "source_id": "src_note_hash123456",
+        "source_path": "../raw/note.md",
+    }
+
+    fake_png = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\x0dIHDR"
+        + (24).to_bytes(4, "big")
+        + (24).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self.headers = {"Content-Type": "image/png"}
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    fake_completed = mock.Mock(returncode=0, stdout="图里有可读文本", stderr="")
+    with mock.patch("myagentwiki.cli.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
+        "myagentwiki.cli.command_exists", return_value=True
+    ), mock.patch("myagentwiki.cli.subprocess.run", return_value=fake_completed):
+        markdown, metadata = enrich_markdown_with_embedded_images(
+            target=workspace_dir,
+            source_record=source_record,
+            raw_path=raw_path,
+            raw_text=raw_path.read_text(encoding="utf-8"),
+        )
+
+    assert "## 内嵌图片内容 / Embedded Image Content" in markdown
+    assert "图里有可读文本" in markdown
+    assert metadata["location_map"]["image_count"] == 1
+    saved_asset = Path(metadata["location_map"]["images"][0]["asset_path"])
+    assert saved_asset.exists()
+    assert saved_asset.parent.parent == assets_dir
+    assert metadata["extraction_method"] == "python_only+remote_assets+tesseract"
+
+
+def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    raw_dir = tmp_path / "raw"
+    assets_dir = tmp_path / "assets"
+    (workspace_dir / "config").mkdir(parents=True)
+    raw_dir.mkdir()
+    assets_dir.mkdir()
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "agent_assisted"\n    command: ["python3", "-m", "myagentwiki.agent_hook"]\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    raw_path = raw_dir / "note.md"
+    raw_path.write_text("# Note\n\n![diagram](https://example.com/diagram.png)\n", encoding="utf-8")
+    source_record = {
+        "source_id": "src_note_hashagent",
+        "source_path": "../raw/note.md",
+    }
+    fake_png = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\x0dIHDR"
+        + (24).to_bytes(4, "big")
+        + (24).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self.headers = {"Content-Type": "image/png"}
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    with mock.patch("myagentwiki.cli.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
+        "myagentwiki.cli.command_exists", return_value=False
+    ), mock.patch(
+        "myagentwiki.cli.run_json_automation_command",
+        return_value={
+            "confidence": 0.93,
+            "reason": "mock_llm_image_understanding",
+            "summary": "思维导图摘要",
+            "extracted_text": "主题A 连接到主题B，并附带两条说明。",
+        },
+    ):
+        markdown, metadata = enrich_markdown_with_embedded_images(
+            target=workspace_dir,
+            source_record=source_record,
+            raw_path=raw_path,
+            raw_text=raw_path.read_text(encoding="utf-8"),
+        )
+
+    assert "## LLM 图片理解 / LLM Image Understanding" in markdown
+    assert "主题A 连接到主题B" in markdown
+    assert metadata["location_map"]["images"][0]["image_metadata"]["llm_image_understanding"]["used"] is True
+
+
+def test_enrich_markdown_with_embedded_images_marks_out_of_raw_local_image_as_unconvertible(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    raw_dir = tmp_path / "raw"
+    (workspace_dir / "config").mkdir(parents=True)
+    raw_dir.mkdir()
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    raw_path = raw_dir / "note.md"
+    raw_path.write_text("# Note\n\n![diagram](../outside/diagram.png)\n", encoding="utf-8")
+    (outside_dir / "diagram.png").write_bytes(b"not-important")
+    source_record = {
+        "source_id": "src_note_hash654321",
+        "source_path": "../raw/note.md",
+    }
+
+    markdown, metadata = enrich_markdown_with_embedded_images(
+        target=workspace_dir,
+        source_record=source_record,
+        raw_path=raw_path,
+        raw_text=raw_path.read_text(encoding="utf-8"),
+    )
+
+    assert "源文件包含图片，但内容暂时无法转换为文本" in markdown
+    assert any(item.startswith("markdown_image_conversion_failed:1:ValueError") for item in metadata["warnings"])
 
 
 def test_update_page_alias_overrides_with_lock_preserves_sequential_alias_updates(tmp_path: Path) -> None:
