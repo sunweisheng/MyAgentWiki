@@ -806,7 +806,8 @@ V1 当前实现说明：
 - 这类下载型素材不回写 `raw/`，也不直接内联进 `state/*.jsonl`，而是通过 normalized metadata 的 `location_map.images[*]` 记录 `asset_path / asset_hash / content_type / download_mode`。
 - 若远程图片下载失败，标准化不会因此放弃整份 Markdown；系统会保留正文、标记 `warnings`，并把对应图片记为 failed。
 - 当前远程图片下载默认严格校验 HTTPS 证书。
-- 仅当用户显式传入 `ingest --allow-insecure-downloads` 时，系统才允许对“证书校验失败”的 Markdown 图片下载自动重试一次不校验证书的回退。
+- 当前若命中“证书校验失败”，系统会默认只对 Markdown 图片下载自动重试一次不校验证书的回退。
+- 若用户明确不希望脚本执行这次回退，可显式传入 `ingest --disable-insecure-download-retry` 关闭。
 - 该回退只作用于 Markdown 远程图片下载，不放宽其他网络请求；404、超时、权限不足等非证书错误也不会触发这条回退。
 - 若确实走了该回退路径，normalized metadata 必须留下明确痕迹，例如 `markdown_remote_image_download_used_insecure_retry` 与 `download_mode: insecure_retry`，方便审计与排障。
 

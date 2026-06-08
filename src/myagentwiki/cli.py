@@ -2761,7 +2761,7 @@ def normalize_markdown_or_text_record(
     target: Path,
     source_record: dict,
     *,
-    allow_insecure_downloads: bool = False,
+    allow_insecure_downloads: bool = True,
 ) -> dict:
     # Markdown 和纯文本是当前最稳定的一类输入，直接按文本规范化处理。
     source_type = source_record["source_type"]
@@ -3730,7 +3730,7 @@ def download_markdown_image_to_assets(
     raw_dir: Path,
     image_index: int,
     target_value: str,
-    allow_insecure_downloads: bool = False,
+    allow_insecure_downloads: bool = True,
 ) -> dict:
     assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
     parsed = urlparse(target_value)
@@ -3808,7 +3808,7 @@ def enrich_markdown_with_embedded_images(
     source_record: dict,
     raw_path: Path,
     raw_text: str,
-    allow_insecure_downloads: bool = False,
+    allow_insecure_downloads: bool = True,
 ) -> tuple[str, dict]:
     raw_dir = resolve_workspace_raw_dir(target)
     assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
@@ -4349,7 +4349,7 @@ def normalize_source_record(
     target: Path,
     source_record: dict,
     *,
-    allow_insecure_downloads: bool = False,
+    allow_insecure_downloads: bool = True,
 ) -> dict | None:
     # 这一层负责把“来源登记记录”转成“标准化记录”。
     # 这里是 normalized 层的统一入口：不同类型都尽量产出 Markdown 形态的标准文本。
@@ -14521,7 +14521,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         normalized_record = normalize_source_record(
             target,
             source_record,
-            allow_insecure_downloads=args.allow_insecure_downloads,
+            allow_insecure_downloads=not args.disable_insecure_download_retry,
         )
         if normalized_record is None:
             # 暂不支持的文件类型先保留在 sources.jsonl，等待后续转换器接手。
@@ -16753,9 +16753,9 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser = subparsers.add_parser("ingest", help="Register raw files into workspace metadata.")
     ingest_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
     ingest_parser.add_argument(
-        "--allow-insecure-downloads",
+        "--disable-insecure-download-retry",
         action="store_true",
-        help="If remote Markdown image downloads fail certificate verification, retry once without TLS verification.",
+        help="Disable the automatic one-time insecure retry for certificate verification failures when downloading remote Markdown images.",
     )
     ingest_parser.add_argument("--json", action="store_true", help="Output JSON.")
     ingest_parser.set_defaults(handler=command_ingest)

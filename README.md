@@ -274,23 +274,16 @@ python3 -m myagentwiki lint --target-dir /path/to/MyNotesWiki
 
 - `ingest` 会在标准化阶段尝试下载 Markdown 内的远程图片，并把文件落到工作区外部 sibling `assets/` 目录。
 - 下载后的图片会按 `source_id / image_index` 组织存放，不会写回 `raw/` 原文。
-- 默认会严格校验 HTTPS 证书；如果代理 / VPN 把证书链改写了，远程图片可能下载失败，但文档其余部分仍会继续导入。
-- 这类失败会记录到 normalized metadata 和 warning 中，便于后续排查。
-- 如果你确认自己在受信任的代理环境里，只是被代理证书拦住，可以显式使用下面这个受控回退开关：
+- 程序会先严格校验 HTTPS 证书；如果代理 / VPN 把证书链改写了，脚本会只针对“证书校验失败”自动做一次受控重试。
+- 404、超时、权限不足等非证书错误不会触发这条自动回退。
+- 如果确实走了这条回退路径，metadata 里会记录 `markdown_remote_image_download_used_insecure_retry` 与 `download_mode: insecure_retry`，便于后续排查。
+- 如果你明确不希望脚本自动做这次回退，可以显式关闭：
 
 ```bash
 python3 -m myagentwiki ingest \
   --target-dir /path/to/MyNotesWiki \
-  --allow-insecure-downloads
+  --disable-insecure-download-retry
 ```
-
-这个开关的行为边界是：
-
-- 默认行为不会变化，只有你显式传参时才允许回退。
-- 即使开了这个参数，程序也会先走正常证书校验。
-- 只有当 Markdown 远程图片下载命中“证书校验失败”时，才会自动重试一次不校验证书的下载。
-- 404、超时、权限不足等非证书错误不会因为这个参数而自动降级。
-- 如果确实走了这条回退路径，metadata 里会记录 `markdown_remote_image_download_used_insecure_retry` 与 `download_mode: insecure_retry`。
 
 ### 5. 查询与审核
 
@@ -612,7 +605,7 @@ V1 已实现这些命令入口：
   - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、最小 chunk 流程、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
   - 扫描 `raw/` 时当前会统一跳过所有 `.` 开头的文件和目录，例如 `.DS_Store`、`.obsidian/` 及其子内容，不把这些隐藏项纳入 ingest
   - 当前 Markdown 标准化会尝试下载内嵌的远程图片，并把下载结果落到工作区外部 sibling `assets/` 目录；图片存储路径按 `source_id / image_index` 组织，便于后续回链
-  - 远程图片下载默认严格校验证书；若显式传入 `--allow-insecure-downloads`，则只在命中证书校验失败时，才会对 Markdown 图片下载自动重试一次不校验证书的受控回退
+  - 远程图片下载会先严格校验证书；若命中证书校验失败，脚本会默认只对 Markdown 图片下载自动重试一次不校验证书的受控回退；如需关闭该行为，可显式传入 `--disable-insecure-download-retry`
   - 当前规则式 Claim 草稿抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再只把可独立理解的子句作为补充候选，避免把逗号后的半句话直接推进到 Claim 层
   - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
   - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失

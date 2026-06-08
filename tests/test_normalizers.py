@@ -210,7 +210,7 @@ def test_enrich_markdown_with_embedded_images_downloads_remote_assets_and_embeds
     assert metadata["extraction_method"] == "python_only+remote_assets+tesseract"
 
 
-def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verification_error(tmp_path: Path) -> None:
+def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verification_error_when_retry_disabled(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
     raw_dir = tmp_path / "raw"
     assets_dir = tmp_path / "assets"
@@ -237,6 +237,7 @@ def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verifi
             source_record=source_record,
             raw_path=raw_path,
             raw_text=raw_path.read_text(encoding="utf-8"),
+            allow_insecure_downloads=False,
         )
 
     assert "源文件包含图片，但内容暂时无法转换为文本" in markdown
@@ -244,7 +245,7 @@ def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verifi
     assert metadata["location_map"]["images"][0]["storage_kind"] == "failed"
 
 
-def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate_verification_error_when_enabled(tmp_path: Path) -> None:
+def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate_verification_error_by_default(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
     raw_dir = tmp_path / "raw"
     assets_dir = tmp_path / "assets"
@@ -299,7 +300,6 @@ def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate
             source_record=source_record,
             raw_path=raw_path,
             raw_text=raw_path.read_text(encoding="utf-8"),
-            allow_insecure_downloads=True,
         )
 
     assert "图里有可读文本" in markdown
