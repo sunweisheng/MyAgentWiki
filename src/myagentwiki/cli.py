@@ -27,6 +27,7 @@ import tomllib
 import tempfile
 import fcntl
 import mimetypes
+import ssl
 import urllib.error
 import urllib.request
 from urllib.parse import quote
@@ -2756,7 +2757,12 @@ def normalize_text_content(source_type: str, raw_text: str) -> str:
     return normalized + "\n"
 
 
-def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict:
+def normalize_markdown_or_text_record(
+    target: Path,
+    source_record: dict,
+    *,
+    allow_insecure_downloads: bool = False,
+) -> dict:
     # Markdown 和纯文本是当前最稳定的一类输入，直接按文本规范化处理。
     source_type = source_record["source_type"]
     raw_path = resolve_source_record_path(target, source_record["source_path"])
@@ -2768,6 +2774,7 @@ def normalize_markdown_or_text_record(target: Path, source_record: dict) -> dict
             source_record=source_record,
             raw_path=raw_path,
             raw_text=raw_text,
+            allow_insecure_downloads=allow_insecure_downloads,
         )
     else:
         normalized_text = normalize_text_content(source_type, raw_text)
@@ -3677,6 +3684,45 @@ def build_markdown_asset_path(assets_dir: Path, source_record: dict, image_index
     return assets_dir / relative_path
 
 
+def is_certificate_verification_error(exc: Exception) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(reason, ssl.SSLError):
+            return "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    return "CERTIFICATE_VERIFY_FAILED" in str(exc)
+
+
+def download_url_with_optional_insecure_retry(
+    target_value: str,
+    *,
+    allow_insecure_downloads: bool,
+) -> tuple[bytes, str | None, str, list[str]]:
+    try:
+        with urllib.request.urlopen(target_value, timeout=20) as response:
+            return (
+                response.read(),
+                response.headers.get("Content-Type"),
+                "verified",
+                [],
+            )
+    except Exception as exc:
+        if not allow_insecure_downloads or not is_certificate_verification_error(exc):
+            raise
+
+    insecure_context = ssl._create_unverified_context()
+    with urllib.request.urlopen(target_value, timeout=20, context=insecure_context) as response:
+        return (
+            response.read(),
+            response.headers.get("Content-Type"),
+            "insecure_retry",
+            ["markdown_remote_image_download_used_insecure_retry"],
+        )
+
+
 def download_markdown_image_to_assets(
     *,
     target: Path,
@@ -3684,14 +3730,16 @@ def download_markdown_image_to_assets(
     raw_dir: Path,
     image_index: int,
     target_value: str,
+    allow_insecure_downloads: bool = False,
 ) -> dict:
     assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
     parsed = urlparse(target_value)
     source_name = Path(unquote(parsed.path)).name or f"image_{image_index}"
 
-    with urllib.request.urlopen(target_value, timeout=20) as response:
-        content = response.read()
-        content_type = response.headers.get("Content-Type")
+    content, content_type, download_mode, warnings = download_url_with_optional_insecure_retry(
+        target_value,
+        allow_insecure_downloads=allow_insecure_downloads,
+    )
 
     suffix = markdown_image_asset_extension(parsed_url=parsed, source_name=source_name, content_type=content_type)
     asset_path = build_markdown_asset_path(
@@ -3708,6 +3756,8 @@ def download_markdown_image_to_assets(
         "asset_path": asset_path,
         "asset_hash": asset_hash,
         "content_type": content_type,
+        "download_mode": download_mode,
+        "warnings": warnings,
     }
 
 
@@ -3758,6 +3808,7 @@ def enrich_markdown_with_embedded_images(
     source_record: dict,
     raw_path: Path,
     raw_text: str,
+    allow_insecure_downloads: bool = False,
 ) -> tuple[str, dict]:
     raw_dir = resolve_workspace_raw_dir(target)
     assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
@@ -3809,6 +3860,7 @@ def enrich_markdown_with_embedded_images(
                     raw_dir=raw_dir,
                     image_index=image_index,
                     target_value=candidate,
+                    allow_insecure_downloads=allow_insecure_downloads,
                 )
                 used_downloads = True
                 asset_path = asset_result["asset_path"]
@@ -3819,6 +3871,8 @@ def enrich_markdown_with_embedded_images(
                     "asset_path": asset_path,
                     "asset_hash": file_sha256(asset_path),
                     "content_type": None,
+                    "download_mode": "local_raw",
+                    "warnings": [],
                 }
 
             section_block, image_metadata = convert_markdown_embedded_image_to_section(
@@ -3838,6 +3892,7 @@ def enrich_markdown_with_embedded_images(
             if image_quality in {"failed", "poor", "partial"}:
                 extraction_quality = "partial"
             warnings.extend(image_metadata.get("warnings", []))
+            warnings.extend(asset_result.get("warnings", []))
             section_lines.extend(section_block)
             section_lines.append("")
             image_records.append({
@@ -3848,6 +3903,7 @@ def enrich_markdown_with_embedded_images(
                 "asset_path": str(asset_path),
                 "asset_hash": asset_result["asset_hash"],
                 "content_type": asset_result.get("content_type"),
+                "download_mode": asset_result.get("download_mode"),
                 "image_metadata": image_metadata.get("location_map", {}),
             })
         except Exception as exc:
@@ -4289,12 +4345,21 @@ def build_failed_conversion_placeholder(raw_path: Path, source_type: str, exc: E
     }
 
 
-def normalize_source_record(target: Path, source_record: dict) -> dict | None:
+def normalize_source_record(
+    target: Path,
+    source_record: dict,
+    *,
+    allow_insecure_downloads: bool = False,
+) -> dict | None:
     # 这一层负责把“来源登记记录”转成“标准化记录”。
     # 这里是 normalized 层的统一入口：不同类型都尽量产出 Markdown 形态的标准文本。
     source_type = source_record["source_type"]
     if source_type in {"markdown", "plain_text"}:
-        return normalize_markdown_or_text_record(target, source_record)
+        return normalize_markdown_or_text_record(
+            target,
+            source_record,
+            allow_insecure_downloads=allow_insecure_downloads,
+        )
 
     raw_path = resolve_source_record_path(target, source_record["source_path"])
     ensure_path_within_raw_root(raw_path, resolve_workspace_raw_dir(target), purpose="Source record")
@@ -14453,7 +14518,11 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         if source_record["source_id"] in existing_normalized:
             # 已标准化过的记录直接跳过，保证 ingest 可以重复执行而不反复写文件。
             continue
-        normalized_record = normalize_source_record(target, source_record)
+        normalized_record = normalize_source_record(
+            target,
+            source_record,
+            allow_insecure_downloads=args.allow_insecure_downloads,
+        )
         if normalized_record is None:
             # 暂不支持的文件类型先保留在 sources.jsonl，等待后续转换器接手。
             continue
@@ -16683,6 +16752,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ingest: 扫描 raw，登记来源，并对已支持的文本类型做标准化。
     ingest_parser = subparsers.add_parser("ingest", help="Register raw files into workspace metadata.")
     ingest_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    ingest_parser.add_argument(
+        "--allow-insecure-downloads",
+        action="store_true",
+        help="If remote Markdown image downloads fail certificate verification, retry once without TLS verification.",
+    )
     ingest_parser.add_argument("--json", action="store_true", help="Output JSON.")
     ingest_parser.set_defaults(handler=command_ingest)
 

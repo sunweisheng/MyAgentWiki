@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
+import urllib.error
 from unittest import mock
 from pathlib import Path
 
@@ -206,6 +208,104 @@ def test_enrich_markdown_with_embedded_images_downloads_remote_assets_and_embeds
     assert saved_asset.exists()
     assert saved_asset.parent.parent == assets_dir
     assert metadata["extraction_method"] == "python_only+remote_assets+tesseract"
+
+
+def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verification_error(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    raw_dir = tmp_path / "raw"
+    assets_dir = tmp_path / "assets"
+    (workspace_dir / "config").mkdir(parents=True)
+    raw_dir.mkdir()
+    assets_dir.mkdir()
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    raw_path = raw_dir / "note.md"
+    raw_path.write_text("# Note\n\n![diagram](https://example.com/diagram.png)\n", encoding="utf-8")
+    source_record = {
+        "source_id": "src_note_hashcertfail",
+        "source_path": "../raw/note.md",
+    }
+
+    cert_error = urllib.error.URLError(
+        ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain")
+    )
+    with mock.patch("myagentwiki.cli.urllib.request.urlopen", side_effect=cert_error):
+        markdown, metadata = enrich_markdown_with_embedded_images(
+            target=workspace_dir,
+            source_record=source_record,
+            raw_path=raw_path,
+            raw_text=raw_path.read_text(encoding="utf-8"),
+        )
+
+    assert "源文件包含图片，但内容暂时无法转换为文本" in markdown
+    assert "markdown_remote_image_download_used_insecure_retry" not in metadata["warnings"]
+    assert metadata["location_map"]["images"][0]["storage_kind"] == "failed"
+
+
+def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate_verification_error_when_enabled(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    raw_dir = tmp_path / "raw"
+    assets_dir = tmp_path / "assets"
+    (workspace_dir / "config").mkdir(parents=True)
+    raw_dir.mkdir()
+    assets_dir.mkdir()
+    (workspace_dir / "config" / "project.yml").write_text(
+        'workspace:\n  schema_version: "v1"\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        encoding="utf-8",
+    )
+    raw_path = raw_dir / "note.md"
+    raw_path.write_text("# Note\n\n![diagram](https://example.com/diagram.png)\n", encoding="utf-8")
+    source_record = {
+        "source_id": "src_note_hashinsecure",
+        "source_path": "../raw/note.md",
+    }
+    fake_png = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\x0dIHDR"
+        + (24).to_bytes(4, "big")
+        + (24).to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+        + b"\x00\x00\x00\x00"
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self.headers = {"Content-Type": "image/png"}
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    cert_error = urllib.error.URLError(
+        ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain")
+    )
+    fake_completed = mock.Mock(returncode=0, stdout="图里有可读文本", stderr="")
+    with mock.patch(
+        "myagentwiki.cli.urllib.request.urlopen",
+        side_effect=[cert_error, FakeResponse(fake_png)],
+    ) as mocked_urlopen, mock.patch(
+        "myagentwiki.cli.command_exists", return_value=True
+    ), mock.patch("myagentwiki.cli.subprocess.run", return_value=fake_completed):
+        markdown, metadata = enrich_markdown_with_embedded_images(
+            target=workspace_dir,
+            source_record=source_record,
+            raw_path=raw_path,
+            raw_text=raw_path.read_text(encoding="utf-8"),
+            allow_insecure_downloads=True,
+        )
+
+    assert "图里有可读文本" in markdown
+    assert "markdown_remote_image_download_used_insecure_retry" in metadata["warnings"]
+    assert metadata["location_map"]["images"][0]["download_mode"] == "insecure_retry"
+    assert mocked_urlopen.call_count == 2
 
 
 def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tmp_path: Path) -> None:

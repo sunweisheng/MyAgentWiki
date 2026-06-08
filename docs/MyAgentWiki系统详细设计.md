@@ -174,6 +174,7 @@ V1.1 的推荐推进方式：
 若需要举具体目录名示例，统一使用 `MyNotesWiki/` 表示用户工作区，使用其同级 `raw/` 表示原始资料目录。
 
 - `../raw/`：与工作区平级的原始资料目录。
+- `../assets/`：与工作区平级的下载型素材目录，用于保存从 Markdown 等来源中提取并落盘的远程图片资产。
 - `normalized/`：标准化后的文档 IR。
 - `chunks/`：按来源展开的 chunk IR。
 - `claims/`：单条 Claim / Knowledge Unit 的展开 JSON 文件。
@@ -200,6 +201,12 @@ V1.1 的推荐推进方式：
 - `raw/`
 - 位于工作区外部并与工作区平级，保存用户自己维护的原始资料及其目录结构。
 - Agent 不自动修改该层内容。
+
+1.5 下载素材层
+- `assets/`
+- 位于工作区外部并与工作区平级，保存标准化阶段下载得到的远程图片等派生素材。
+- 该层不属于用户手工维护的原始资料，但也不写回 `raw/`。
+- Markdown 远程图片当前默认落在 `assets/<source_id>/<image_index>_<sanitized_name>.<ext>`。
 
 2. 证据编译层
 - `normalized/`
@@ -229,6 +236,7 @@ V1.1 的推荐推进方式：
 - 自动流程主要写入第 2、3、4、5 层。
 - `state/*.jsonl` 负责 evidence 与 live object 的结构化账本；`semantic` 负责语义决策账本；`wiki/*.md`、`claims/*.json`、`reviews/*.json` 负责面向人和 Agent 的展开视图。
 - 若出现多份数据不一致，应优先区分是“证据层不一致”还是“语义层不一致”，再分别通过 re-ingest、semantic rebuild、review-apply、lint 收敛。
+- `assets/` 虽然位于工作区外部，但属于标准化流程生成的派生产物；其路径、哈希、内容类型和下载模式应通过 normalized metadata 回链，而不是让上层 Agent 猜测文件来源。
 
 ### 运行依赖清单文件
 母仓库需要额外提供：
@@ -790,7 +798,17 @@ V1 当前实现说明：
 - 保留标题层级、列表、代码块、表格、链接。
 - 清理 BOM、空白噪声、非法换行。
 - 记录行号映射。
+- 发现 Markdown 内的远程图片时，先下载到 sibling `assets/`，再把下载后的本地素材交给图片标准化流程继续处理。
 默认完全由 Python 实现。
+
+V1 当前实现说明：
+- 当前 Markdown 内的远程图片默认会落到 `assets/<source_id>/`，并按图片在源文档中的顺序分配 `001_ / 002_ / ...` 前缀。
+- 这类下载型素材不回写 `raw/`，也不直接内联进 `state/*.jsonl`，而是通过 normalized metadata 的 `location_map.images[*]` 记录 `asset_path / asset_hash / content_type / download_mode`。
+- 若远程图片下载失败，标准化不会因此放弃整份 Markdown；系统会保留正文、标记 `warnings`，并把对应图片记为 failed。
+- 当前远程图片下载默认严格校验 HTTPS 证书。
+- 仅当用户显式传入 `ingest --allow-insecure-downloads` 时，系统才允许对“证书校验失败”的 Markdown 图片下载自动重试一次不校验证书的回退。
+- 该回退只作用于 Markdown 远程图片下载，不放宽其他网络请求；404、超时、权限不足等非证书错误也不会触发这条回退。
+- 若确实走了该回退路径，normalized metadata 必须留下明确痕迹，例如 `markdown_remote_image_download_used_insecure_retry` 与 `download_mode: insecure_retry`，方便审计与排障。
 
 ### PDF 文档 PDF
 行为：
