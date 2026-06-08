@@ -416,6 +416,7 @@ automation:
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
 这意味着默认推荐流程会变成：
 - `ingest` 负责发现新 claim、重建页面、刷新索引
+- 如果这次没有新 source，但 `claim_role` 写回改动了某组 claim 的 `knowledge_role / page_intent_hints / concept_candidate_score`，`ingest` 仍会把它视作上游变化，继续重跑对应 bucket 的页面路由与旧页清理，而不是误判为“无变化可跳过”
 - `review-auto` 负责自动收口高把握 review，并自动提升可安全稳定化的 claim
 - 当 claim 被自动提升为 `stable` 后，系统会继续自动生成或刷新可读 `concept` 页
 - 当工作区里已有多个稳定可读概念页时，系统会继续自动生成或刷新工作区级 `overview` 页
@@ -659,7 +660,7 @@ V1 已实现这些命令入口：
   - `assign_alias / remove_alias` 写入 `state/page_alias_overrides.json` 时当前会做进程级串行化，避免多个 `review-apply` 并发时后写覆盖前写
 - `myagentwiki review-auto`
   - 已实现一条保守自动审核路径：优先自动收口高把握 review，并把剩余需要人判断的项整理成可继续对话的 handoff
-  - 当前会复用既有 `review-apply`、页面重建和状态账本收敛逻辑，不单独维护第二套审核状态机
+  - 当前会复用既有 `review-apply`、页面重建和状态账本收敛逻辑，不单独维护第二套审核状态机；review-auto 触发的页面重建也会继续走统一的 `page_intent` 路由，而不是只回填旧的 concept family
   - 当前支持 `--dry-run`，可先看计划中的自动动作与升级人工项，再决定是否执行
   - 当前支持 `--format prompt|messages|chatml`，可直接生成给上层 Agent 使用的 handoff；JSON 模式下会附带 `prompt_text`、`messages` 或 `chatml_text`
   - 当前会额外返回 `agent_brief`、`agent_summary` 和 `escalation_handoff`，帮助 Agent 判断“是否需要追问用户”以及“应该如何用白话解释选项”
@@ -690,6 +691,7 @@ V1 已实现这些命令入口：
 - `myagentwiki semantic-batch`
   - 已实现 `document_analysis / claim_role / page_intent` 三类语义批处理入口
   - 当前支持批处理、缓存命中、dry-run 和统一语义账本写回
+  - `page_intent` 的缓存命中当前会显式依赖 claim 侧的 `knowledge_role / page_intent_hints / concept_candidate_score`；如果 `claim_role` 结果发生变化，对应页面路由会自动失效重算，而不会继续沿用旧的页型判断
 
 ## Windows 兼容性 / Windows Compatibility
 

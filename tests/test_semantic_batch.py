@@ -6,6 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from myagentwiki.cli import load_semantic_task_config, load_workspace_config
+from myagentwiki.semantic import build_semantic_decision_id, fingerprint_payload
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +34,11 @@ def load_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def append_jsonl(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
@@ -144,3 +152,92 @@ def test_semantic_batch_dry_run_does_not_persist(tmp_path: Path) -> None:
     assert result["summary"]["dry_run"] is True
     assert result["summary"]["item_count"] >= 1
     assert after == before
+
+
+def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "concept.md").write_text(
+        "# 概念\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "SemanticDependencyRefresh",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    initial_pages = [
+        record
+        for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
+        if not record.get("removed")
+    ]
+    assert any(record.get("type") == "concept-summary" for record in initial_pages)
+
+    claim_record = next(
+        record
+        for record in load_jsonl(workspace_dir / "state" / "claims.jsonl")
+        if record.get("lifecycle_status", "active") == "active"
+    )
+    claim_role_config = load_semantic_task_config(
+        load_workspace_config(workspace_dir),
+        "claim_role",
+    )
+    claim_role_payload = {
+        "item_id": claim_record["claim_id"],
+        "claim_id": claim_record["claim_id"],
+        "text": claim_record.get("text", ""),
+        "claim_type": claim_record.get("claim_type"),
+        "source_ids": claim_record.get("source_ids", []),
+        "source_refs": claim_record.get("source_refs", []),
+    }
+    input_fingerprint = fingerprint_payload(
+        task_name="claim_role",
+        item_payloads=[claim_role_payload],
+        prompt_version=claim_role_config.prompt_version,
+        schema_version=claim_role_config.schema_version,
+    )
+    append_jsonl(
+        workspace_dir / "state" / "semantic_decisions.jsonl",
+        {
+            "decision_id": build_semantic_decision_id("claim_role", input_fingerprint),
+            "task_type": "claim_role",
+            "item_type": "claim",
+            "item_ids": [claim_record["claim_id"]],
+            "decision": {
+                "knowledge_role": "procedure",
+                "page_intent_hints": ["guide"],
+                "concept_candidate_score": 0.2,
+            },
+            "confidence": 0.99,
+            "reason_code": "test_claim_role_override",
+            "prompt_version": claim_role_config.prompt_version,
+            "model_key": claim_role_config.model_key,
+            "schema_version": claim_role_config.schema_version,
+            "input_fingerprint": input_fingerprint,
+            "created_at": "9999-01-01T00:00:00Z",
+            "superseded_by": [],
+        },
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    refreshed_pages = [
+        record
+        for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
+        if not record.get("removed")
+    ]
+    assert any(record.get("type") == "guide" for record in refreshed_pages)
+    assert all(record.get("type") not in {"concept-summary", "concept"} for record in refreshed_pages)
+
+    lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in lint_result["checks"]}
+    assert checks["page_semantic_consistency"]["ok"] is True

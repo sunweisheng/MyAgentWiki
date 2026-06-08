@@ -550,10 +550,35 @@ def handle_page_intent_batch(payload: dict) -> dict:
             continue
         item_id = str(item.get("item_id", "")).strip()
         claim_texts = [normalize_text(text) for text in item.get("claim_texts", []) if normalize_text(text)]
+        claim_semantics = item.get("claim_semantics", []) or []
         merged = " ".join(claim_texts)
         if not item_id:
             continue
         page_intent = "topic"
+        hint_counts: dict[str, int] = {}
+        for semantic in claim_semantics:
+            if not isinstance(semantic, dict):
+                continue
+            for hint in semantic.get("page_intent_hints", []) or []:
+                normalized_hint = normalize_text(str(hint))
+                if normalized_hint:
+                    hint_counts[normalized_hint] = hint_counts.get(normalized_hint, 0) + 1
+        for preferred in ("reject", "timeline", "reference", "guide", "example", "concept", "topic"):
+            if hint_counts.get(preferred):
+                page_intent = preferred
+                break
+        if page_intent != "topic":
+            decisions.append(
+                {
+                    "item_id": item_id,
+                    "decision": {
+                        "page_intent": page_intent,
+                    },
+                    "confidence": 0.81,
+                    "reason_code": "agent_hook_page_intent_batch_v1",
+                }
+            )
+            continue
         if any(text_is_question_like(text) for text in claim_texts):
             page_intent = "reject"
         elif any(marker in merged for marker in ("时间线", "演变", "历史阶段", "历程", "起初", "随后", "后来")):

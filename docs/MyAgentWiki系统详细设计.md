@@ -1357,6 +1357,7 @@ V1 建议的 guardrail 推导规则：
 当前默认触发链已经进一步收口为：
 - `review-auto` 自动提升 claim 为 `stable` 后，不需要再等人工单独触发页面生成。
 - 页面重建链会立刻把这些稳定 claim 送入 `page_intent` 收口流程，再决定是生成 `concept`、`guide`、`topic`、`reference` 还是仅保留在 evidence/source 视图中。
+- 这条页面重建链当前应与 ingest 主链共享同一套路由规则；review-auto 不应再维护一份“只会回填 concept/concept-summary”的旧版重建逻辑，否则会把前面已经改道到 `guide / example / reference / timeline` 的语义结果重新拉回旧页型。
 - 当工作区里已经积累出足够稳定、且可聚合的正式页面家族时，同一条重建链会继续生成或刷新工作区级 `overview` 页。
 - 因此 `stable` 不只是状态标签，也直接成为更高层 presentation rebuild 的触发条件，但它不再隐含“稳定 claim 必然长成概念页”。
 
@@ -1459,6 +1460,7 @@ V1 暂不承诺：
 - `ingest` 的 JSON 输出会额外附带 `post_ingest_review_auto`，纯文本输出也会单独打印一段 post-ingest auto-review 摘要，避免上层 Agent 误以为 ingest 已经完全结束。
 - 在默认模板下，这条复合流程还隐含了后续页面自动收口：`ingest -> review-auto -> stable promotion -> readable concept render -> workspace overview render`。
 - 其中后两步不需要上层 Agent 再单独补一条 `render-page` 命令；它们已经被纳入同一套页面重建链里。
+- 这里的“增量编译”也应把语义账本写回视作上游变化：即使原始 source 文件没变，只要 `claim_role` 改动了某组 claim 的 `knowledge_role / page_intent_hints / concept_candidate_score`，对应 bucket 的 `page_intent` 决策和页面家族都应重新计算，而不是沿用旧缓存或直接跳过页面重建。
 
 如果按新方向继续推进，这条链最终应进一步收口为：
 - `ingest -> evidence rebuild`
@@ -1592,6 +1594,7 @@ V1 当前实现说明：
 V1 当前实现说明：
 - 当前 `review-apply` 执行动作后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与 `indexes/search_pages.jsonl`。
 - 当前 `review-auto` 会优先读取 live review、live claim 与 alias/index 现状，先自动执行高把握动作，再复用既有页面重建与状态写回流程收口，而不是单独维护第二套恢复链。
+- `page_intent` 批处理的输入指纹当前也应显式依赖 `claim_role` 已写回的 `knowledge_role / page_intent_hints / concept_candidate_score`；否则会出现 claim 语义已变、但页型路由仍沿用旧缓存的错位状态。
 - `edit_then_resume` 当前已支持“人工先改 Claim 文件，再恢复页面和索引重建”。
 - 当前 `alias_conflict`（别名冲突）在 `review-apply` 后，若人工覆盖层已消除冲突，下一轮 ingest 不会重新打开同一条 open review。
 - 当前 `review-list` 与 `review-apply` 在读取 review 前，会先按最新 live pages 与 alias index 刷新 alias conflict 队列；若某条 alias review 已不再对应真实冲突，会自动从 active/open 视图转入历史态。

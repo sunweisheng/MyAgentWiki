@@ -139,6 +139,30 @@
 - V1 的权威账本是 `state/*.jsonl`
 - 单文件 `claims/*.json` 与 `reviews/*.json` 是便于人工查看与编辑的展开形式
 
+如果你看到的是这类现象：
+
+- 刚处理完一轮 review 或 migrate，`lint` 里的 warning 数量虽然下降了，但又冒出新的 `page_semantic_consistency`
+- 某组内容刚从 `concept` 改到 `guide / example / reference / timeline`，下一轮又像是被系统拉回旧页型
+- 没有新增 source 文件，但重新跑一次 `ingest` 后页面家族仍发生了变化
+
+优先这样判断：
+
+1. 先看 `state/claims.jsonl` 里对应 claim 的 `knowledge_role`、`page_intent_hints`、`concept_candidate_score` 是否刚被改写
+2. 再看 `state/pages.jsonl` 里同一组内容是否同时存在旧的 `concept/concept-summary` 和新的 `guide/example/topic/reference/timeline`
+3. 最后再跑一次 `lint --target-dir ...`，确认剩下的是“知识语义仍待选择”，还是“旧页没有正确退场”
+
+怎么理解：
+
+- 如果 `knowledge_role` 已经变成 `procedure / example`，而 `page_semantic_consistency` 还在抱怨某个 live `concept` 页，通常说明你面对的是“页面路由或旧页清理没有完全收口”，而不只是内容本身有歧义
+- 如果旧的 `concept` 页已经退场，只剩 `guide / example / reference` 之类的新页型，但 `lint` 仍提示 warning，那么更可能是这组 claim 本身确实处在语义灰区，需要继续调整 claim 状态、角色或页面归属
+- 如果没有新 source，但 claim 的语义字段变了，重新跑 `ingest` 后页面变化是正常的；当前系统会把这种“语义账本变化”也视作上游变化，而不是简单跳过
+
+建议：
+
+- 先把它当成“收口链是否统一”的问题，而不是急着手工改多份页面或索引文件
+- 优先重跑 `ingest` 或 `review-auto` 让统一链路收敛
+- 只有在确认剩下的是知识语义选择问题时，才继续改 claim 的角色、状态或页面归属
+
 ## 9. Windows 下命令路径不一样
 
 常用命令写法：

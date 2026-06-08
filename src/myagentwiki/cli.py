@@ -1618,17 +1618,7 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
 
         items = []
         for bucket_key, grouped_claims in sorted(groups.items()):
-            claim_ids = [item.get("claim_id") for item in grouped_claims if item.get("claim_id")]
-            preview_texts = [str(item.get("text", "")).strip() for item in grouped_claims[:5] if str(item.get("text", "")).strip()]
-            items.append(
-                {
-                    "item_id": bucket_key,
-                    "bucket_key": bucket_key,
-                    "claim_ids": claim_ids,
-                    "claim_texts": preview_texts,
-                    "claim_count": len(claim_ids),
-                }
-            )
+            items.append(build_page_intent_item_payload(bucket_key, grouped_claims))
         return items
 
     raise KeyError(f"Unsupported semantic task: {task_name}")
@@ -1894,6 +1884,48 @@ def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
     return "topic"
 
 
+def build_page_intent_item_payload(bucket_key: str, grouped_claims: list[dict]) -> dict:
+    ordered_claims = sorted(
+        grouped_claims,
+        key=lambda item: str(item.get("claim_id", "")).strip(),
+    )
+    claim_ids = [
+        str(item.get("claim_id", "")).strip()
+        for item in ordered_claims
+        if str(item.get("claim_id", "")).strip()
+    ]
+    preview_texts = [
+        str(item.get("text", "")).strip()
+        for item in ordered_claims[:5]
+        if str(item.get("text", "")).strip()
+    ]
+    claim_semantics = []
+    for item in ordered_claims:
+        claim_id = str(item.get("claim_id", "")).strip()
+        if not claim_id:
+            continue
+        claim_semantics.append(
+            {
+                "claim_id": claim_id,
+                "knowledge_role": str(item.get("knowledge_role", "")).strip().lower(),
+                "page_intent_hints": [
+                    str(hint).strip().lower()
+                    for hint in item.get("page_intent_hints", [])
+                    if str(hint).strip()
+                ],
+                "concept_candidate_score": coerce_float(item.get("concept_candidate_score", 0.0), 0.0),
+            }
+        )
+    return {
+        "item_id": bucket_key,
+        "bucket_key": bucket_key,
+        "claim_ids": claim_ids,
+        "claim_texts": preview_texts,
+        "claim_count": len(claim_ids),
+        "claim_semantics": claim_semantics,
+    }
+
+
 def apply_page_intent_decisions_to_claim_groups(
     target: Path,
     concept_claim_groups: dict[str, list[dict]],
@@ -1903,13 +1935,7 @@ def apply_page_intent_decisions_to_claim_groups(
     page_intents: dict[str, str] = {}
 
     for bucket_key, grouped_claims in concept_claim_groups.items():
-        item_payload = {
-            "item_id": bucket_key,
-            "bucket_key": bucket_key,
-            "claim_ids": [item.get("claim_id") for item in grouped_claims if item.get("claim_id")],
-            "claim_texts": [str(item.get("text", "")).strip() for item in grouped_claims[:5] if str(item.get("text", "")).strip()],
-            "claim_count": len(grouped_claims),
-        }
+        item_payload = build_page_intent_item_payload(bucket_key, grouped_claims)
         fingerprint = fingerprint_payload(
             task_name="page_intent",
             item_payloads=[item_payload],
@@ -5634,13 +5660,22 @@ def workspace_can_skip_page_regeneration(
     chunked_sources: list[dict],
     claims_created_by_source: dict[str, int],
     review_items: list[dict],
+    semantic_claim_updates_applied: bool = False,
 ) -> bool:
     # 这是一个“无上游变化”的保守短路条件：
     # - 没有新 source
     # - 没有新 normalized/chunk/claim/review
+    # - 没有仅由语义账本带来的 claim 角色/页面意图提示变化
     # - 所有来源都已经走到 generated 或 failed
     # 满足这些条件时，source-summary / concept-summary / search index 在语义上都不该变化。
-    if created_sources or normalized_sources or chunked_sources or claims_created_by_source or review_items:
+    if (
+        created_sources
+        or normalized_sources
+        or chunked_sources
+        or claims_created_by_source
+        or review_items
+        or semantic_claim_updates_applied
+    ):
         return False
     return all(record.get("status") in {"generated", "failed"} for record in sources_by_id.values())
 
@@ -5933,18 +5968,34 @@ def prune_stale_auto_pages(
     desired_auto_page_ids: set[str],
     claims_by_id: dict[str, dict],
     reviews_by_id: dict[str, dict],
+    forced_stale_page_ids: set[str] | None = None,
 ) -> tuple[list[dict], set[str], set[str]]:
     # 这里负责清理“这轮模型下已经不该存在”的自动页面。
     # 典型场景是：同一路径文档被更新后，旧版本 source-summary 和旧概念页应退出主视图。
     removed_pages: list[dict] = []
     dirty_claim_ids: set[str] = set()
     dirty_review_ids: set[str] = set()
+    forced_stale_page_ids = forced_stale_page_ids or set()
+    auto_page_types = {
+        "source-summary",
+        "concept-summary",
+        "concept",
+        "overview",
+        "guide",
+        "example",
+        "topic",
+        "reference",
+        "timeline",
+    }
 
     stale_page_ids = [
         page_id
         for page_id, page_record in page_records_by_id.items()
-        if page_record.get("type") in {"source-summary", "concept-summary", "concept", "overview"}
-        and page_id not in desired_auto_page_ids
+        if page_record.get("type") in auto_page_types
+        and (
+            page_id in forced_stale_page_ids
+            or page_id not in desired_auto_page_ids
+        )
     ]
 
     for page_id in stale_page_ids:
@@ -13301,6 +13352,7 @@ def rebuild_review_affected_pages(
     config = load_workspace_config(target)
     readable_concept_render_config = load_readable_concept_render_config(config)
     overview_render_config = load_page_render_config(config, "overview")
+    page_intent_config = load_semantic_task_config(config, "page_intent")
     sources_path = target / "state" / "sources.jsonl"
     normalized_path = target / "state" / "normalized.jsonl"
     pages_path = target / "state" / "pages.jsonl"
@@ -13389,13 +13441,17 @@ def rebuild_review_affected_pages(
         bucket_key = build_concept_group_key(claim_record)
         concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
     concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
+    page_intents_by_bucket = apply_page_intent_decisions_to_claim_groups(
+        target=target,
+        concept_claim_groups=concept_claim_groups,
+        task_config=page_intent_config,
+    )
 
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
-        if not should_generate_concept_page(grouped_claims):
-            stable_claims = filter_live_stable_claim_records(grouped_claims)
-            if not stable_claims:
-                continue
-        else:
+        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        if page_intent == "reject":
+            continue
+        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
             group_topic_label = choose_group_topic_label(grouped_claims)
             canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
             concept_page_id = build_concept_page_id(bucket_key)
@@ -13438,9 +13494,37 @@ def rebuild_review_affected_pages(
                 claim_ids=stored_page_record["claim_ids"],
                 reviews_by_id=live_reviews_by_id,
             )
+        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
+            page_title_source = choose_group_topic_label(grouped_claims) or choose_canonical_claim(grouped_claims).get("text", "")
+            page_rel_path = page_intent_page_path(page_intent, page_intent_page_id(bucket_key, page_intent), page_title_source)
+            page_text, page_record = build_intent_routed_page(
+                target=target,
+                config=config,
+                bucket_key=bucket_key,
+                page_intent=page_intent,
+                page_rel_path=page_rel_path,
+                claim_records=grouped_claims,
+                page_records_by_id=page_records_by_id,
+                review_records=live_review_records,
+            )
+            page_record = apply_page_alias_overrides(target, page_record)
+            page_record["page_path"] = str(page_rel_path)
+            stored_page_record, _ = upsert_wiki_page(
+                target=target,
+                page_records_by_id=page_records_by_id,
+                page_record=page_record,
+                page_text=page_text,
+            )
+            link_claims_to_page_in_memory(grouped_claims, stored_page_record["page_id"], live_claims_by_id)
+            link_reviews_to_page_in_memory(
+                review_records=live_review_records,
+                page_id=stored_page_record["page_id"],
+                claim_ids=stored_page_record["claim_ids"],
+                reviews_by_id=live_reviews_by_id,
+            )
 
         stable_claims = filter_live_stable_claim_records(grouped_claims)
-        if stable_claims:
+        if page_intent == "concept" and stable_claims:
             readable_page_id = build_readable_concept_page_id(bucket_key)
             readable_page_rel_path = readable_concept_page_path(readable_page_id)
             readable_page_text, readable_page_record = build_readable_concept_page(
@@ -13511,10 +13595,25 @@ def rebuild_review_affected_pages(
         for source_id in active_source_ids
         if claims_by_source_id.get(source_id) or chunks_by_source_id.get(source_id)
     }
+    forced_stale_page_ids: set[str] = set()
     for bucket_key, grouped_claims in concept_claim_groups.items():
-        if should_generate_concept_page(grouped_claims):
+        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        forced_stale_page_ids.update(
+            {
+                build_concept_page_id(bucket_key),
+                build_readable_concept_page_id(bucket_key),
+                *{
+                    page_intent_page_id(bucket_key, stale_intent)
+                    for stale_intent in {"guide", "example", "topic", "reference", "timeline"}
+                    if stale_intent != page_intent
+                },
+            }
+        )
+        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
             desired_auto_page_ids.add(build_concept_page_id(bucket_key))
-        if filter_live_stable_claim_records(grouped_claims):
+        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
+            desired_auto_page_ids.add(page_intent_page_id(bucket_key, page_intent))
+        if page_intent == "concept" and filter_live_stable_claim_records(grouped_claims):
             desired_auto_page_ids.add(build_readable_concept_page_id(bucket_key))
     if should_generate_workspace_overview_page(overview_concept_pages):
         desired_auto_page_ids.add(build_workspace_overview_page_id())
@@ -13525,6 +13624,7 @@ def rebuild_review_affected_pages(
         desired_auto_page_ids=desired_auto_page_ids,
         claims_by_id=live_claims_by_id,
         reviews_by_id=live_reviews_by_id,
+        forced_stale_page_ids=forced_stale_page_ids - desired_auto_page_ids,
     )
 
     write_jsonl(
@@ -14849,7 +14949,9 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             write_claim_file(target, claim_record)
 
     current_claim_records = [ensure_claim_lifecycle_defaults(record) for record in load_jsonl(claims_path)]
+    semantic_claim_updates_applied = False
     if current_claim_records and claim_role_config.enabled:
+        claim_records_before_semantic = [dict(record) for record in current_claim_records]
         run_semantic_batch_task(
             target=target,
             task_name="claim_role",
@@ -14860,6 +14962,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             claim_records=current_claim_records,
             task_config=claim_role_config,
         )
+        semantic_claim_updates_applied = current_claim_records != claim_records_before_semantic
         live_existing_claims = filter_live_claim_records(current_claim_records)
         historical_existing_claims = [
             record for record in current_claim_records
@@ -14891,6 +14994,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         chunked_sources=chunked_sources,
         claims_created_by_source=claims_created_by_source,
         review_items=review_items,
+        semantic_claim_updates_applied=semantic_claim_updates_applied,
     )
 
     if can_skip_page_regeneration:
@@ -15183,6 +15287,8 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             page_records_by_id=page_records_by_id,
         )
     )
+    if semantic_claim_updates_applied:
+        changed_bucket_keys.update(concept_claim_groups.keys())
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
         if bucket_key not in changed_bucket_keys:
             continue
@@ -15370,8 +15476,20 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         for source_id in active_source_ids
         if claims_by_source_id.get(source_id) or chunks_by_source_id.get(source_id)
     }
+    forced_stale_page_ids: set[str] = set()
     for bucket_key, grouped_claims in concept_claim_groups.items():
         page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        forced_stale_page_ids.update(
+            {
+                build_concept_page_id(bucket_key),
+                build_readable_concept_page_id(bucket_key),
+                *{
+                    page_intent_page_id(bucket_key, stale_intent)
+                    for stale_intent in {"guide", "example", "topic", "reference", "timeline"}
+                    if stale_intent != page_intent
+                },
+            }
+        )
         if page_intent == "concept" and should_generate_concept_page(grouped_claims):
             desired_auto_page_ids.add(build_concept_page_id(bucket_key))
         elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
@@ -15387,6 +15505,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
         desired_auto_page_ids=desired_auto_page_ids,
         claims_by_id=claims_by_id,
         reviews_by_id=existing_reviews,
+        forced_stale_page_ids=forced_stale_page_ids - desired_auto_page_ids,
     )
     if removed_pages:
         generated_pages.extend(removed_pages)
