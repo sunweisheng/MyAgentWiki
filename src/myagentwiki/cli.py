@@ -2256,11 +2256,16 @@ def load_alias_index(target: Path) -> dict:
 def load_page_alias_overrides(target: Path) -> dict:
     path = page_alias_overrides_path(target)
     if not path.exists():
-        return {"page_aliases": {}}
-    return load_json(path)
+        return {"page_aliases": {}, "accepted_conflicts": []}
+    payload = load_json(path)
+    payload.setdefault("page_aliases", {})
+    payload.setdefault("accepted_conflicts", [])
+    return payload
 
 
 def write_page_alias_overrides(target: Path, payload: dict) -> None:
+    payload.setdefault("page_aliases", {})
+    payload.setdefault("accepted_conflicts", [])
     write_json(page_alias_overrides_path(target), payload)
 
 
@@ -2360,6 +2365,99 @@ def apply_alias_override_action(
     return updated_overrides
 
 
+def accepted_alias_conflict_signature(alias_value: str, canonical_ids: list[str]) -> str:
+    normalized_alias = normalize_alias_value(alias_value)
+    canonical_part = "|".join(sorted(str(item).strip() for item in canonical_ids if str(item).strip()))
+    return f"{normalized_alias}::{canonical_part}"
+
+
+def build_accepted_alias_conflict_signatures(overrides: dict) -> set[str]:
+    accepted = overrides.get("accepted_conflicts", [])
+    signatures: set[str] = set()
+    for item in accepted:
+        if isinstance(item, str) and item.strip():
+            signatures.add(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        alias_value = str(item.get("alias", "")).strip()
+        canonical_ids = [str(value).strip() for value in item.get("canonical_ids", []) if str(value).strip()]
+        if not alias_value or not canonical_ids:
+            continue
+        signatures.add(accepted_alias_conflict_signature(alias_value, canonical_ids))
+    return signatures
+
+
+def persist_accepted_alias_conflict(
+    overrides: dict,
+    alias_value: str,
+    canonical_ids: list[str],
+) -> dict:
+    updated_overrides = copy.deepcopy(overrides)
+    accepted = [
+        item for item in updated_overrides.get("accepted_conflicts", [])
+        if isinstance(item, dict) or (isinstance(item, str) and item.strip())
+    ]
+    normalized_canonical_ids = sorted({
+        str(item).strip()
+        for item in canonical_ids
+        if str(item).strip()
+    })
+    signature = accepted_alias_conflict_signature(alias_value, normalized_canonical_ids)
+
+    filtered_accepted: list[dict | str] = []
+    for item in accepted:
+        if isinstance(item, str):
+            if item.strip() != signature:
+                filtered_accepted.append(item)
+            continue
+        existing_signature = accepted_alias_conflict_signature(
+            str(item.get("alias", "")).strip(),
+            [str(value).strip() for value in item.get("canonical_ids", []) if str(value).strip()],
+        )
+        if existing_signature != signature:
+            filtered_accepted.append(item)
+
+    filtered_accepted.append({
+        "alias": alias_value,
+        "canonical_ids": normalized_canonical_ids,
+        "accepted_at": utc_now_iso(),
+    })
+    updated_overrides["accepted_conflicts"] = filtered_accepted
+    return updated_overrides
+
+
+def clear_accepted_alias_conflict(
+    overrides: dict,
+    alias_value: str,
+    canonical_ids: list[str],
+) -> dict:
+    updated_overrides = copy.deepcopy(overrides)
+    signature = accepted_alias_conflict_signature(alias_value, canonical_ids)
+    filtered_accepted: list[dict | str] = []
+    for item in updated_overrides.get("accepted_conflicts", []):
+        if isinstance(item, str):
+            if item.strip() != signature:
+                filtered_accepted.append(item)
+            continue
+        existing_signature = accepted_alias_conflict_signature(
+            str(item.get("alias", "")).strip(),
+            [str(value).strip() for value in item.get("canonical_ids", []) if str(value).strip()],
+        )
+        if existing_signature != signature:
+            filtered_accepted.append(item)
+    updated_overrides["accepted_conflicts"] = filtered_accepted
+    return updated_overrides
+
+
+def unresolved_alias_conflicts(alias_index: dict) -> list[dict]:
+    return [
+        conflict
+        for conflict in alias_index.get("conflicts", [])
+        if not conflict.get("accepted")
+    ]
+
+
 def update_page_alias_overrides_with_lock(
     target: Path,
     updater,
@@ -2374,11 +2472,12 @@ def update_page_alias_overrides_with_lock(
         release_file_lock(lock_handle)
 
 
-def build_alias_index(page_records: list[dict]) -> dict:
+def build_alias_index(page_records: list[dict], accepted_conflict_signatures: set[str] | None = None) -> dict:
     # alias registry 统一记录 canonical_id、title、aliases 的双向映射关系。
     # query、lint、Agent 约定都依赖它，避免各自维护一份别名世界观。
     canonical_map: dict[str, dict] = {}
     alias_map: dict[str, list[dict]] = {}
+    accepted_conflict_signatures = accepted_conflict_signatures or set()
     live_page_records = filter_live_page_records(page_records)
     pages_by_canonical_id: dict[str, list[dict]] = {}
     title_owners_by_alias: dict[str, list[dict]] = {}
@@ -2476,10 +2575,12 @@ def build_alias_index(page_records: list[dict]) -> dict:
         canonical_ids = sorted({item["canonical_id"] for item in matches})
         if len(canonical_ids) <= 1:
             continue
+        signature = accepted_alias_conflict_signature(alias_key, canonical_ids)
         conflicts.append({
             "alias": alias_key,
             "canonical_ids": canonical_ids,
             "page_ids": sorted({item["page_id"] for item in matches}),
+            "accepted": signature in accepted_conflict_signatures,
         })
 
     return {
@@ -2492,7 +2593,11 @@ def build_alias_index(page_records: list[dict]) -> dict:
 
 
 def write_alias_index(target: Path, page_records: list[dict]) -> dict:
-    alias_index = build_alias_index(page_records)
+    overrides = load_page_alias_overrides(target)
+    alias_index = build_alias_index(
+        page_records,
+        accepted_conflict_signatures=build_accepted_alias_conflict_signatures(overrides),
+    )
     write_json(alias_index_path(target), alias_index)
     return alias_index
 
@@ -2517,6 +2622,8 @@ def build_alias_conflict_reviews(
     touched_review_ids: list[str] = []
 
     for conflict in alias_index.get("conflicts", []):
+        if conflict.get("accepted"):
+            continue
         canonical_ids = sorted(conflict.get("canonical_ids", []))
         page_ids = sorted(conflict.get("page_ids", []))
         review_record = build_review_record(
@@ -12213,6 +12320,16 @@ def build_review_auto_decision_payload(
                     "type": page_record.get("type"),
                     "status": page_record.get("status"),
                 })
+    if review_record.get("kind") == "alias_conflict":
+        evidence = review_record.get("evidence", [])
+        alias_value = str(evidence[0].get("alias", "")).strip() if evidence else ""
+        alias_index = load_alias_index(target)
+        alias_matches = alias_index_matches_for_value(alias_index, alias_value) if alias_value else []
+        payload["alias_conflict_context"] = {
+            "alias_value": alias_value,
+            "canonical_ids": evidence[0].get("canonical_ids", []) if evidence else [],
+            "matched_pages": alias_matches,
+        }
     return payload
 
 
@@ -12845,6 +12962,8 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
     applied_actions: list[dict] = []
     promoted_claims: list[dict] = []
 
+    auto_apply_failures: list[dict] = []
+
     if not args.dry_run:
         for plan in auto_apply_plans:
             review_record = live_reviews_by_id.get(plan["review_id"])
@@ -12858,19 +12977,29 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
             )
             if current_plan.get("decision") != "auto_apply":
                 continue
-            result = apply_review_action(
-                target=target,
-                review_record=review_record,
-                action=current_plan["action"],
-                primary_claim_id=current_plan["primary_claim_id"],
-                secondary_claim_id=current_plan["secondary_claim_id"],
-                primary_page_id=current_plan["primary_page_id"],
-                alias_value=current_plan["alias_value"],
-                live_claims_by_id=live_claims_by_id,
-                historical_claims_by_id=historical_claims_by_id,
-                live_reviews_by_id=live_reviews_by_id,
-                historical_reviews_by_id=historical_reviews_by_id,
-            )
+            try:
+                result = apply_review_action(
+                    target=target,
+                    review_record=review_record,
+                    action=current_plan["action"],
+                    primary_claim_id=current_plan["primary_claim_id"],
+                    secondary_claim_id=current_plan["secondary_claim_id"],
+                    primary_page_id=current_plan["primary_page_id"],
+                    alias_value=current_plan["alias_value"],
+                    live_claims_by_id=live_claims_by_id,
+                    historical_claims_by_id=historical_claims_by_id,
+                    live_reviews_by_id=live_reviews_by_id,
+                    historical_reviews_by_id=historical_reviews_by_id,
+                )
+            except ValueError as exc:
+                auto_apply_failures.append({
+                    "review_id": current_plan["review_id"],
+                    "display_id": current_plan["display_id"],
+                    "kind": current_plan["kind"],
+                    "reason": "auto_apply_failed_validation",
+                    "validation_error": str(exc),
+                })
+                continue
             live_reviews_by_id[review_record["review_id"]] = review_record
             applied_actions.append({
                 "review_id": current_plan["review_id"],
@@ -12952,15 +13081,45 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
                 historical_reviews_by_id=historical_reviews_by_id,
             )
 
+    failure_plan_by_review_id = {
+        item["review_id"]: item
+        for item in auto_apply_failures
+    }
+    final_escalated_plans = list(escalated_plans) + [
+        {
+            "review_id": item["review_id"],
+            "display_id": item["display_id"],
+            "kind": item["kind"],
+            "recommended_action": None,
+            "decision": "escalate",
+            "reason": item["reason"],
+            "action": None,
+            "primary_claim_id": None,
+            "secondary_claim_id": None,
+            "primary_page_id": None,
+            "alias_value": None,
+            "confidence": None,
+        }
+        for item in auto_apply_failures
+        if item["review_id"] in live_reviews_by_id
+    ]
+
     escalated_entries = [
         build_review_auto_escalation_entry(
             review_record=live_reviews_by_id[plan["review_id"]],
             plan=plan,
             live_claims_by_id=live_claims_by_id,
         )
-        for plan in escalated_plans
+        for plan in final_escalated_plans
         if plan["review_id"] in live_reviews_by_id
     ]
+    for entry in escalated_entries:
+        failure_meta = failure_plan_by_review_id.get(entry["review_id"])
+        if failure_meta is not None:
+            entry["why_human_needed"] = (
+                "自动裁决在最终收敛校验时失败，需要人工确认别名归属或改为保留多义并存。"
+            )
+            entry["validation_error"] = failure_meta["validation_error"]
     agent_brief, agent_summary = build_review_auto_agent_handoff(
         auto_apply_plans=auto_apply_plans,
         escalated_entries=escalated_entries,
@@ -12976,16 +13135,18 @@ def command_review_auto(args: argparse.Namespace) -> CommandResult:
         "dry_run": bool(args.dry_run),
         "planned_actions": planned_actions,
         "applied_actions": applied_actions,
-        "escalated_reviews": escalated_plans,
+        "escalated_reviews": final_escalated_plans,
         "escalation_handoff": escalated_entries,
+        "auto_apply_failures": auto_apply_failures,
         "promoted_claims": promoted_claims,
         "agent_brief": agent_brief,
         "agent_summary": agent_summary,
         "summary": {
             "planned_review_count": len(planned_actions),
             "auto_apply_count": len(auto_apply_plans),
-            "escalated_count": len(escalated_plans),
+            "escalated_count": len(final_escalated_plans),
             "applied_count": len(applied_actions),
+            "auto_apply_failure_count": len(auto_apply_failures),
             "promoted_claim_count": len(promoted_claims),
         },
         "automation": {
@@ -13644,7 +13805,11 @@ def apply_review_action(
                     f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
                 )
 
-            return updated_overrides
+            return clear_accepted_alias_conflict(
+                updated_overrides,
+                alias_to_assign,
+                projected_canonical_ids,
+            )
 
         update_page_alias_overrides_with_lock(target, update_and_validate)
 
@@ -13660,6 +13825,23 @@ def apply_review_action(
         }
 
     if action == "keep_both":
+        if review_record.get("kind") == "alias_conflict":
+            evidence = review_record.get("evidence", [])
+            alias_from_review = str(evidence[0].get("alias", "")).strip() if evidence else ""
+            canonical_ids = [
+                str(value).strip()
+                for value in (evidence[0].get("canonical_ids", []) if evidence else [])
+                if str(value).strip()
+            ]
+            if alias_from_review and canonical_ids:
+                def accept_alias_conflict(overrides: dict) -> dict:
+                    return persist_accepted_alias_conflict(
+                        overrides=overrides,
+                        alias_value=alias_from_review,
+                        canonical_ids=canonical_ids,
+                    )
+
+                update_page_alias_overrides_with_lock(target, accept_alias_conflict)
         review_record["status"] = "resolved"
         review_record["resolved_at"] = utc_now_iso()
         review_record["lifecycle_status"] = "active"
@@ -15630,7 +15812,7 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             )
 
             alias_index = load_alias_index(target) if alias_index_path(target).exists() else {}
-            alias_conflicts = alias_index.get("conflicts", []) if alias_index else []
+            alias_conflicts = unresolved_alias_conflicts(alias_index) if alias_index else []
             add_check(
                 name="alias_conflicts_absent",
                 ok=len(alias_conflicts) == 0,

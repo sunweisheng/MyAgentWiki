@@ -749,3 +749,172 @@ def test_review_auto_agent_assisted_hook_can_assign_noisy_alias_to_unique_title_
         item["kind"] == "alias_conflict" and item["status"] == "open"
         for item in refreshed_reviews["items"]
     )
+
+
+def test_review_auto_agent_assisted_hook_can_assign_non_noisy_alias_to_unique_title_owner(tmp_path: Path) -> None:
+    workspace_dir = create_workspace(
+        tmp_path,
+        "ReviewAutoSpecificAliasOwner",
+        {
+            "alpha.md": "# Alpha\n\nAlpha 是规划信息的概念。\n",
+            "beta.md": "# Beta\n\nBeta 是另一个概念。\n",
+        },
+    )
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"][:2]
+    assert len(concept_pages) == 2
+    concept_pages[0]["title"] = "路线图"
+    concept_pages[1]["aliases"] = sorted(set(concept_pages[1].get("aliases", []) + ["路线图"]))
+    write_jsonl(pages_path, page_records)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    append_text(
+        workspace_dir / "config" / "project.yml",
+        "\n"
+        + "automation:\n"
+        + "  review_auto:\n"
+        + '    strategy: "agent_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{REPO_ROOT / "scripts" / "agent_assisted_review_hook.py"}"\n'
+        + "    timeout_seconds: 20\n"
+        + "    min_confidence: 0.9\n",
+    )
+
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
+
+    assert result["summary"]["applied_count"] >= 1
+    applied_reasons = {item["reason"] for item in result["applied_actions"]}
+    assert "agent_hook_assigned_alias_to_unique_title_owner" in applied_reasons
+    refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert not any(
+        item["kind"] == "alias_conflict" and item["status"] == "open"
+        for item in refreshed_reviews["items"]
+    )
+
+
+def test_review_auto_agent_assisted_hook_can_keep_both_generated_image_aliases(tmp_path: Path) -> None:
+    workspace_dir = create_workspace(
+        tmp_path,
+        "ReviewAutoImageAliasKeepBoth",
+        {
+            "alpha.md": "# Alpha\n\nAlpha 是概念一。\n",
+            "beta.md": "# Beta\n\nBeta 是概念二。\n",
+        },
+    )
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    concept_pages = [record for record in page_records if record.get("type") == "concept-summary"][:2]
+    assert len(concept_pages) == 2
+    shared_alias = "image_x"
+    for record in page_records:
+        if record.get("page_id") in {concept_pages[0]["page_id"], concept_pages[1]["page_id"]}:
+            record["aliases"] = sorted(set(record.get("aliases", []) + [shared_alias]))
+    write_jsonl(pages_path, page_records)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    append_text(
+        workspace_dir / "config" / "project.yml",
+        "\n"
+        + "automation:\n"
+        + "  review_auto:\n"
+        + '    strategy: "agent_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{REPO_ROOT / "scripts" / "agent_assisted_review_hook.py"}"\n'
+        + "    timeout_seconds: 20\n"
+        + "    min_confidence: 0.9\n",
+    )
+
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
+
+    assert result["summary"]["applied_count"] >= 1
+    applied_reasons = {item["reason"] for item in result["applied_actions"]}
+    assert "agent_hook_kept_generated_image_aliases_distinct" in applied_reasons
+    refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert not any(
+        item["kind"] == "alias_conflict" and item["status"] == "open"
+        for item in refreshed_reviews["items"]
+    )
+
+
+def test_review_auto_downgrades_invalid_alias_auto_apply_to_escalation(tmp_path: Path) -> None:
+    workspace_dir = create_workspace(
+        tmp_path,
+        "ReviewAutoAliasValidationFallback",
+        {
+            "topic.md": "# Topic\n\n知识声明层 是一个概念。\n",
+            "guide.md": "# Guide\n\n证据切块层 是另一个概念。\n",
+        },
+    )
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    candidate_pages = [
+        record for record in page_records
+        if not record.get("removed")
+        and record.get("lifecycle_status", "active") == "active"
+        and record.get("type") != "source-summary"
+    ]
+    distinct_pages: list[dict] = []
+    seen_canonical_ids: set[str] = set()
+    for record in candidate_pages:
+        canonical_id = record.get("canonical_id") or record.get("page_id")
+        if canonical_id in seen_canonical_ids:
+            continue
+        seen_canonical_ids.add(canonical_id)
+        distinct_pages.append(record)
+        if len(distinct_pages) == 2:
+            break
+    assert len(distinct_pages) == 2
+    shared_alias = "知识层"
+    for record in page_records:
+        if record.get("page_id") in {distinct_pages[0]["page_id"], distinct_pages[1]["page_id"]}:
+            record["aliases"] = sorted(set(record.get("aliases", []) + [shared_alias]))
+            record["title"] = shared_alias
+    write_jsonl(pages_path, page_records)
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    hook_script = tmp_path / "alias_hook.py"
+    hook_script.write_text(
+        "import json, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "review = payload.get('review', {})\n"
+        "page_ids = review.get('candidate_page_ids', [])\n"
+        "json.dump({\n"
+        "  'decision': 'auto_apply',\n"
+        "  'action': 'assign_alias',\n"
+        "  'primary_page_id': page_ids[0] if page_ids else '',\n"
+        "  'alias_value': payload.get('alias_conflict_context', {}).get('alias_value', ''),\n"
+        "  'confidence': 0.99,\n"
+        "  'reason': 'agent_hook_forced_invalid_alias_assignment'\n"
+        "}, sys.stdout, ensure_ascii=False)\n",
+        encoding="utf-8",
+    )
+
+    append_text(
+        workspace_dir / "config" / "project.yml",
+        "\n"
+        + "automation:\n"
+        + "  review_auto:\n"
+        + '    strategy: "agent_assisted"\n'
+        + "    command:\n"
+        + '      - "python3"\n'
+        + f'      - "{hook_script}"\n'
+        + "    timeout_seconds: 20\n"
+        + "    min_confidence: 0.9\n",
+    )
+
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
+
+    assert result["summary"]["applied_count"] == 0
+    assert result["summary"]["auto_apply_failure_count"] == 1
+    assert result["summary"]["escalated_count"] >= 1
+    assert result["auto_apply_failures"][0]["reason"] == "auto_apply_failed_validation"
+    assert "validation_error" in result["escalation_handoff"][0]

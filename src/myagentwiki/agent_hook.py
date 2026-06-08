@@ -26,6 +26,10 @@ SHORT_FRAGMENT_MARKERS = (
 
 COMPACT_TEXT_RE = re.compile(r"[\s，。；：！？、,.!?:;\"'“”‘’（）()\[\]【】`]+")
 QUESTION_PREFIXES = ("问题", "为什么", "如何", "怎么", "是否")
+IMAGE_SLOT_ALIAS_RE = re.compile(
+    r"^(?:内嵌图片\s*)?(?:image|img|figure|fig|photo|picture|插图|图片)[-_ ]?[a-z0-9]+$",
+    re.IGNORECASE,
+)
 
 
 def normalize_text(text: str) -> str:
@@ -79,9 +83,32 @@ def candidate_pages_by_canonical(candidate_pages: list[dict]) -> dict[str, list[
     return grouped
 
 
+def pick_preferred_page_id(
+    review: dict,
+    candidate_pages: list[dict],
+) -> str | None:
+    if not candidate_pages:
+        return None
+    page_ids = review.get("candidate_page_ids", [])
+    ranked_pages = sorted(
+        candidate_pages,
+        key=lambda page: (
+            1 if page.get("type") == "concept" else 0,
+            1 if page.get("status") == "stable" else 0,
+            page_ids.index(page.get("page_id")) if page.get("page_id") in page_ids else 10**6,
+        ),
+        reverse=True,
+    )
+    return ranked_pages[0].get("page_id")
+
+
+def alias_looks_like_image_slot(alias_value: str) -> bool:
+    return bool(IMAGE_SLOT_ALIAS_RE.match(normalize_text(alias_value)))
+
+
 def choose_alias_conflict_owner(review: dict, candidate_pages: list[dict], alias_value: str) -> str | None:
     normalized_alias = normalize_text(alias_value)
-    if normalized_alias not in NOISY_ALIAS_VALUES:
+    if not normalized_alias:
         return None
 
     grouped = candidate_pages_by_canonical(candidate_pages)
@@ -95,25 +122,9 @@ def choose_alias_conflict_owner(review: dict, candidate_pages: list[dict], alias
 
     target_canonical_id = title_matches[0]
     target_pages = grouped.get(target_canonical_id, [])
-    concept_like_pages = [
-        page for page in target_pages
-        if page.get("type") == "concept"
-    ]
+    concept_like_pages = [page for page in target_pages if page.get("type") == "concept"]
     preferred_pages = concept_like_pages or target_pages
-    if not preferred_pages:
-        return None
-
-    page_ids = review.get("candidate_page_ids", [])
-    ranked_pages = sorted(
-        preferred_pages,
-        key=lambda page: (
-            1 if page.get("type") == "concept" else 0,
-            1 if page.get("status") == "stable" else 0,
-            page_ids.index(page.get("page_id")) if page.get("page_id") in page_ids else 10**6,
-        ),
-        reverse=True,
-    )
-    return ranked_pages[0].get("page_id")
+    return pick_preferred_page_id(review, preferred_pages)
 
 
 def choose_keep_both_conflict_reason(candidate_claims: list[dict]) -> str | None:
@@ -202,7 +213,21 @@ def handle_review_auto(payload: dict) -> dict:
                 "primary_page_id": owner_page_id,
                 "alias_value": alias_value,
                 "confidence": 0.96,
-                "reason": "agent_hook_assigned_noisy_alias_to_title_owner",
+                "reason": (
+                    "agent_hook_assigned_noisy_alias_to_title_owner"
+                    if alias_value in NOISY_ALIAS_VALUES
+                    else "agent_hook_assigned_alias_to_unique_title_owner"
+                ),
+            }
+        if (
+            alias_looks_like_image_slot(alias_value)
+            and "keep_both" in review.get("allowed_actions", [])
+        ):
+            return {
+                "decision": "auto_apply",
+                "action": "keep_both",
+                "confidence": 0.94,
+                "reason": "agent_hook_kept_generated_image_aliases_distinct",
             }
         if alias_value in NOISY_ALIAS_VALUES and "remove_alias" in review.get("allowed_actions", []):
             normalized_titles = {normalize_text(page.get("title", "")) for page in candidate_pages}

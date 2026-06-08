@@ -2757,6 +2757,88 @@ def test_assign_alias_persists_after_reingest_and_clears_open_alias_conflict(tmp
     )
 
 
+def test_alias_conflict_keep_both_persists_accepted_ambiguity_and_clears_open_review(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
+    (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "KeepBothAliasConflict",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    shared_alias = "共享术语"
+    inject_shared_alias_override(workspace_dir, shared_alias)
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    alias_review = next(item for item in reviews["items"] if item["kind"] == "alias_conflict")
+
+    result = run_cli(
+        "review-apply",
+        alias_review["review_id"],
+        "keep_both",
+        "--target-dir", str(workspace_dir),
+    )
+
+    assert result["action"] == "keep_both"
+    overrides = json.loads((workspace_dir / "state" / "page_alias_overrides.json").read_text(encoding="utf-8"))
+    accepted_conflicts = overrides.get("accepted_conflicts", [])
+    assert any(
+        item.get("alias") == shared_alias and len(item.get("canonical_ids", [])) >= 2
+        for item in accepted_conflicts
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    assert not any(
+        item["kind"] == "alias_conflict" and item["status"] == "open"
+        for item in refreshed_reviews["items"]
+    )
+
+
+def test_lint_ignores_accepted_alias_conflicts_after_keep_both(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "alpha.md").write_text("# Alpha 术语\n\nAlpha 术语是版本状态相关概念。\n", encoding="utf-8")
+    (source_dir / "beta.md").write_text("# Beta 术语\n\nBeta 术语是审核闭环相关概念。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "LintAcceptedAliasConflict",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    shared_alias = "共享术语"
+    inject_shared_alias_override(workspace_dir, shared_alias)
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    warning_result = run_cli("lint", "--target-dir", str(workspace_dir))
+    warning_checks = {item["name"]: item for item in warning_result["checks"]}
+    assert warning_checks["alias_conflicts_absent"]["ok"] is False
+
+    reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
+    alias_review = next(item for item in reviews["items"] if item["kind"] == "alias_conflict")
+    run_cli(
+        "review-apply",
+        alias_review["review_id"],
+        "keep_both",
+        "--target-dir", str(workspace_dir),
+    )
+
+    accepted_result = run_cli("lint", "--target-dir", str(workspace_dir))
+    accepted_checks = {item["name"]: item for item in accepted_result["checks"]}
+    assert accepted_checks["alias_conflicts_absent"]["ok"] is True
+
+
 def test_assign_alias_allows_same_canonical_page_family_to_share_alias(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
