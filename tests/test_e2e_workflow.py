@@ -353,6 +353,8 @@ def test_skill_and_default_prompt_constrain_prechecks_to_known_raw() -> None:
     openai_agent_text = Path("agents/openai.yaml").read_text(encoding="utf-8")
     assert "默认检查范围也应限制在该 `raw/` 内" in skill_text
     assert "restrict pre-init and pre-ingest file checks to that raw directory" in openai_agent_text
+    assert "不要主动探测附近已有工作区、兄弟目录或父目录来替用户猜测来源" in skill_text
+    assert "do not probe nearby workspaces, sibling folders, or parent folders to guess one" in openai_agent_text
 
 
 def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> None:

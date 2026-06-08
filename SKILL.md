@@ -26,6 +26,7 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 - 固定流程优先走 CLI，不直接批量改写 `state/*.jsonl`
 - `raw/` 视为原始资料区，不自动改写
 - 若用户已明确给出 `raw/` 路径，初始化或导入前的默认检查范围也应限制在该 `raw/` 内；不要为了确认导入范围先读取它的父目录、其他兄弟目录或整库内容，除非用户明确要求扩大发现范围
+- 若用户还没有明确给出 `raw/` 路径，也不要主动探测附近已有工作区、兄弟目录或父目录来替用户猜测来源；默认只围绕用户当前点名的目录继续，必须改目录结构时先明确说明假设
 - 需要证据、来源、冲突判断时，必须回读 `reading_pack`
 - 人工修改 claim 后，使用 `review-apply ... edit_then_resume` 恢复流程
 - 历史态 claim / review / page 保留追踪链，不直接删除
