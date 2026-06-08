@@ -348,6 +348,13 @@ def test_init_templates_constrain_agent_prechecks_to_known_raw(tmp_path: Path) -
     assert expected_line in claude_text
 
 
+def test_skill_and_default_prompt_constrain_prechecks_to_known_raw() -> None:
+    skill_text = Path("SKILL.md").read_text(encoding="utf-8")
+    openai_agent_text = Path("agents/openai.yaml").read_text(encoding="utf-8")
+    assert "默认检查范围也应限制在该 `raw/` 内" in skill_text
+    assert "restrict pre-init and pre-ingest file checks to that raw directory" in openai_agent_text
+
+
 def test_cli_text_output_includes_absolute_workspace_paths(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
