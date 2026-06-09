@@ -233,16 +233,7 @@ def handle_review_auto(payload: dict) -> dict:
             normalized_titles = {normalize_text(page.get("title", "")) for page in candidate_pages}
             if alias_value in normalized_titles:
                 return {"decision": "escalate", "reason": "alias_matches_page_title"}
-            page_ids = review.get("candidate_page_ids", [])
-            if page_ids:
-                return {
-                    "decision": "auto_apply",
-                    "action": "remove_alias",
-                    "primary_page_id": page_ids[0],
-                    "alias_value": alias_value,
-                    "confidence": 0.99,
-                    "reason": "agent_hook_removed_noisy_alias",
-                }
+            return {"decision": "escalate", "reason": "noisy_alias_still_requires_explicit_owner_decision"}
         return {"decision": "escalate", "reason": "alias_still_needs_human_judgment"}
 
     if kind == "claim_conflict":
@@ -527,6 +518,15 @@ def handle_claim_role_batch(payload: dict) -> dict:
             role = "definition"
             page_intent_hints = ["concept", "topic"]
             concept_candidate_score = 0.88
+        elif (
+            len(text) >= 12
+            and not text_looks_fragmentary(text)
+            and not text_is_question_like(text)
+            and any(marker in text for marker in ("承担", "职责", "机制", "能力", "模型", "系统", "设计", "定义"))
+        ):
+            role = "fact"
+            page_intent_hints = ["concept", "topic"]
+            concept_candidate_score = 0.72
         decisions.append(
             {
                 "item_id": item_id,
@@ -589,7 +589,7 @@ def handle_page_intent_batch(payload: dict) -> dict:
             page_intent = "guide"
         elif any(marker in merged for marker in ("例如", "比如", "示例", "案例")):
             page_intent = "example"
-        elif any(marker in merged for marker in ("是", "用于", "意味着", "是一种")):
+        elif any(marker in merged for marker in ("是", "用于", "意味着", "是一种", "承担", "职责", "机制", "能力")):
             page_intent = "concept"
         decisions.append(
             {

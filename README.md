@@ -87,7 +87,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 当前仓库已通过本地测试和端到端验证：
 
 - `python -m pytest`
-  - `28 passed`
+  - 当前以仓库内测试套件为准；请在本地运行以获取最新通过数
 - `python scripts/validate_workflow.py`
   - 覆盖 `doctor -> bootstrap --dry-run -> init -> ingest -> query -> lint`
 - `python3 -m myagentwiki lint --json`
@@ -338,7 +338,7 @@ python3 -m myagentwiki migrate-followups --target-dir /path/to/MyNotesWiki
 - 想恢复最近一次迁移前的关键状态与配置时，用 `migrate --rollback`
 - 更完整的迁移边界、确认账本和 follow-up 机制，建议直接看详细设计文档与实现计划文档
 
-当前新初始化工作区默认就会把审核、stable 提升、可读概念页和综述页统一接到包内 Agent hook：
+当前新初始化工作区默认会把审核、stable 提升、可读概念页和综述页所需的包内 Agent hook 一并接好；后续是否真的产出 `stable / concept / overview`，仍取决于 review 收口结果、hook 判定和页面生成条件：
 
 ```yaml
 automation:
@@ -417,16 +417,18 @@ automation:
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
 - `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
 - `concept_update` hook 当前也会被复用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
-- 若 hook 失败、超时、低于置信阈值，系统会自动回退到现有的保守自动策略，而不是中断整个流程
+- 若 hook 失败、超时、低于置信阈值，系统会按当前环节回退到保守路径，而不是中断整个流程：
+- `review_auto / stable_promotion` 会保留原状或升级为人工判断项
+- `readable_concept / overview` 会回退到 deterministic render
 
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
-这意味着默认推荐流程会变成：
+这意味着默认推荐流程会尽量串成一条连续自动化链：
 - `ingest` 负责发现新 claim、重建页面、刷新索引
 - 如果这次没有新 source，但 `claim_role` 写回改动了某组 claim 的 `knowledge_role / page_intent_hints / concept_candidate_score`，`ingest` 仍会把它视作上游变化，继续重跑对应 bucket 的页面路由与旧页清理，而不是误判为“无变化可跳过”
-- `review-auto` 负责自动收口高把握 review，并自动提升可安全稳定化的 claim
-- 当 claim 被自动提升为 `stable` 后，系统会继续自动生成或刷新可读 `concept` 页
+- `review-auto` 会优先自动收口高把握 review，并尝试提升可安全稳定化的 claim
+- 当 claim 真正被提升为 `stable` 后，系统会继续自动生成或刷新可读 `concept` 页
 - 当工作区里已有多个稳定可读概念页时，系统会继续自动生成或刷新工作区级 `overview` 页
-- `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写，不通过校验时自动回退到 deterministic fallback
+- `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写；若不满足校验或生成条件，会回退到 deterministic fallback，或暂不产出对应页面
 - 只有仍然 escalated 的 review 才需要人工判断
 
 如果你主要是在 Codex 或 Claude 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
@@ -628,8 +630,8 @@ MyAgentWiki/
   - 灰区标题当前只允许 Agent hook 返回 `accept / reject / rename` 这三种受限决策，不直接把自由生成的标题写成 canonical，优先保证 `canonical_id` 稳定
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
-  - 当前已自动生成人类可读 `concept` 页与工作区级 `overview` 页，且默认渲染模式为 `llm_assisted`
-  - 当前新初始化工作区默认已经接上统一包内 Agent hook；因此 `ingest -> review-auto -> stable -> concept/overview` 会作为一条连续自动化链默认运行，而不需要用户再手工补配置
+  - 当前已支持自动生成人类可读 `concept` 页；工作区级 `overview` 页会在满足生成条件时自动产出，两个页面族默认都会先尝试 `llm_assisted` 渲染
+  - 当前新初始化工作区默认已经接上统一包内 Agent hook，目标是让 `ingest -> review-auto -> stable -> concept/overview` 作为一条连续自动化链默认运行，而不需要用户再手工补配置
   - `concept` 与 `overview` 的 LLM 改写都要求 grounded；不合格时会自动回退到 deterministic fallback
   - `overview` 页当前支持 grounded overview rewrite，并在 `llm_assisted` 成功时显示折叠式 `Rewrite Traceability`
 - `myagentwiki lint`

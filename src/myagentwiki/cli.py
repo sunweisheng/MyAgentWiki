@@ -1881,7 +1881,7 @@ def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
     for preferred in ("reject", "timeline", "reference", "guide", "example", "concept", "topic"):
         if hint_counts.get(preferred):
             return preferred
-    return "topic"
+    return "concept" if should_generate_concept_page(grouped_claims) else "topic"
 
 
 def build_page_intent_item_payload(bucket_key: str, grouped_claims: list[dict]) -> dict:
@@ -1948,10 +1948,22 @@ def apply_page_intent_decisions_to_claim_groups(
             if isinstance(decision, dict):
                 page_intent = str(decision.get("page_intent", "")).strip().lower()
                 if page_intent:
+                    if page_intent == "topic" and should_generate_concept_page(grouped_claims):
+                        page_intents[bucket_key] = "concept"
+                        continue
                     page_intents[bucket_key] = page_intent
                     continue
         page_intents[bucket_key] = choose_bucket_page_intent(grouped_claims)
     return page_intents
+
+
+def preferred_page_intent_for_claim_group(
+    grouped_claims: list[dict],
+    page_intent: str,
+) -> str:
+    if page_intent == "topic" and should_generate_concept_page(grouped_claims):
+        return "concept"
+    return page_intent
 
 
 def supported_page_render_targets() -> tuple[str, ...]:
@@ -2666,7 +2678,6 @@ def build_alias_conflict_reviews(
             signature_parts=[
                 conflict.get("alias", ""),
                 *canonical_ids,
-                *page_ids,
             ],
         )
         review_record["candidate_page_ids"] = page_ids
@@ -6082,6 +6093,9 @@ def build_readable_concept_page_id(bucket_key: str) -> str:
 def build_concept_group_key(claim_record: dict) -> str:
     # 概念页聚合键尽量与 review 检测使用同一套“主题归一化”直觉。
     # 这样 query、review、concept page 三者更容易围绕同一组 claim 收敛。
+    section_label = extract_primary_section_label(claim_record)
+    if section_label and not is_generic_concept_label(section_label):
+        return build_concept_canonical_key(section_label)
     base_text = normalize_claim_base_for_conflict(claim_record.get("text", ""))
     similarity_tokens = build_claim_similarity_tokens(claim_record.get("text", ""))
     token_fingerprint = " ".join(similarity_tokens[:8])
@@ -6656,23 +6670,28 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     if len(source_ids) >= 2:
         return True
     canonical_claim = choose_canonical_claim(concept_claim_records, choose_group_topic_label(concept_claim_records))
+    section_label = choose_group_topic_label(concept_claim_records)
     concept_title = build_concept_title(canonical_claim, preferred_section_label=choose_group_topic_label(concept_claim_records))
     quality = concept_title_quality_details(
         title=concept_title,
         canonical_claim=canonical_claim,
         claim_records=concept_claim_records,
-        preferred_section_label=choose_group_topic_label(concept_claim_records),
+        preferred_section_label=section_label,
     )
-    if quality["classification"] == "reject":
-        return False
     claim_text = canonical_claim.get("text", "")
     cleaned_claim_text = clean_claim_candidate_text(claim_text)
     # 一些明显是“转换占位提示”的文本先不提升成概念页，避免 Wiki 被环境提示刷屏。
     if any(marker in claim_text for marker in ("当前环境缺少", "当前环境未启用", "仅生成占位", "估计页数:")):
         return False
+    if text_is_iso_date_label(section_label) or text_is_iso_date_label(cleaned_claim_text):
+        return True
+    if quality["classification"] == "reject":
+        return False
     if text_is_iso_date_label(cleaned_claim_text):
         return True
     if canonical_claim.get("claim_type") == "definition" and len(cleaned_claim_text) >= 14:
+        return True
+    if section_label and not is_generic_concept_label(section_label) and len(section_label) >= 4:
         return True
     concept_candidate_score = coerce_float(canonical_claim.get("concept_candidate_score", 0.0), 0.0)
     if concept_candidate_score >= 0.75:
@@ -6724,6 +6743,29 @@ def resolve_concept_title_candidate(
 
     quality = dict(quality)
     quality["llm_review"] = llm_review
+    if quality["classification"] == "reject":
+        fallback_candidates = [
+            extract_concept_phrase_from_claim(canonical_claim.get("text", ""), ""),
+            preferred_section_label if text_is_iso_date_label(preferred_section_label) else "",
+            clean_concept_title_text(shorten_title_text(markdown_to_plain_text(canonical_claim.get("text", "")), limit=28)),
+        ]
+        for fallback_title in fallback_candidates:
+            fallback_title = clean_concept_title_text(fallback_title)
+            if not fallback_title:
+                continue
+            if is_generic_concept_label(fallback_title) and not text_is_iso_date_label(fallback_title):
+                continue
+            title = shorten_title_text(fallback_title, limit=28)
+            quality = concept_title_quality_details(
+                title=title,
+                canonical_claim=canonical_claim,
+                claim_records=claim_records,
+                preferred_section_label=preferred_section_label,
+            )
+            quality = dict(quality)
+            quality["llm_review"] = llm_review
+            quality["fallback_title_applied"] = True
+            break
     return title, quality
 
 
@@ -12248,6 +12290,11 @@ def build_review_list_payload(target: Path, status_filter: str | None = None) ->
             record for record in review_records
             if record.get("status") == status_filter
         ]
+    else:
+        review_records = [
+            record for record in review_records
+            if record.get("lifecycle_status") == "active" and record.get("status") == "open"
+        ]
 
     items = []
     for review_record in sorted(
@@ -13448,7 +13495,10 @@ def rebuild_review_affected_pages(
     )
 
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
-        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        page_intent = preferred_page_intent_for_claim_group(
+            grouped_claims,
+            page_intents_by_bucket.get(bucket_key, "topic"),
+        )
         if page_intent == "reject":
             continue
         if page_intent == "concept" and should_generate_concept_page(grouped_claims):
@@ -13597,7 +13647,10 @@ def rebuild_review_affected_pages(
     }
     forced_stale_page_ids: set[str] = set()
     for bucket_key, grouped_claims in concept_claim_groups.items():
-        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        page_intent = preferred_page_intent_for_claim_group(
+            grouped_claims,
+            page_intents_by_bucket.get(bucket_key, "topic"),
+        )
         forced_stale_page_ids.update(
             {
                 build_concept_page_id(bucket_key),
@@ -15292,7 +15345,10 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
         if bucket_key not in changed_bucket_keys:
             continue
-        page_intent = page_intents_by_bucket.get(bucket_key, "topic")
+        page_intent = preferred_page_intent_for_claim_group(
+            grouped_claims,
+            page_intents_by_bucket.get(bucket_key, "topic"),
+        )
         if page_intent == "reject":
             continue
         if page_intent == "concept" and should_generate_concept_page(grouped_claims):
@@ -15306,47 +15362,44 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
                 claim_records=grouped_claims,
                 preferred_section_label=group_topic_label,
             )
-            if concept_title_quality["classification"] == "reject":
-                concept_title = ""
             page_rel_path = concept_summary_page_path(
                 concept_page_id,
                 concept_title,
             )
-            if concept_title:
-                page_text, page_record = build_concept_summary_page(
-                    target=target,
-                    config=config,
-                    bucket_key=bucket_key,
-                    page_rel_path=page_rel_path,
-                    claim_records=grouped_claims,
-                    page_records_by_id=page_records_by_id,
-                    review_records=review_records,
-                )
-                page_record = apply_page_alias_overrides(target, page_record)
-                page_record["page_path"] = str(page_rel_path)
-                stored_page_record, page_changed = upsert_wiki_page(
-                    target=target,
-                    page_records_by_id=page_records_by_id,
-                    page_record=page_record,
-                    page_text=page_text,
-                )
-                if page_changed:
-                    generated_pages.append(stored_page_record)
-                    dirty_claim_ids.update(
-                        link_claims_to_page_in_memory(
-                            grouped_claims,
-                            stored_page_record["page_id"],
-                            claims_by_id,
-                        )
+            page_text, page_record = build_concept_summary_page(
+                target=target,
+                config=config,
+                bucket_key=bucket_key,
+                page_rel_path=page_rel_path,
+                claim_records=grouped_claims,
+                page_records_by_id=page_records_by_id,
+                review_records=review_records,
+            )
+            page_record = apply_page_alias_overrides(target, page_record)
+            page_record["page_path"] = str(page_rel_path)
+            stored_page_record, page_changed = upsert_wiki_page(
+                target=target,
+                page_records_by_id=page_records_by_id,
+                page_record=page_record,
+                page_text=page_text,
+            )
+            if page_changed:
+                generated_pages.append(stored_page_record)
+                dirty_claim_ids.update(
+                    link_claims_to_page_in_memory(
+                        grouped_claims,
+                        stored_page_record["page_id"],
+                        claims_by_id,
                     )
-                    dirty_review_ids.update(
-                        link_reviews_to_page_in_memory(
-                            review_records=review_records,
-                            page_id=stored_page_record["page_id"],
-                            claim_ids=stored_page_record["claim_ids"],
-                            reviews_by_id=existing_reviews,
-                        )
+                )
+                dirty_review_ids.update(
+                    link_reviews_to_page_in_memory(
+                        review_records=review_records,
+                        page_id=stored_page_record["page_id"],
+                        claim_ids=stored_page_record["claim_ids"],
+                        reviews_by_id=existing_reviews,
                     )
+                )
 
         elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
             page_id = page_intent_page_id(bucket_key, page_intent)
@@ -16260,10 +16313,6 @@ def command_compat_report(args: argparse.Namespace) -> CommandResult:
             )
     else:
         lines.append("- none")
-    lines.extend([
-        "",
-        "Schema migration candidates:",
-    ])
     schema_candidates = [
         candidate for candidate in payload["migration_candidates"]
         if candidate.get("migration_scope") == "workspace_schema"
@@ -16272,6 +16321,23 @@ def command_compat_report(args: argparse.Namespace) -> CommandResult:
         candidate for candidate in payload["migration_candidates"]
         if candidate.get("migration_scope") != "workspace_schema"
     ]
+    lines.extend([
+        "",
+        "Migration candidates:",
+    ])
+    migration_candidate_count = len(payload["migration_candidates"])
+    if migration_candidate_count:
+        lines.append(
+            f"- total={migration_candidate_count}, "
+            f"schema={len(schema_candidates)}, "
+            f"compatibility={len(compatibility_candidates)}"
+        )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Schema migration candidates:",
+    ])
     if schema_candidates:
         for candidate in schema_candidates:
             lines.append(
@@ -16388,10 +16454,6 @@ def command_migrate(args: argparse.Namespace) -> CommandResult:
                 )
         else:
             lines.append("- none")
-        lines.extend([
-            "",
-            "Schema migration actions:",
-        ])
         schema_actions = [
             action for action in payload["applied_actions"]
             if action.get("migration_scope") == "workspace_schema"
@@ -16400,6 +16462,23 @@ def command_migrate(args: argparse.Namespace) -> CommandResult:
             action for action in payload["applied_actions"]
             if action.get("migration_scope") != "workspace_schema"
         ]
+        lines.extend([
+            "",
+            "Applied actions:",
+        ])
+        applied_action_count = len(payload["applied_actions"])
+        if applied_action_count:
+            lines.append(
+                f"- total={applied_action_count}, "
+                f"schema={len(schema_actions)}, "
+                f"compatibility={len(compatibility_actions)}"
+            )
+        else:
+            lines.append("- none")
+        lines.extend([
+            "",
+            "Schema migration actions:",
+        ])
         if schema_actions:
             for action in schema_actions:
                 lines.append(
@@ -16528,14 +16607,27 @@ def command_migrate(args: argparse.Namespace) -> CommandResult:
             )
     else:
         lines.append("- none")
-    lines.extend([
-        "",
-        "Schema migration actions:",
-    ])
     schema_actions = payload.get("schema_migration", {}).get("planned_actions", [])
     schema_followups = payload.get("schema_migration", {}).get("manual_followups", [])
     compatibility_actions = payload.get("compatibility_cleanup", {}).get("planned_actions", [])
     compatibility_followups = payload.get("compatibility_cleanup", {}).get("manual_followups", [])
+    lines.extend([
+        "",
+        "Planned actions:",
+    ])
+    planned_action_count = payload["summary"].get("planned_action_count", 0)
+    if planned_action_count:
+        lines.append(
+            f"- total={planned_action_count}, "
+            f"schema={len(schema_actions)}, "
+            f"compatibility={len(compatibility_actions)}"
+        )
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "Schema migration actions:",
+    ])
     if schema_actions:
         for action in schema_actions:
             lines.append(

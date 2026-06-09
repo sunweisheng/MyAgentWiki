@@ -544,6 +544,7 @@ flowchart TD
 当前实现：
 
 - 当前代码仍保留 `source-summary`、`concept-summary` 等早期页型
+- 这些页型当前会作为兼容页族继续参与 query、compat-report、migrate 与兼容清理流程
 - 正式方向不再把这些页型视为唯一中心，而是把它们纳入更清楚的页面族谱
 
 ### 状态、生命周期与自动化等级
@@ -1055,6 +1056,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 `ingest -> review-auto -> stable promotion -> page rebuild -> query-ready artifacts`
 
 也就是说，`ingest` 结束并不总意味着“所有后续收口都已完成”，但默认模板会继续把高把握自动步骤串起来。
+其中 `stable promotion` 是否发生，取决于 hook 判定是否返回 `decision=promote`；`page rebuild` 是否进一步产出可读 `concept / overview`，还取决于 stable claim 数量、页型路由结果与页面生成条件。
 
 ### 必须进入审核队列的场景
 
@@ -1096,14 +1098,14 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 当前已经存在保守自动审核路径 `review-auto`：
 
 - 先读取 live review、live claim、live page 和 alias index
-- 自动收口高把握场景
+- 自动收口部分高把握场景
 - 把剩余需要人判断的项整理成 handoff
 
 当前可自动收口的典型场景包括：
 
 - 明显片段化、被更完整陈述包含的 conflict claim
 - 互补但并非重复的两条 Claim
-- 唯一归属明确的噪声 alias
+- 部分低风险 alias 场景；噪声 alias 若仍存在归属歧义或会影响用户可见 review 流程，则优先升级为人工判断项
 
 同时，系统还支持受控的 `stable promotion`：
 
