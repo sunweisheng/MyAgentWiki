@@ -1,6 +1,6 @@
 # MyAgentWiki
 
-MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项目。它的目标不是做一次性的 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
+MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
 当前仓库既是：
 
@@ -10,24 +10,31 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 
 ## 项目简介
 
-这套系统采用分层思路组织知识：
+这套系统采用“证据层 -> 语义层 -> 展示层”的分层思路组织知识：
 
-- `raw`：工作区外 sibling 原始资料目录，只读保留
-- `normalized`：标准化后的可分析文本
+- `raw`：工作区外部 sibling 原始资料目录，只读保留
+- `normalized`：标准化后的文档中间表示
 - `chunks`：切块后的证据单元
-- `claim`：独立知识声明层
+- `claims`：独立知识声明层
+- `semantic decisions`：语义决策层，保存结构化语义判断
 - `wiki`：最终对人可读、可链接、可维护的知识页面
+- `reading_pack / answer-ready`：面向上层回答器和 Agent 的交接层
 
 其中：
 
 - 高频、固定、适合确定性实现的动作优先交给 Python 脚本
-- 必须依赖大模型理解、抽取、比较、冲突判断、页面编写的动作交给 Agent
+- 必须依赖语义理解的灰区判断交给 Agent 或 LLM
+- 高风险冲突、归属不清或证据不足的场景升级为人工判断
 
-当前版本采用 `deterministic first` 原则：
+当前项目的总原则是“确定性证据优先，按需使用语义判断（deterministic evidence first, semantic where needed）”：
 
 - 事实层、证据层、状态层优先由脚本和显式数据结构生成
-- LLM 主要参与可读性改写、导览组织和表达优化
-- 一切 LLM 改写都必须 grounded，无法回绑时自动回退到 deterministic 文案
+- LLM 主要参与文档结构判定、Claim 角色判定、页面意图判定和 grounded 改写
+- 一切 LLM 输出都必须 grounded，无法回绑时自动回退到保守 deterministic 路径
+
+如果只看主链路，可以先把系统理解成：
+
+`raw -> normalized -> chunks -> claims -> semantic decisions -> reviews / stable promotion -> wiki / indexes / reading_pack / answer-ready`
 
 同时，项目的运行定位是：
 
@@ -36,17 +43,6 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地 LLM Wiki Skill 项�
 - 需要语义判断的步骤优先交给 Agent / LLM hook 自动推进
 - 只有在高风险冲突、归属不清或 hook 没给出高置信结论时，才升级为人工判断
 
-当前迁移与兼容层的定位也已明确：
-
-- `compat-report` / `migrate` 负责显式处理旧工作区兼容问题，而不是让兼容层继续主导日常主链路
-- 旧页型与旧 schema 只作为迁移输入存在，新工作区默认直接走新的语义编译链
-- `compat-report` / `migrate` 当前都支持显式 `--to-schema-version`，迁移规划不再被默认当前 schema 版本写死
-- `migrate --apply` 会先写 migration report、backup snapshot 与 `state/migration_runs.jsonl`
-- `migrate --rollback` 可以基于最近一次 migration backup snapshot 恢复关键状态与配置
-- 若 schema path 含确认步，系统会先降为 `report_only`，并通过 `state/schema_confirmations.jsonl` + `migrate-schema-confirm` 恢复到可继续自动规划的状态
-- migration 灰区判断结果不会直接回写页面状态，而是先进入 `state/migration_decisions.jsonl` 与 `state/migration_followups.jsonl`
-- schema registry 当前还带最小自校验，用于检查 `version order / transition graph / action contract` 是否互相对齐
-
 ## 核心理念
 
 MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知识逐步编译成一个持续维护的 Wiki：
@@ -54,13 +50,15 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 - 原始资料保留不动
 - 标准化层负责把不同格式整理成稳定输入
 - Chunk 和 Claim 层负责证据追踪与复用
-- Wiki 页面负责承载概念、实体、综述和问答沉淀
+- 语义决策层负责补充脚本难以稳定给出的结构角色和页面意图
+- Wiki 页面、索引、阅读包和回答交接载荷负责把证据组织成可消费视图
 - Git 负责本地版本管理与回滚
 
 这让系统可以做到：
 
 - Wiki 结论可追踪到具体 Claim
 - Claim 可追踪到具体 Chunk 和 Source
+- 页面、审核单和语义决策之间可以互相回查
 - 同一 Claim 可反查被哪些 Wiki 页面引用
 - 冲突、重复、覆盖等高风险更新进入审核队列
 
@@ -74,19 +72,19 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 如果你的资料包含敏感内容，不要因为外部 `raw/` 没进工作区 Git，就默认认为仓库可以公开。`normalized/`、`chunks/`、`claims/` 和 `wiki/` 里仍可能包含原文片段、摘要、结论或可回推出来源的信息；需要公开仓库时，请先审查这些目录，再决定是否继续纳入版本控制。
 
-## V1 范围
+## 当前能力与边界
 
-V1 已完成并收口。当前版本重点是把骨架和规则打稳，已经完成：
+当前版本重点是把骨架、规则和主闭环打稳，已经完成：
 
 - Python `3.12+` CLI 基础入口
-- `raw -> normalized -> chunk -> claim -> wiki` 主链路设计落地
+- `raw -> normalized -> chunks -> claims -> wiki` 主链路打通
 - Word、Excel、PDF、Markdown、图片五类输入的标准化优先级
 - Claim 声明层
 - BM25 多字段检索与页面权重设计
 - review 审核队列与状态恢复机制
 - Windows / macOS / Linux 兼容边界
 
-V1 已通过本地全量测试和端到端验证：
+当前仓库已通过本地测试和端到端验证：
 
 - `python -m pytest`
   - `28 passed`
@@ -103,7 +101,7 @@ V1 已通过本地全量测试和端到端验证：
 - `workspace_summary` 当前至少包含工作区绝对路径、入口页路径、lint 报告路径；涉及外部原始资料区的命令还会带 `raw_dir`
 - 纯文本模式也会显式打印这些绝对路径，避免 UI 或上层 Agent 只显示目录名时造成“好像跑错目录”的误解
 
-V1 不把这些当成必须前提：
+当前系统不把这些当成必须前提：
 
 - LibreOffice
 - Pandoc
@@ -111,6 +109,12 @@ V1 不把这些当成必须前提：
 - tesseract
 
 这些系统工具属于可选增强能力，缺失时应通过 `doctor` 明确提示，并采用降级策略。
+
+需要说明的是：
+
+- 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
+- README 也不再把版本叙事作为首页主线
+- 版本迁移、兼容动作和实施分期属于专题内容，应优先在设计文档和实施计划文档中维护
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -217,8 +221,10 @@ New-Item -ItemType Junction `
 - [docs/index.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/index.md)
   - 文档总入口，包含主设计、运行说明、排障文档和项目资料导航
 - [docs/MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
-  - 当前版本的系统详细设计主文档
-  - 其中包含 `query -> answer handoff contract`，说明 `reading_pack` 如何升级为回答器/Agent 可稳定消费的标准输入
+  - 当前唯一的主详细设计文档
+  - 按处理流程展开系统定位、目录边界、数据模型、证据链、语义链、审核恢复链，以及 `reading_pack / answer-ready` 契约
+- [docs/全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
+  - LLM 协同判定专题文档，聚焦语义分析阶段、批处理原则和 grounded 边界
 
 ## 快速开始 / Quick Start
 
@@ -326,11 +332,11 @@ python3 -m myagentwiki migrate-followups --target-dir /path/to/MyNotesWiki
 ```
 
 推荐用法：
-- 想先看 schema 与旧页型兼容风险时，用 `compat-report`
-- 想拿到可执行计划、风险分层和 handoff 载荷时，用 `migrate`
+- 想先看旧工作区与当前 CLI 的兼容风险时，用 `compat-report`
+- 想拿到迁移计划、风险分层和 handoff 载荷时，用 `migrate`
 - schema path 被降成 `report_only` 且提示需要确认时，用 `migrate-schema-confirm`
 - 想恢复最近一次迁移前的关键状态与配置时，用 `migrate --rollback`
-- 想继续消费外部 LLM/Agent 回写的迁移灰区判断时，用 `migrate-decisions` 和 `migrate-followups`
+- 更完整的迁移边界、确认账本和 follow-up 机制，建议直接看详细设计文档与实现计划文档
 
 当前新初始化工作区默认就会把审核、stable 提升、可读概念页和综述页统一接到包内 Agent hook：
 
@@ -572,9 +578,9 @@ MyAgentWiki/
 - `pandoc`
 - `pdftotext`
 
-## V1 CLI 命令实现状态
+## 当前 CLI 命令实现状态
 
-V1 已实现这些命令入口：
+当前已实现这些命令入口：
 
 - `myagentwiki init`
 - `myagentwiki ingest`
@@ -612,7 +618,7 @@ V1 已实现这些命令入口：
   - 当前规则式 Claim 草稿抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再只把可独立理解的子句作为补充候选，避免把逗号后的半句话直接推进到 Claim 层
   - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
   - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失
-  - 已实现两类基础 Wiki 页面：`source-summary` 与 `concept-summary`，会同步生成 `wiki/sources/*.md`、`wiki/concepts/*.md`、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
+  - 当前已经实现来源视图页与可读概念页，并会同步生成对应页面、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
   - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择更像定义、能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类定义短语会优先于说明性长句
   - 当前概念页展示层会把“概念名 + 定义短语”组合成更可读的代表陈述，例如 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`
   - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
@@ -799,23 +805,24 @@ python scripts/validate_workflow.py --keep-workspace
 
 1. `README.md`
 2. `docs/MyAgentWiki系统详细设计.md`
-3. `docs/全链路重构实现计划.md`
-4. `docs/runtime-deps.md`
-5. `docs/project-materials/` 中的学习与工程记录
-6. `docs/troubleshooting.md`
+3. `docs/全链路规则与LLM协同判定设计.md`
+4. `docs/全链路重构实现计划.md`
+5. `docs/runtime-deps.md`
+6. `docs/project-materials/` 中的学习与工程记录
+7. `docs/troubleshooting.md`
 
 ## 开发说明
 
-V1 已经完成收口，当前仓库重点从“打通主链路”转为“保持 V1 稳定、准备 V1.1 增强”。
+当前仓库重点已经从“先打通主链路”转为“保持主闭环稳定，并继续把语义层、页面层和迁移层收口得更清楚”。
 
-V1.1 可以继续推进：
+接下来适合继续推进的方向包括：
 
 - 更真实的未来 schema transition 定义与对应 action handler
   - 当前迁移骨架、风险分层、confirmation ledger、decision/followup ledger 和 registry 自校验都已经具备
   - 但当前仍只内建最小 `unversioned -> v1` schema 升级动作；未来 `v2 / v3` 仍需要等真实 schema 变更出现后再补定向 transition
 - 更深入的 `stable / disputed` Claim 治理
 - `qa-note` 正式页面提升流程
-- entity / overview 等更高层 Wiki 页面生成
+- entity / overview 等更高层 Wiki 页面生成与统一页面族谱收口
 - 更细的 lint 子命令与结构化日志
 - Windows 真机回归验证
 - 可选 Office / PDF / OCR 高保真工具集成
