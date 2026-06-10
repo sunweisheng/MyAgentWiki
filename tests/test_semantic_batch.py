@@ -180,7 +180,7 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
         for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
         if not record.get("removed")
     ]
-    assert any(record.get("type") == "concept-summary" for record in initial_pages)
+    assert any(record.get("type") == "concept" for record in initial_pages)
 
     claim_record = next(
         record
@@ -236,7 +236,7 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
         if not record.get("removed")
     ]
     assert any(record.get("type") == "guide" for record in refreshed_pages)
-    assert all(record.get("type") not in {"concept-summary", "concept"} for record in refreshed_pages)
+    assert all(record.get("type") != "concept" for record in refreshed_pages)
 
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     checks = {item["name"]: item for item in lint_result["checks"]}

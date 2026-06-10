@@ -51,7 +51,7 @@ def inject_shared_alias_override(workspace_dir: Path, shared_alias: str) -> list
         record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
         if not record.get("removed")
         and record.get("lifecycle_status", "active") == "active"
-        and record.get("type") in {"concept-summary", "concept", "topic", "guide", "example"}
+        and record.get("type") in {"concept", "topic", "guide", "example"}
     ]
     page_ids = [record["page_id"] for record in live_pages[:2]]
     assert len(page_ids) >= 2
@@ -466,7 +466,7 @@ def test_workspace_summary_text_surfaces_legacy_compatibility_hint(tmp_path: Pat
         run_cli("claim-set-status", claim_id, "stable", "--target-dir", str(workspace_dir))
 
     query_stdout = run_cli_text("query", "Claim", "--target-dir", str(workspace_dir))
-    assert "Compatibility: legacy_pages=" in query_stdout
+    assert "Compatibility:" not in query_stdout
 
     compat_stdout = run_cli_text("compat-report", "--target-dir", str(workspace_dir))
     assert f"Workspace: {workspace_dir.resolve()}" in compat_stdout

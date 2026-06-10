@@ -543,9 +543,9 @@ flowchart TD
 
 当前实现：
 
-- 当前代码仍保留 `source-summary`、`concept-summary` 等早期页型
-- 这些页型当前会作为兼容页族继续参与 query、compat-report、migrate 与兼容清理流程
-- 正式方向不再把这些页型视为唯一中心，而是把它们纳入更清楚的页面族谱
+- 当前设计不再要求保留 `concept-summary` 等早期页型兼容
+- 页型体系直接以正式页面族谱为准，由 `concept / guide / example / topic / reference / timeline / overview / source-summary / qa-note` 等页型承担主流程
+- query、migrate 与兼容清理应围绕正式页型和明确迁移动作设计，而不是长期维持早期页型并存
 
 ### 状态、生命周期与自动化等级
 
@@ -1538,7 +1538,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `semantic/` 目录与正式 `semantic_decisions` 账本的全面收口
 - document analysis / claim role / page intent 三类批量语义分析阶段
 - `abstain / prompt_version / schema_version` 等语义协议
-- 页面族谱从早期遗留页型向 `concept / guide / example / topic / timeline / reference / overview / source-summary` 统一
+- 页面族谱继续收敛为 `concept / guide / example / topic / timeline / reference / overview / source-summary`
 - `source-summary` 从默认回收页收缩为来源入口视图
 - Claim 向更宽泛 Knowledge Unit 的抽象演进
 - 更细粒度的日志系统

@@ -65,6 +65,6 @@ def test_claim_role_blocks_procedure_and_example_from_concept_generation(tmp_pat
 
     concept_pages = [
         record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
-        if record.get("type") in {"concept-summary", "concept"} and not record.get("removed")
+        if record.get("type") == "concept" and not record.get("removed")
     ]
     assert concept_pages == []

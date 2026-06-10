@@ -123,6 +123,6 @@ def test_page_intent_reject_blocks_question_shell_pages(tmp_path: Path) -> None:
 
     pages = [
         record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
-        if not record.get("removed") and record.get("type") in {"concept-summary", "concept", "guide", "example", "topic", "reference", "timeline"}
+        if not record.get("removed") and record.get("type") in {"concept", "guide", "example", "topic", "reference", "timeline"}
     ]
     assert pages == []
