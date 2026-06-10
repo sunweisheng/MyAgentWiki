@@ -556,7 +556,7 @@ def test_review_auto_agent_assisted_hook_can_promote_claim_to_stable(tmp_path: P
         tmp_path,
         "ReviewAutoStableHook",
         {
-            "topic.md": "# Topic\n\n知识声明层用于承载可追踪、可合并、可审计的结论。\n",
+            "topic.md": "# Topic\n\n为什么知识声明层必须保留可追踪性？\n",
         },
     )
 

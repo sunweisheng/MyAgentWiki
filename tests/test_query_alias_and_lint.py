@@ -1425,13 +1425,14 @@ def test_claim_set_status_stable_generates_readable_concept_page(tmp_path: Path)
     readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
     assert readable_concept_page["status"] == "stable"
     assert readable_concept_page["page_path"].endswith("/知识声明层.md")
-    assert readable_concept_page["claim_ids"] == [definition_claim["claim_id"]]
+    assert definition_claim["claim_id"] in readable_concept_page["claim_ids"]
+    assert len(readable_concept_page["claim_ids"]) == 2
 
     page_text = (workspace_dir / readable_concept_page["page_path"]).read_text(encoding="utf-8")
     assert "# 知识声明层" in page_text
     assert "## 摘要 / Summary" in page_text
     assert "## 关键要点 / Key Points" in page_text
-    assert "当前版本基于 1 条稳定 Claim、1 个来源整理。" in page_text
+    assert "当前版本基于 2 条稳定 Claim、1 个来源整理。" in page_text
 
 
 def test_query_definition_prefers_readable_concept_once_stable_page_exists(tmp_path: Path) -> None:
@@ -2042,7 +2043,7 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
     readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
     page_text = (workspace_dir / readable_concept_page["page_path"]).read_text(encoding="utf-8")
 
-    assert readable_concept_page["summary"] == "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 1 条稳定 Claim、1 个来源整理。"
+    assert readable_concept_page["summary"] == "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 2 条稳定 Claim、1 个来源整理。"
     assert "这是一个完全脱离 claim 的新说法。" not in page_text
     assert "这个系统主要依赖向量数据库。" not in page_text
     assert "## 关键要点 / Key Points" in page_text
@@ -2352,7 +2353,7 @@ def test_lint_flags_readable_concept_page_when_manual_edit_breaks_grounding(tmp_
     page_path = workspace_dir / readable_concept_page["page_path"]
     page_text = page_path.read_text(encoding="utf-8")
     page_text = page_text.replace(
-        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 1 条稳定 Claim、1 个来源整理。",
+        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。 当前版本基于 2 条稳定 Claim、1 个来源整理。",
         "这个页面现在主要讲向量数据库和外部缓存系统。",
     )
     page_path.write_text(page_text, encoding="utf-8")

@@ -412,6 +412,7 @@ automation:
 约定很简单：
 - hook 从标准输入接收 JSON payload
 - 成功时向标准输出返回 JSON
+- `confidence` 当前仅用于 `review_auto`、`stable_promotion` 等自动化决策对象
 - `review_auto` hook 可返回 `decision=auto_apply`，并附带 `action`、`primary_claim_id`、`secondary_claim_id`、`primary_page_id`、`alias_value`、`confidence`
 - `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
@@ -420,6 +421,7 @@ automation:
 - 若 hook 失败、超时、低于置信阈值，系统会按当前环节回退到保守路径，而不是中断整个流程：
 - `review_auto / stable_promotion` 会保留原状或升级为人工判断项
 - `readable_concept / overview` 会回退到 deterministic render
+- 默认 `safe_auto` 提稳不再要求多个独立来源；单一来源的 claim 只要可追踪、无开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声，也可以提升为 `stable`
 
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
 这意味着默认推荐流程会尽量串成一条连续自动化链：

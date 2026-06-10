@@ -425,7 +425,6 @@ flowchart TD
 - `text`：声明原文
 - `normalized_text`：归一化后的声明文本
 - `status`：声明状态
-- `confidence`：声明可靠程度估计
 - `source_ids`：关联来源 ID 列表
 - `chunk_ids`：关联切块 ID 列表
 - `page_ids`：关联页面 ID 列表
@@ -554,7 +553,6 @@ flowchart TD
 - `status`：当前业务状态，例如 `draft / stable / disputed / needs_review`
 - `lifecycle_status`：是否仍参与 live 主流程，例如 `active / superseded / archived / removed`
 - `automation_level`：系统默认能自动改到什么程度，例如 `safe_auto / auto_with_log / require_review / locked`
-- `confidence`：系统对当前表达可靠程度的估计，不等于事实真伪
 
 这几组字段必须分开理解，否则后续 review、page rebuild、query 和 lint 都会误判。
 
@@ -895,7 +893,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 当前实现：
 
 - 规则抽取出来的 Claim 主要落在 `draft / needs_review`
-- `stable` 已进入受控自动流程，通过 `review-auto` 中的提稳子步骤保守提升
+- `stable` 已进入受控自动流程，通过 `review-auto` 中的提稳子步骤按可追踪性、冲突状态与文本完整度收口
 - `disputed` 仍更多依赖后续人工或 Agent 深化治理
 
 ### Claim 类型与知识角色
@@ -1109,6 +1107,8 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 同时，系统还支持受控的 `stable promotion`：
 
+- 默认 `safe_auto` 只要求 claim 仍可追踪、没有开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声；单一来源也可以被提升为 `stable`
+- 多来源支撑仍然是强正向信号，但不再作为默认提稳门槛
 - 只有在 hook 返回 `decision=promote` 且置信度达标时，才提升为 `stable`
 - 未达标时保持原状，不做“顺手提稳”
 

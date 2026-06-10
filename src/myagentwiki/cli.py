@@ -5043,16 +5043,6 @@ def format_source_page_meta(source_page: dict | None, source_ref: dict) -> str:
     return ", ".join(parts)
 
 
-def estimate_claim_confidence(text: str) -> float:
-    # 规则抽取得到的 claim 先统一低置信度起步，避免后续页面把它当成“已确认事实”。
-    base = 0.35
-    if len(text) >= 40:
-        base += 0.05
-    if len(text) >= 80:
-        base += 0.05
-    return min(base, 0.5)
-
-
 def claim_lifecycle_status_for_record(claim_record: dict) -> str:
     # lifecycle_status 负责表达“这条 claim 现在是否仍然活跃可用”，
     # 不与 query 里的 draft / needs_review 混在一起。
@@ -5489,7 +5479,6 @@ def build_claim_record_from_chunk(chunk_record: dict, claim_text: str) -> dict:
         "concept_candidate_score": 0.0,
         "status": "draft",
         "lifecycle_status": "active",
-        "confidence": estimate_claim_confidence(claim_text),
         "source_ids": [chunk_record["source_id"]],
         "chunk_ids": [chunk_record["chunk_id"]],
         "page_ids": [],
@@ -5535,7 +5524,6 @@ def merge_claim_records(existing_record: dict, incoming_record: dict) -> dict:
             merged.setdefault("source_refs", []).append(source_ref)
             existing_ref_keys.add(ref_key)
 
-    merged["confidence"] = max(merged.get("confidence", 0.0), incoming_record.get("confidence", 0.0))
     if not merged.get("knowledge_role") and incoming_record.get("knowledge_role"):
         merged["knowledge_role"] = incoming_record.get("knowledge_role")
     incoming_intents = incoming_record.get("page_intent_hints", [])
@@ -6344,14 +6332,12 @@ def run_llm_assisted_concept_title_review(
             "claim_id": canonical_claim.get("claim_id"),
             "text": canonical_claim.get("text"),
             "claim_type": canonical_claim.get("claim_type"),
-            "confidence": canonical_claim.get("confidence"),
         },
         "supporting_claims": [
             {
                 "claim_id": claim_record.get("claim_id"),
                 "text": claim_record.get("text"),
                 "claim_type": claim_record.get("claim_type"),
-                "confidence": claim_record.get("confidence"),
                 "section_label": extract_primary_section_label(claim_record),
                 "source_count": len(claim_record.get("source_ids", [])),
             }
@@ -6594,7 +6580,6 @@ def claim_record_rank_key(claim_record: dict, group_topic_label: str = "") -> tu
         len(claim_record.get("source_ids", [])),
         len(claim_record.get("source_refs", [])),
         claim_record_readability_score(claim_record, group_topic_label),
-        claim_record.get("confidence", 0.0),
         -abs(len(text) - 42),
         len(text),
     )
@@ -6629,7 +6614,7 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     # V1 先优先保留三类更有价值的候选：
     # 1. 多条相似 claim 汇聚到一起；
     # 2. 单条 claim 但有多个来源支撑；
-    # 3. 单条 claim 但置信度较高，值得先沉淀成主题入口。
+    # 3. 单条 claim 但表达完整、主题明确，值得先沉淀成主题入口。
     concept_claim_records = filter_claim_records_for_concept_path(claim_records)
     if not concept_claim_records:
         return False
@@ -6670,7 +6655,7 @@ def should_generate_concept_page(claim_records: list[dict]) -> bool:
     concept_candidate_score = coerce_float(canonical_claim.get("concept_candidate_score", 0.0), 0.0)
     if concept_candidate_score >= 0.75:
         return True
-    return canonical_claim.get("confidence", 0.0) >= 0.35 and len(claim_text) >= 18 and concept_candidate_score >= 0.3
+    return len(cleaned_claim_text) >= 18 and concept_candidate_score >= 0.3 and claim_can_stand_alone(cleaned_claim_text)
 
 
 def resolve_concept_title_candidate(
@@ -7903,7 +7888,7 @@ def build_source_summary_page(
         for claim_record in claim_records:
             lines.append(
                 f"- {format_claim_reference(page_rel_path, claim_record)} {format_claim_type_label(claim_record.get('claim_type'))} "
-                f"{claim_record['text']} (confidence={claim_record['confidence']:.2f})"
+                f"{claim_record['text']}"
             )
     else:
         lines.append("- 暂无 claims。")
@@ -8098,8 +8083,7 @@ def build_concept_page(
         "",
         "## 核心陈述 / Canonical Claim",
         "",
-        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_display_text} "
-        f"(confidence={canonical_claim['confidence']:.2f})",
+        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_display_text}",
         "",
         "## 关键要点 / Key Points",
         "",
@@ -8149,8 +8133,7 @@ def build_concept_page(
         lines.append(
             f"- {format_claim_reference(page_rel_path, claim_record)} {format_claim_type_label(claim_record.get('claim_type'))} {claim_record['text']} "
             f"(sources={len(claim_record.get('source_ids', []))}, "
-            f"chunks={len(claim_record.get('chunk_ids', []))}, "
-            f"confidence={claim_record['confidence']:.2f})"
+            f"chunks={len(claim_record.get('chunk_ids', []))})"
         )
 
     lines.extend([
@@ -10576,7 +10559,7 @@ def score_claim_for_query(query_tokens: list[str], claim_record: dict) -> tuple[
     matched_tokens = select_top_matches(query_tokens, claim_tokens, limit=8)
     if not matched_tokens:
         return 0.0, []
-    score = float(len(matched_tokens)) + min(claim_record.get("confidence", 0.0), 1.0)
+    score = float(len(matched_tokens))
     return score, matched_tokens
 
 
@@ -10882,7 +10865,6 @@ def build_result_reading_pack(
             "text": claim_record.get("text", ""),
             "claim_type": claim_record.get("claim_type"),
             "status": claim_record.get("status"),
-            "confidence": claim_record.get("confidence"),
             "matched_tokens": claim_hits,
             "source_refs": [build_source_brief(item) for item in claim_record.get("source_refs", [])],
             "_score": (
@@ -11112,7 +11094,6 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "text": claim.get("text", ""),
             "claim_type": claim.get("claim_type"),
             "status": claim.get("status"),
-            "confidence": claim.get("confidence"),
             "source_ref_count": len(claim.get("source_refs", [])),
         }
         for claim in evidence_context.get("matched_claims", [])[:3]
@@ -11349,7 +11330,7 @@ def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
         for claim in key_claims:
             lines.append(
                 f"- {claim.get('claim_id')}: {claim.get('text', '')} "
-                f"(type={claim.get('claim_type')}, status={claim.get('status')}, confidence={claim.get('confidence')})"
+                f"(type={claim.get('claim_type')}, status={claim.get('status')})"
             )
     else:
         lines.append("- none")
@@ -12008,7 +11989,6 @@ def choose_auto_merge_primary_claim_id(candidate_claim_ids: list[str], live_clai
         live_candidates,
         key=lambda item: (
             len(item.get("source_ids", [])),
-            item.get("confidence", 0.0),
             len(clean_claim_candidate_text(item.get("text", ""))),
             item.get("created_at", ""),
             item["claim_id"],
@@ -12035,7 +12015,6 @@ def build_review_auto_decision_payload(
             "claim_type": claim_record.get("claim_type"),
             "source_count": len(set(claim_record.get("source_ids", []))),
             "source_ref_count": len(claim_record.get("source_refs", [])),
-            "confidence": claim_record.get("confidence"),
             "duplicate_candidates": claim_record.get("duplicate_candidates", []),
             "conflict_group": claim_record.get("conflict_group"),
         })
@@ -12218,13 +12197,18 @@ def claim_record_is_safe_auto_stable_candidate(
         return False, "claim_still_has_duplicate_candidates"
     if claim_record.get("conflict_group"):
         return False, "claim_still_has_conflict_group"
-    if claim_record.get("claim_type") == "definition":
-        cleaned_text = clean_claim_candidate_text(claim_record.get("text", ""))
-        if len(cleaned_text) >= 14:
-            return True, None
-    if len(set(claim_record.get("source_ids", []))) >= 2:
-        return True, None
-    return False, "claim_not_stable_enough_for_safe_auto"
+    cleaned_text = clean_claim_candidate_text(claim_record.get("text", ""))
+    if claim_candidate_is_noise(cleaned_text):
+        return False, "claim_text_is_noise"
+    if claim_starts_with_dependent_prefix(cleaned_text):
+        return False, "claim_text_is_dependent_fragment"
+    if text_is_question_like(cleaned_text):
+        return False, "claim_text_is_question_like"
+    if len(cleaned_text) < 14:
+        return False, "claim_text_too_short_for_safe_auto"
+    if not claim_can_stand_alone(cleaned_text) and claim_record.get("claim_type") != "definition":
+        return False, "claim_text_not_standalone_enough"
+    return True, None
 
 
 def build_stable_promotion_payload(claim_record: dict) -> dict:
@@ -12235,7 +12219,6 @@ def build_stable_promotion_payload(claim_record: dict) -> dict:
             "text": claim_record.get("text", ""),
             "status": claim_record.get("status"),
             "claim_type": claim_record.get("claim_type"),
-            "confidence": claim_record.get("confidence"),
             "source_ids": claim_record.get("source_ids", []),
             "source_refs": claim_record.get("source_refs", []),
             "duplicate_candidates": claim_record.get("duplicate_candidates", []),
