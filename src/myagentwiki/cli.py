@@ -68,7 +68,6 @@ ROOT_MARKERS = ("pyproject.toml", ".git")
 DEFAULT_CHUNK_TARGET_TOKENS = 1000
 DEFAULT_CHUNK_MAX_TOKENS = 1600
 DEFAULT_CHUNK_MIN_TOKENS = 200
-DEFAULT_MAX_CLAIMS_PER_CHUNK = 3
 MAX_FILENAME_COMPONENT_BYTES = 240
 FILENAME_HASH_LENGTH = 12
 QUERY_READING_DEPTH_LIMITS = {
@@ -202,7 +201,7 @@ MIGRATION_DECISION_LEDGER_VERSION = "migration_decision/v1"
 SCHEMA_CONFIRMATION_LEDGER_VERSION = "schema_confirmation/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
-SEMANTIC_TASK_NAMES = ("document_analysis", "claim_role", "page_intent")
+SEMANTIC_TASK_NAMES = ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent")
 WORKSPACE_SCHEMA_VERSION = "v1"
 WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION = "v1"
 WORKSPACE_SCHEMA_VERSION_ORDER = ("v1",)
@@ -289,6 +288,7 @@ CLAIM_DEPENDENT_PREFIXES = (
     "从而",
     "从而让",
     "从而使",
+    "但",
     "具体细节",
     "而不是",
     "并且",
@@ -319,6 +319,7 @@ CLAIM_STANDALONE_PREDICATE_MARKERS = (
     "会",
     "能",
     "支持",
+    "保留",
     "保持",
     "维护",
     "构成",
@@ -1585,6 +1586,38 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
             )
         return items
 
+    if task_name == "claim_candidate_quality":
+        records = load_jsonl(target / "state" / "claims.jsonl")
+        items = []
+        for record in records:
+            claim_id = str(record.get("claim_id", "")).strip()
+            text = str(record.get("text", "")).strip()
+            if (
+                not claim_id
+                or not text
+                or record.get("lifecycle_status", "active") != "active"
+                or not claim_candidate_has_short_gray_zone(text)
+            ):
+                continue
+            cleaned_text = clean_claim_candidate_text(text)
+            natural_char_count = len([
+                char for char in cleaned_text
+                if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+            ])
+            items.append(
+                {
+                    "item_id": claim_id,
+                    "claim_id": claim_id,
+                    "text": text,
+                    "cleaned_text": cleaned_text,
+                    "claim_type": record.get("claim_type"),
+                    "natural_char_count": natural_char_count,
+                    "source_ids": record.get("source_ids", []),
+                    "source_refs": record.get("source_refs", []),
+                }
+            )
+        return items
+
     if task_name == "claim_role":
         records = load_jsonl(target / "state" / "claims.jsonl")
         items = []
@@ -1598,6 +1631,9 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
                     "claim_id": claim_id,
                     "text": record.get("text", ""),
                     "claim_type": record.get("claim_type"),
+                    "quality_label": record.get("quality_label"),
+                    "quality_reason": record.get("quality_reason"),
+                    "quality_safe_auto_ready": record.get("quality_safe_auto_ready"),
                     "source_ids": record.get("source_ids", []),
                     "source_refs": record.get("source_refs", []),
                 }
@@ -1830,6 +1866,9 @@ def apply_claim_role_decisions_to_claim_records(
             "claim_id": record["claim_id"],
             "text": record.get("text", ""),
             "claim_type": record.get("claim_type"),
+            "quality_label": record.get("quality_label"),
+            "quality_reason": record.get("quality_reason"),
+            "quality_safe_auto_ready": record.get("quality_safe_auto_ready"),
             "source_ids": record.get("source_ids", []),
             "source_refs": record.get("source_refs", []),
         }
@@ -1866,6 +1905,124 @@ def apply_claim_role_decisions_to_claim_records(
         for record in ordered_records:
             write_claim_file(target, record)
     return ordered_records
+
+
+def apply_claim_candidate_quality_decisions_to_claim_records(
+    target: Path,
+    claim_records: list[dict],
+    task_config: SemanticTaskConfig,
+) -> tuple[list[dict], set[str], set[str]]:
+    latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
+    live_claims_by_id = {
+        record["claim_id"]: dict(record)
+        for record in claim_records
+        if is_live_claim_record(record)
+    }
+    historical_claims_by_id = {
+        record["claim_id"]: dict(record)
+        for record in claim_records
+        if not is_live_claim_record(record)
+    }
+    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
+    changed = False
+    archived_claim_ids: set[str] = set()
+    affected_review_ids: set[str] = set()
+
+    for record in claim_records:
+        if not is_live_claim_record(record):
+            continue
+        if not claim_candidate_has_short_gray_zone(record.get("text", "")):
+            continue
+        item_payload = {
+            "item_id": record["claim_id"],
+            "claim_id": record["claim_id"],
+            "text": record.get("text", ""),
+            "cleaned_text": clean_claim_candidate_text(record.get("text", "")),
+            "claim_type": record.get("claim_type"),
+            "natural_char_count": len([
+                char for char in clean_claim_candidate_text(record.get("text", ""))
+                if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+            ]),
+            "source_ids": record.get("source_ids", []),
+            "source_refs": record.get("source_refs", []),
+        }
+        fingerprint = fingerprint_payload(
+            task_name="claim_candidate_quality",
+            item_payloads=[item_payload],
+            prompt_version=task_config.prompt_version,
+            schema_version=task_config.schema_version,
+        )
+        decision_record = latest_decisions.get(fingerprint)
+        if decision_record is None:
+            continue
+        decision = decision_record.get("decision", {})
+        if not isinstance(decision, dict):
+            continue
+
+        claim_id = record["claim_id"]
+        updated = dict(live_claims_by_id[claim_id])
+        updated["quality_label"] = str(decision.get("quality_label", "")).strip() or updated.get("quality_label")
+        updated["quality_reason"] = str(decision.get("reason", "")).strip() or updated.get("quality_reason")
+        updated["quality_confidence"] = coerce_float(
+            decision_record.get("confidence", updated.get("quality_confidence", 0.0)),
+            coerce_float(updated.get("quality_confidence", 0.0), 0.0),
+        )
+        quality_review_required = decision.get("review_required")
+        if quality_review_required is not None:
+            updated["quality_review_required"] = bool(quality_review_required)
+        quality_safe_auto_ready = decision.get("safe_auto_ready")
+        if quality_safe_auto_ready is not None:
+            updated["quality_safe_auto_ready"] = bool(quality_safe_auto_ready)
+        updated["quality_decision_source"] = "semantic_batch"
+        updated["updated_at"] = utc_now_iso()
+
+        quality_label = str(updated.get("quality_label") or "").strip().lower()
+        if quality_label in {"noise", "title_shell"}:
+            archived_claim_ids.add(claim_id)
+            archived_record = archive_live_claim(
+                claim_record=updated,
+                live_claims_by_id=live_claims_by_id,
+                historical_claims_by_id=historical_claims_by_id,
+            )
+            affected_review_ids.update(
+                purge_deleted_claims_from_reviews(
+                    reviews_by_id=live_reviews_by_id,
+                    historical_reviews_by_id=historical_reviews_by_id,
+                    deleted_claim_ids={claim_id},
+                )[0]
+            )
+            live_claims_by_id.pop(claim_id, None)
+            historical_claims_by_id[archived_record["claim_id"]] = archived_record
+            changed = True
+            continue
+
+        if updated.get("quality_review_required") and updated.get("status") == "draft":
+            updated["status"] = "needs_review"
+            updated["review_reason"] = "claim_quality_requires_human_review"
+        live_claims_by_id[claim_id] = updated
+        changed = True
+
+    ordered_records = build_ordered_claim_state_records(
+        live_claims_by_id=live_claims_by_id,
+        historical_claims_by_id=historical_claims_by_id,
+    )
+    if changed:
+        write_jsonl(target / "state" / "claims.jsonl", ordered_records)
+        for record in ordered_records:
+            write_claim_file(target, record)
+        review_state_records = build_ordered_review_state_records(
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+        write_jsonl(target / "state" / "reviews.jsonl", review_state_records)
+        for review_record in review_state_records:
+            write_review_file(target, review_record)
+        cleanup_superseded_record_files(
+            target=target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+        )
+    return ordered_records, archived_claim_ids, affected_review_ids
 
 
 def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
@@ -4825,6 +4982,21 @@ def clean_claim_candidate_text(text: str) -> str:
     return cleaned.strip(" -:;,.!?。！？；：，、()[]{}\"'")
 
 
+def claim_candidate_has_short_gray_zone(text: str) -> bool:
+    cleaned = clean_claim_candidate_text(text)
+    if not cleaned:
+        return False
+    natural_chars = [
+        char for char in cleaned
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    ]
+    if len(natural_chars) >= 10:
+        return False
+    if claim_candidate_is_noise(cleaned):
+        return False
+    return True
+
+
 def text_is_iso_date_label(text: str) -> bool:
     cleaned = clean_claim_candidate_text(text)
     return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned))
@@ -4866,8 +5038,6 @@ def claim_can_stand_alone(text: str) -> bool:
         return False
     if claim_starts_with_dependent_prefix(cleaned):
         return False
-    if len(cleaned) < 16:
-        return False
     return claim_has_standalone_predicate(cleaned) or cleaned[:1].isalnum() or "\u4e00" <= cleaned[:1] <= "\u9fff"
 
 
@@ -4887,6 +5057,7 @@ def claim_candidate_is_noise(text: str) -> bool:
     # - 纯链接 / 文件路径味太重
     # - 表格分隔线
     # - 几乎没有自然语言内容的标题或目录碎片
+    # 不再单纯因为“长度小于 12”就直接判噪声，避免误杀短而完整的中文陈述。
     cleaned = clean_claim_candidate_text(text)
     if not cleaned:
         return True
@@ -4906,14 +5077,18 @@ def claim_candidate_is_noise(text: str) -> bool:
         return True
     if cleaned.lower().startswith(("raw/", "../raw/", "wiki/", "claims/", "chunks/", "normalized/")):
         return True
-    if len(cleaned) < 12:
-        return True
 
     natural_chars = [
         char for char in cleaned
         if char.isalnum() or "\u4e00" <= char <= "\u9fff"
     ]
-    if len(natural_chars) < 8:
+    if len(natural_chars) < 4:
+        return True
+    if (
+        len(natural_chars) < 8
+        and not claim_has_standalone_predicate(cleaned)
+        and not claim_is_definition_like_phrase(cleaned)
+    ):
         return True
     return False
 
@@ -4948,8 +5123,9 @@ def split_long_claim_candidate(text: str, max_chars: int = 140) -> list[str]:
 def split_claim_candidates_from_text(text: str) -> list[str]:
     # 这里优先抽取“像一句完整陈述”的片段：
     # 先按句号/分号/换行切，再做一轮候选清洗、去噪和长句拆分。
+    # 中文资料里常见“句号后不加空格”的连写，这里也要能正常断句。
     candidates: list[str] = []
-    raw_pieces = re.split(r"(?<=[。！？!?；;])\s+|\n{1,}|(?<=\.)\s{2,}", text)
+    raw_pieces = re.split(r"(?<=[。！？!?；;])\s*|\n{1,}|(?<=\.)\s{2,}", text)
 
     for raw_piece in raw_pieces:
         piece = clean_claim_candidate_text(raw_piece)
@@ -4971,8 +5147,6 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
             if normalized_piece in candidates:
                 continue
             candidates.append(normalized_piece)
-            if len(candidates) >= DEFAULT_MAX_CLAIMS_PER_CHUNK:
-                return candidates
 
     # 如果按句切之后一个都没留下，至少保留整段，避免 chunk 完全失去 claim 草稿。
     if not candidates and text.strip():
@@ -4980,7 +5154,7 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
         if not claim_candidate_is_noise(fallback_piece):
             return [fallback_piece]
         return []
-    return candidates[:DEFAULT_MAX_CLAIMS_PER_CHUNK]
+    return candidates
 
 
 def classify_claim_type(text: str) -> str:
@@ -5081,6 +5255,12 @@ def page_lifecycle_status_for_record(page_record: dict) -> str:
 def ensure_claim_lifecycle_defaults(claim_record: dict) -> dict:
     claim_record.setdefault("superseded_by", [])
     claim_record.setdefault("archived_at", None)
+    claim_record.setdefault("quality_label", None)
+    claim_record.setdefault("quality_reason", None)
+    claim_record.setdefault("quality_confidence", None)
+    claim_record.setdefault("quality_review_required", False)
+    claim_record.setdefault("quality_safe_auto_ready", None)
+    claim_record.setdefault("quality_decision_source", None)
     claim_record["lifecycle_status"] = claim_lifecycle_status_for_record(claim_record)
     return claim_record
 
@@ -5477,6 +5657,12 @@ def build_claim_record_from_chunk(chunk_record: dict, claim_text: str) -> dict:
         "knowledge_role": None,
         "page_intent_hints": [],
         "concept_candidate_score": 0.0,
+        "quality_label": None,
+        "quality_reason": None,
+        "quality_confidence": None,
+        "quality_review_required": False,
+        "quality_safe_auto_ready": None,
+        "quality_decision_source": None,
         "status": "draft",
         "lifecycle_status": "active",
         "source_ids": [chunk_record["source_id"]],
@@ -5535,6 +5721,17 @@ def merge_claim_records(existing_record: dict, incoming_record: dict) -> dict:
         coerce_float(merged.get("concept_candidate_score", 0.0), 0.0),
         coerce_float(incoming_record.get("concept_candidate_score", 0.0), 0.0),
     )
+    for field in (
+        "quality_label",
+        "quality_reason",
+        "quality_confidence",
+        "quality_review_required",
+        "quality_safe_auto_ready",
+        "quality_decision_source",
+    ):
+        incoming_value = incoming_record.get(field)
+        if incoming_value is not None:
+            merged[field] = incoming_value
     merged["updated_at"] = utc_now_iso()
     merged["lifecycle_status"] = claim_lifecycle_status_for_record(merged)
     return merged
@@ -5619,15 +5816,13 @@ def append_error_record(
 
 
 def build_claims_from_chunk(chunk_record: dict) -> list[dict]:
-    # 一个 chunk 里可能有多个可提取陈述，但 V1 先控制上限，避免 claim 过碎。
+    # 一个 chunk 里可能有多个可提取陈述；这里保留通过规则筛出的全部候选，
+    # 避免长段落后半段的独立结论被前几条候选提前截断。
     plain_text = markdown_to_plain_text(strip_fenced_code_blocks(chunk_record["text"]))
     claim_candidates = split_claim_candidates_from_text(plain_text)
     claim_records: list[dict] = []
 
     for candidate_text in claim_candidates:
-        normalized_text = normalize_claim_text(candidate_text)
-        if len(normalized_text) < 12:
-            continue
         claim_records.append(build_claim_record_from_chunk(chunk_record, candidate_text))
 
     if claim_records:
@@ -12204,8 +12399,13 @@ def claim_record_is_safe_auto_stable_candidate(
         return False, "claim_text_is_dependent_fragment"
     if text_is_question_like(cleaned_text):
         return False, "claim_text_is_question_like"
-    if len(cleaned_text) < 14:
-        return False, "claim_text_too_short_for_safe_auto"
+    quality_label = str(claim_record.get("quality_label") or "").strip().lower()
+    if quality_label in {"noise", "fragment", "title_shell"}:
+        return False, f"claim_quality_label_is_{quality_label}"
+    if claim_candidate_has_short_gray_zone(cleaned_text):
+        if claim_record.get("quality_safe_auto_ready") is True:
+            return True, "semantic_quality_marked_short_claim_safe_auto_ready"
+        return False, "short_claim_requires_semantic_quality_clearance"
     if not claim_can_stand_alone(cleaned_text) and claim_record.get("claim_type") != "definition":
         return False, "claim_text_not_standalone_enough"
     return True, None
@@ -14014,6 +14214,7 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     config = load_workspace_config(target)
     post_ingest_config = load_post_ingest_review_auto_config(config)
     document_analysis_config = load_semantic_task_config(config, "document_analysis")
+    claim_candidate_quality_config = load_semantic_task_config(config, "claim_candidate_quality")
     claim_role_config = load_semantic_task_config(config, "claim_role")
     page_intent_config = load_semantic_task_config(config, "page_intent")
     readable_concept_render_config = load_readable_concept_render_config(config)
@@ -14545,6 +14746,25 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
             write_claim_file(target, claim_record)
 
     current_claim_records = [ensure_claim_lifecycle_defaults(record) for record in load_jsonl(claims_path)]
+    quality_archived_claim_ids: set[str] = set()
+    if current_claim_records and claim_candidate_quality_config.enabled:
+        run_semantic_batch_task(
+            target=target,
+            task_name="claim_candidate_quality",
+            dry_run=False,
+        )
+        current_claim_records, quality_archived_claim_ids, _ = apply_claim_candidate_quality_decisions_to_claim_records(
+            target=target,
+            claim_records=current_claim_records,
+            task_config=claim_candidate_quality_config,
+        )
+        if quality_archived_claim_ids:
+            claims_created_by_source = {
+                source_id: count
+                for source_id, count in claims_created_by_source.items()
+                if count > 0
+            }
+
     semantic_claim_updates_applied = False
     if current_claim_records and claim_role_config.enabled:
         claim_records_before_semantic = [dict(record) for record in current_claim_records]

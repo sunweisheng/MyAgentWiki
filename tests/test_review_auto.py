@@ -479,7 +479,7 @@ def test_review_auto_agent_assisted_hook_archives_contained_conflict_claim(tmp_p
 
     assert result["summary"]["applied_count"] == 1
     assert result["applied_actions"][0]["action"] == "archive_one"
-    assert result["applied_actions"][0]["reason"] == "agent_hook_archived_contained_conflict_claim"
+    assert result["applied_actions"][0]["reason"] == "agent_hook_archived_fragmentary_conflict_claim"
     refreshed_reviews = {record["review_id"]: record for record in load_jsonl(reviews_path)}
     assert refreshed_reviews["rev_agent_hook_contained_conflict"]["status"] == "resolved"
 
@@ -593,6 +593,29 @@ def test_review_auto_agent_assisted_hook_can_promote_claim_to_stable(tmp_path: P
     assert "agent_hook_promoted_single_source_claim" in reasons
     refreshed_claims = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     assert any(record.get("status") == "stable" for record in refreshed_claims)
+
+
+def test_review_auto_safe_auto_uses_semantic_quality_for_short_claim(tmp_path: Path) -> None:
+    workspace_dir = create_workspace(
+        tmp_path,
+        "ReviewAutoSemanticShortClaim",
+        {
+            "topic.md": "# Topic\n\n保留回链。\n",
+        },
+    )
+
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
+
+    assert result["summary"]["promoted_claim_count"] >= 1
+    reasons = {item["reason"] for item in result["promoted_claims"]}
+    assert "semantic_quality_marked_short_claim_safe_auto_ready" in reasons
+    refreshed_claims = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    assert any(
+        record.get("text") == "保留回链"
+        and record.get("status") == "stable"
+        and record.get("quality_safe_auto_ready") is True
+        for record in refreshed_claims
+    )
 
 
 def test_review_auto_recomputes_plan_after_each_merge(tmp_path: Path) -> None:

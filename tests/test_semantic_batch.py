@@ -72,6 +72,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     assert "semantic:" in config_text
     assert "batch_scheduler:" in config_text
     assert "document_analysis:" in config_text
+    assert "claim_candidate_quality:" in config_text
     assert "claim_role:" in config_text
     assert "page_intent:" in config_text
 
@@ -154,6 +155,36 @@ def test_semantic_batch_dry_run_does_not_persist(tmp_path: Path) -> None:
     assert after == before
 
 
+def test_semantic_batch_claim_candidate_quality_writes_short_claim_decisions(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "shorts.md").write_text(
+        "# 短句\n\n"
+        "系统必须保留回链。\n\n"
+        "保留回链。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "SemanticShortClaimQuality",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
+    assert any(record.get("task_type") == "claim_candidate_quality" for record in semantic_records)
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    assert any(record.get("quality_decision_source") == "semantic_batch" for record in claim_records)
+    assert any(record.get("quality_safe_auto_ready") is True for record in claim_records if record.get("text") == "保留回链")
+
+
 def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -196,6 +227,9 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
         "claim_id": claim_record["claim_id"],
         "text": claim_record.get("text", ""),
         "claim_type": claim_record.get("claim_type"),
+        "quality_label": claim_record.get("quality_label"),
+        "quality_reason": claim_record.get("quality_reason"),
+        "quality_safe_auto_ready": claim_record.get("quality_safe_auto_ready"),
         "source_ids": claim_record.get("source_ids", []),
         "source_refs": claim_record.get("source_refs", []),
     }

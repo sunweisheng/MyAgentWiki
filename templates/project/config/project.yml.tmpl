@@ -43,6 +43,18 @@ semantic:
     model_key: "local-default"
     prompt_version: "v1"
     schema_version: "v1"
+  claim_candidate_quality:
+    strategy: "agent_assisted"
+    command:
+      - "${python_executable}"
+      - "-m"
+      - "myagentwiki.agent_hook"
+    timeout_seconds: 45
+    min_confidence: 0.75
+    batch_size: 12
+    model_key: "local-default"
+    prompt_version: "v1"
+    schema_version: "v1"
   claim_role:
     strategy: "agent_assisted"
     command:

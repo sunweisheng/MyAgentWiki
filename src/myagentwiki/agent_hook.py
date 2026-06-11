@@ -22,6 +22,10 @@ SHORT_FRAGMENT_MARKERS = (
     "注意",
     "什么是",
     "如何",
+    "但",
+    "并且",
+    "同时",
+    "以及",
 )
 
 COMPACT_TEXT_RE = re.compile(r"[\s，。；：！？、,.!?:;\"'“”‘’（）()\[\]【】`]+")
@@ -50,8 +54,6 @@ def sentence_score(text: str) -> tuple[int, int, int]:
 def text_looks_fragmentary(text: str) -> bool:
     cleaned = normalize_text(text)
     if not cleaned:
-        return True
-    if len(cleaned) <= 12:
         return True
     if cleaned.endswith(("？", "?", "：", ":")):
         return True
@@ -481,6 +483,66 @@ def handle_document_analysis_batch(payload: dict) -> dict:
     return {"decisions": decisions}
 
 
+def handle_claim_candidate_quality_batch(payload: dict) -> dict:
+    items = payload.get("items", []) or []
+    decisions = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id", "")).strip()
+        text = normalize_text(item.get("text", ""))
+        cleaned_text = normalize_text(item.get("cleaned_text", text))
+        natural_char_count = int(item.get("natural_char_count", 0) or 0)
+        if not item_id or not cleaned_text:
+            continue
+
+        quality_label = "standalone"
+        review_required = False
+        safe_auto_ready = True
+        reason = "agent_hook_short_claim_kept_as_standalone"
+
+        if text_is_question_like(cleaned_text):
+            quality_label = "fragment"
+            review_required = True
+            safe_auto_ready = False
+            reason = "agent_hook_short_claim_question_like_fragment"
+        elif text_looks_fragmentary(cleaned_text):
+            quality_label = "fragment"
+            review_required = True
+            safe_auto_ready = False
+            reason = "agent_hook_short_claim_context_dependent_fragment"
+        elif natural_char_count <= 4 and not any(marker in cleaned_text for marker in ("是", "需要", "应该", "可以", "会", "能", "用于", "保留", "支持", "记录")):
+            quality_label = "title_shell"
+            review_required = False
+            safe_auto_ready = False
+            reason = "agent_hook_short_claim_title_shell"
+        elif any(marker in cleaned_text for marker in ("是", "需要", "应该", "可以", "会", "能", "用于", "保留", "支持", "记录")):
+            quality_label = "standalone"
+            review_required = False
+            safe_auto_ready = True
+            reason = "agent_hook_short_claim_predicate_complete"
+        else:
+            quality_label = "standalone"
+            review_required = True
+            safe_auto_ready = False
+            reason = "agent_hook_short_claim_kept_but_not_safe_auto"
+
+        decisions.append(
+            {
+                "item_id": item_id,
+                "decision": {
+                    "quality_label": quality_label,
+                    "review_required": review_required,
+                    "safe_auto_ready": safe_auto_ready,
+                    "reason": reason,
+                },
+                "confidence": 0.86,
+                "reason_code": "agent_hook_claim_candidate_quality_batch_v1",
+            }
+        )
+    return {"decisions": decisions}
+
+
 def handle_claim_role_batch(payload: dict) -> dict:
     items = payload.get("items", []) or []
     decisions = []
@@ -489,6 +551,7 @@ def handle_claim_role_batch(payload: dict) -> dict:
             continue
         item_id = str(item.get("item_id", "")).strip()
         text = normalize_text(item.get("text", ""))
+        quality_label = normalize_text(item.get("quality_label", "")).lower()
         if not item_id or not text:
             continue
         role = "fact"
@@ -514,12 +577,12 @@ def handle_claim_role_batch(payload: dict) -> dict:
             role = "example"
             page_intent_hints = ["example"]
             concept_candidate_score = 0.18
-        elif any(marker in text for marker in ("是", "用于", "意味着", "是一种")) and not text_looks_fragmentary(text):
+        elif any(marker in text for marker in ("是", "用于", "意味着", "是一种")) and quality_label not in {"fragment", "title_shell", "noise"} and not text_looks_fragmentary(text):
             role = "definition"
             page_intent_hints = ["concept", "topic"]
             concept_candidate_score = 0.88
         elif (
-            len(text) >= 12
+            quality_label not in {"fragment", "title_shell", "noise"}
             and not text_looks_fragmentary(text)
             and not text_is_question_like(text)
             and any(marker in text for marker in ("承担", "职责", "机制", "能力", "模型", "系统", "设计", "定义"))
@@ -641,6 +704,8 @@ def main() -> int:
         result = handle_render_workspace_overview_page(payload)
     elif task == "review_document_analysis_batch":
         result = handle_document_analysis_batch(payload)
+    elif task == "review_claim_candidate_quality_batch":
+        result = handle_claim_candidate_quality_batch(payload)
     elif task == "review_claim_role_batch":
         result = handle_claim_role_batch(payload)
     elif task == "review_page_intent_batch":

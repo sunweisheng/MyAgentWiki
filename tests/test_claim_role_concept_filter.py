@@ -68,3 +68,31 @@ def test_claim_role_blocks_procedure_and_example_from_concept_generation(tmp_pat
         if record.get("type") == "concept" and not record.get("removed")
     ]
     assert concept_pages == []
+
+
+def test_claim_role_can_promote_short_definition_with_quality_clearance(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "short_definition.md").write_text(
+        "# 定义\n\n"
+        "用于保留回链。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "ShortDefinitionRole",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    target_claim = next(record for record in claim_records if record.get("text") == "用于保留回链")
+    assert target_claim.get("quality_decision_source") == "semantic_batch"
+    assert target_claim.get("knowledge_role") == "definition"

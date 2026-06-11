@@ -8,6 +8,7 @@ from pathlib import Path
 
 SEMANTIC_TASK_ITEM_TYPES = {
     "document_analysis": "normalized_document",
+    "claim_candidate_quality": "claim_candidate",
     "claim_role": "claim",
     "page_intent": "claim_group",
 }
@@ -51,4 +52,3 @@ def item_type_for_task(task_name: str) -> str:
 
 def semantic_batches_dir(target: Path) -> Path:
     return target / "semantic" / "batches"
-

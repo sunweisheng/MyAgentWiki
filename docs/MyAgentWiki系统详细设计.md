@@ -1016,6 +1016,13 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 3. LLM 返回严格 JSON schema
 4. 脚本做 schema 校验、grounded 校验、账本写回和缓存收口
 
+这条约束也适用于短句 / 短 claim：
+
+- 不能继续把 `<12`、`<14`、`<16` 这类长度阈值当成主要语义判断
+- 脚本层只应继续拦截纯链接、路径、speaker 前缀、纯日期、表格线等明显垃圾
+- 对“短但可能有意义”的候选，应进入独立的质量灰区批处理，由 LLM 返回 `standalone / fragment / title_shell / noise` 这类受限标签
+- 只有在质量判定明确放行时，短 claim 才应继续进入 `safe_auto`
+
 ### 批处理与缓存
 
 默认优先使用批调度器（batch scheduler），而不是单条高频调用。
@@ -1108,6 +1115,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 同时，系统还支持受控的 `stable promotion`：
 
 - 默认 `safe_auto` 只要求 claim 仍可追踪、没有开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声；单一来源也可以被提升为 `stable`
+- 对短 claim，`safe_auto` 不再直接依赖固定字符数门槛，而应优先读取短句质量语义结论；没有明确放行时继续保守停留在 `draft/needs_review`
 - 多来源支撑仍然是强正向信号，但不再作为默认提稳门槛
 - 只有在 hook 返回 `decision=promote` 且置信度达标时，才提升为 `stable`
 - 未达标时保持原状，不做“顺手提稳”

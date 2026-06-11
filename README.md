@@ -415,6 +415,7 @@ automation:
 - `confidence` 当前仅用于 `review_auto`、`stable_promotion` 等自动化决策对象
 - `review_auto` hook 可返回 `decision=auto_apply`，并附带 `action`、`primary_claim_id`、`secondary_claim_id`、`primary_page_id`、`alias_value`、`confidence`
 - `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
+- `semantic-batch` hook 当前除 `document_analysis / claim_role / page_intent` 外，也支持 `claim_candidate_quality`，用于给短句灰区返回结构化质量判断
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
 - `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
 - `concept_update` hook 当前也会被复用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
@@ -422,6 +423,7 @@ automation:
 - `review_auto / stable_promotion` 会保留原状或升级为人工判断项
 - `readable_concept / overview` 会回退到 deterministic render
 - 默认 `safe_auto` 提稳不再要求多个独立来源；单一来源的 claim 只要可追踪、无开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声，也可以提升为 `stable`
+- 对短句 / 短 claim，系统当前不再主要依赖固定字符数阈值；脚本只过滤明显垃圾，短句灰区会进入 `claim_candidate_quality` 语义批处理，由 hook 返回 `quality_label / review_required / safe_auto_ready` 这类结构化结论
 
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
 这意味着默认推荐流程会尽量串成一条连续自动化链：
@@ -699,8 +701,9 @@ MyAgentWiki/
   - 已实现 migration follow-up queue 的列出、完成和提升为 review
   - 当前 follow-up queue 写入 `state/migration_followups.jsonl`
 - `myagentwiki semantic-batch`
-  - 已实现 `document_analysis / claim_role / page_intent` 三类语义批处理入口
+  - 已实现 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类语义批处理入口
   - 当前支持批处理、缓存命中、dry-run 和统一语义账本写回
+  - `claim_candidate_quality` 当前专门处理短句灰区：它不会替代确定性噪声过滤，而是批量判断短 claim 更像可保留陈述、上下文碎片、结构壳标题，还是可安全进入 `safe_auto`
   - `page_intent` 的缓存命中当前会显式依赖 claim 侧的 `knowledge_role / page_intent_hints / concept_candidate_score`；如果 `claim_role` 结果发生变化，对应页面路由会自动失效重算，而不会继续沿用旧的页型判断
 
 ## Windows 兼容性 / Windows Compatibility
