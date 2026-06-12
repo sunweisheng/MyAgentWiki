@@ -1799,6 +1799,231 @@ def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) 
     assert f"[`{source_ref['chunk_id']}`]({expected_chunk_link})" in concept_page_text
 
 
+def test_concept_grouping_preserves_section_hierarchy_context(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位职责\n\n"
+        "## 综合运营部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责平台系统配置与代理商合同管理。\n\n"
+        "## 开发部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责研发流程平台的内部运营与发布协同。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "HierarchyContextRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    chunk_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    target_chunks = [record for record in chunk_records if record.get("section_title") == "平台运营组"]
+    assert len(target_chunks) == 2
+    assert {tuple(record.get("section_path_parts", [])) for record in target_chunks} == {
+        ("岗位职责", "综合运营部", "平台运营组"),
+        ("岗位职责", "开发部", "平台运营组"),
+    }
+
+    claim_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "claims.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    target_claims = [
+        record
+        for record in claim_records
+        if any("平台运营组" in source_ref.get("section_path", "") for source_ref in record.get("source_refs", []))
+    ]
+    assert target_claims
+    assert {
+        tuple(source_ref.get("section_path_parts", []))
+        for record in target_claims
+        for source_ref in record.get("source_refs", [])
+        if source_ref.get("section_title") == "平台运营组"
+    } == {
+        ("岗位职责", "综合运营部", "平台运营组"),
+        ("岗位职责", "开发部", "平台运营组"),
+    }
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    concept_pages = [
+        record
+        for record in page_records
+        if record.get("type") == "concept" and "平台运营组" in record.get("title", "")
+    ]
+    assert len(concept_pages) == 2
+    assert {record["canonical_id"] for record in concept_pages} == {
+        "concept:岗位职责_综合运营部_平台运营组",
+        "concept:岗位职责_开发部_平台运营组",
+    }
+
+
+def test_query_uses_section_hierarchy_for_ranking(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位职责\n\n"
+        "## 综合运营部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责平台系统配置、代理商合同管理与运营规则落地。\n\n"
+        "## 开发部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责研发流程平台的内部运营、发布协同与开发规范推广。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "HierarchyQueryRankingRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli("query", "综合运营部 平台运营组", "--target-dir", str(workspace_dir), "--reading-depth", "deep")
+
+    assert result["results"]
+    top_result = result["results"][0]
+    assert top_result["canonical_id"].endswith("岗位职责_综合运营部_平台运营组")
+    assert top_result["field_scores"].get("hierarchy", 0) > 0
+    assert top_result["reading_pack"]["retrieval_context"]["hierarchy_hits"]
+    assert (
+        top_result["reading_pack"]["retrieval_context"]["hierarchy_anchor_reason"]
+        == "matched_parent_and_leaf"
+    )
+    assert (
+        top_result["reading_pack"]["retrieval_context"]["hierarchy_anchor_reason_text"]
+        == "同时命中了父级路径和叶子标题，因此更偏向这个层级分支。"
+    )
+    assert (
+        "hierarchy_matched_parent_and_leaf"
+        in top_result["reading_pack"]["retrieval_context"]["ranking_reasons"]
+    )
+    assert (
+        "岗位职责 > 综合运营部 > 平台运营组"
+        in top_result["reading_pack"]["retrieval_context"]["hierarchy_paths"]
+    )
+    assert top_result["reading_pack"]["matched_chunks"]
+    assert (
+        top_result["reading_pack"]["matched_chunks"][0]["section_path"]
+        == "岗位职责 > 综合运营部 > 平台运营组"
+    )
+
+
+def test_query_answer_ready_exposes_hierarchy_anchor(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位职责\n\n"
+        "## 综合运营部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责平台系统配置、代理商合同管理与运营规则落地。\n\n"
+        "## 开发部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责研发流程平台的内部运营、发布协同与开发规范推广。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "HierarchyAnswerReadyRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    result = run_cli(
+        "query",
+        "综合运营部 平台运营组",
+        "--target-dir", str(workspace_dir),
+        "--answer-ready",
+    )
+
+    assert result["selected_result"]["hierarchy_paths"]
+    assert (
+        "岗位职责 > 综合运营部 > 平台运营组"
+        in result["selected_result"]["hierarchy_paths"]
+    )
+    assert (
+        "岗位职责 > 综合运营部 > 平台运营组"
+        in result["answer_context"]["hierarchy_paths"]
+    )
+    assert result["answer_context"]["hierarchy_anchor_reason"] == "matched_parent_and_leaf"
+    assert (
+        result["answer_context"]["hierarchy_anchor_reason_text"]
+        == "同时命中了父级路径和叶子标题，因此更偏向这个层级分支。"
+    )
+    assert "Hierarchy anchor:" in result["agent_summary"]
+    assert "Hierarchy reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in result["agent_summary"]
+
+
+def test_answer_query_prompt_and_messages_expose_hierarchy_anchor(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位职责\n\n"
+        "## 综合运营部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责平台系统配置、代理商合同管理与运营规则落地。\n\n"
+        "## 开发部\n\n"
+        "### 平台运营组\n\n"
+        "平台运营组负责研发流程平台的内部运营、发布协同与开发规范推广。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "HierarchyPromptRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    prompt_result = run_cli(
+        "answer-query",
+        "综合运营部 平台运营组",
+        "--target-dir", str(workspace_dir),
+        "--format", "prompt",
+    )
+    messages_result = run_cli(
+        "answer-query",
+        "综合运营部 平台运营组",
+        "--target-dir", str(workspace_dir),
+        "--format", "messages",
+    )
+    chatml_result = run_cli(
+        "answer-query",
+        "综合运营部 平台运营组",
+        "--target-dir", str(workspace_dir),
+        "--format", "chatml",
+    )
+
+    assert "- hierarchy_anchor: 岗位职责 > 综合运营部 > 平台运营组" in prompt_result["prompt_text"]
+    assert "- hierarchy_hits:" in prompt_result["prompt_text"]
+    assert "- hierarchy_reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in prompt_result["prompt_text"]
+    assert "- hierarchy_anchor: 岗位职责 > 综合运营部 > 平台运营组" in messages_result["messages"][1]["content"]
+    assert "- hierarchy_reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in messages_result["messages"][1]["content"]
+    assert "- hierarchy_anchor: 岗位职责 > 综合运营部 > 平台运营组" in chatml_result["chatml_text"]
+    assert "- hierarchy_reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in chatml_result["chatml_text"]
+
+
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     # “来源/证据”类问题应识别为 evidence，并让 source_refs 字段真正参与更强排序。
     source_dir = tmp_path / "raw"
@@ -3158,6 +3383,8 @@ def test_assign_alias_keeps_existing_page_aliases(tmp_path: Path) -> None:
 
 def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None:
     # 不同 query intent 至少应在 reading_pack 上体现出不同的关注重点。
+    # how_to 还会继续细分：如果首条命中是 guide 页，就应收口为 guide_steps；
+    # 否则才退回更通用的 procedural_chunks。
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
@@ -3181,7 +3408,12 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
     compare = run_cli("query", "Alpha 和 Beta 的区别", "--target-dir", str(workspace_dir))
 
     assert how_to["intent"] == "how_to"
-    assert how_to["results"][0]["reading_pack"]["focus"] == "procedural_chunks"
+    expected_how_to_focus = (
+        "guide_steps"
+        if how_to["results"][0]["type"] == "guide"
+        else "procedural_chunks"
+    )
+    assert how_to["results"][0]["reading_pack"]["focus"] == expected_how_to_focus
     assert how_to["results"][0]["reading_pack"]["answer_guardrails"]["must_read_chunks"] is True
     assert how_to["results"][0]["reading_pack"]["answer_guardrails"]["can_answer_from_summary_only"] is False
     assert how_to["results"][0]["reading_pack"]["answer_handoff"]["answer_mode"] == "chunks_first"

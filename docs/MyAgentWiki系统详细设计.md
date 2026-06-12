@@ -393,6 +393,10 @@ flowchart TD
 - `source_id`：所属来源 ID
 - `source_path`：所属来源路径
 - `section_path`：章节路径
+- `section_path_parts`：章节路径数组，保留标题树的结构化层级
+- `section_title`：当前 chunk 所属叶子标题
+- `parent_section_path`：父级章节路径，便于区分同名叶子节点
+- `heading_level`：当前标题层级深度
 - `chunk_index`：切块序号
 - `start_line`：起始行号
 - `end_line`：结束行号
@@ -414,6 +418,7 @@ flowchart TD
 - Chunk 同时承担检索、摘要、Claim 抽取、溯源、增量更新和语义分析输入的职责
 - `previous_chunk / next_chunk` 用来补足上下文，而不是直接复制 overlap 文本
 - `chunk_kind / topicworthiness_hint` 让后续流程区分结构壳、主题段、步骤段、总结段等不同角色
+- `section_path_parts / section_title / parent_section_path / heading_level` 让标题树不再只剩下一条扁平字符串，后续 claim、concept page、query 排序和 answer-ready 都可以继续消费父子层级关系
 
 ### Claim（知识声明）
 
@@ -1313,6 +1318,12 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - `query` 已显式返回 `contract_version: query_answer_handoff/v1`
 - 支持 `reading_depth`
 - `deep` 模式会返回更厚的 `reading_pack` 和 `source_trail`
+- `retrieval_context` 不只返回命中字段和排序原因，也会显式返回层级解释：
+  - `hierarchy_hits`：命中的层级 token
+  - `hierarchy_paths`：被当作主要锚点的章节路径
+  - `hierarchy_anchor_reason`：机器可读原因，例如 `matched_parent_and_leaf`
+  - `hierarchy_anchor_reason_text`：人类可读说明，例如“同时命中了父级路径和叶子标题，因此更偏向这个层级分支。”
+- hierarchy 解释已进入统一的 `ranking_reasons`，也就是说“父级+叶子同时命中”已经是正式排序解释的一部分，而不只是附加调试信息
 
 ### Query -> Answer Handoff Contract
 
@@ -1350,6 +1361,8 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 这两块的意义，是把“回答前的阅读纪律”固化下来，而不是交给每个上层 Agent 临场猜测。
 
+当前 `retrieval_context` 除了 `focus / matched_fields / ranking_reasons` 外，还承担“为什么偏向这个章节树路径”的解释职责。也就是说，检索层不仅告诉回答器“命中了哪一页”，还会告诉它“这是因为命中了父级章节、叶子标题，还是两者同时命中”。
+
 ### Answer-Ready Output Layer
 
 在 `reading_pack` 之上，当前系统又增加了一层面向回答器的回答交接载荷（answer-ready payload）。
@@ -1369,6 +1382,13 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - `agent_brief`：给上层 Agent 的紧凑工作指令
 - `answer_context`：压缩后的回答上下文
 - `agent_summary`：给上层 Agent 直接阅读的摘要说明
+
+当前实现已经把层级解释从 `reading_pack` 继续压缩进 answer-ready：
+
+- `selected_result`：会带 `hierarchy_hits / hierarchy_paths / hierarchy_anchor_reason / hierarchy_anchor_reason_text`
+- `answer_context`：会带同样的 hierarchy 锚点信息，供 prompt、messages、chatml 和上层 Agent 直接消费
+- `agent_summary`：会把 hierarchy 锚点与中文解释直接写出来，避免上层回答器还要自己重新推断父子路径关系
+- `summary / prompt / messages / chatml` 四种渲染格式都会显示 hierarchy anchor 与 hierarchy reason
 
 当前支持四种渲染格式：
 

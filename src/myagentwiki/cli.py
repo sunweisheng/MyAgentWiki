@@ -144,6 +144,7 @@ PAGE_RENDER_TARGETS = {
 QUERY_FIELD_WEIGHTS = {
     "title": 5.0,
     "aliases": 4.0,
+    "hierarchy": 3.5,
     "summary": 3.0,
     "headings": 2.5,
     "body": 1.0,
@@ -192,7 +193,7 @@ QUERY_HEADING_BLACKLIST = {
     "维护状态 / maintenance",
 }
 SEARCH_PAGES_INDEX_REL_PATH = Path("indexes") / "search_pages.jsonl"
-SEARCH_PAGES_INDEX_VERSION = "search_pages_v1"
+SEARCH_PAGES_INDEX_VERSION = "search_pages_v2"
 ALIAS_INDEX_VERSION = "aliases_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
@@ -254,11 +255,13 @@ QUERY_INTENT_FIELD_MULTIPLIERS = {
         "title": 1.15,
         "summary": 1.15,
         "aliases": 1.10,
+        "hierarchy": 1.08,
     },
     "compare": {
         "claim_text": 1.15,
         "body": 1.10,
         "headings": 1.05,
+        "hierarchy": 1.08,
     },
     "timeline": {
         "body": 1.10,
@@ -270,16 +273,19 @@ QUERY_INTENT_FIELD_MULTIPLIERS = {
         "headings": 1.12,
         "body": 1.08,
         "claim_text": 1.06,
+        "hierarchy": 1.10,
     },
     "how_to": {
         "headings": 1.15,
         "body": 1.15,
         "claim_text": 1.10,
+        "hierarchy": 1.12,
     },
     "evidence": {
         "source_refs": 1.80,
         "claim_text": 1.20,
         "body": 1.05,
+        "hierarchy": 1.08,
     },
 }
 CLAIM_DEPENDENT_PREFIXES = (
@@ -4622,6 +4628,22 @@ def sanitize_section_label(value: str) -> str:
     return compact or "未命名章节"
 
 
+def build_section_hierarchy(section_parts: list[str]) -> dict:
+    cleaned_parts = [sanitize_section_label(part) for part in section_parts if sanitize_section_label(part)]
+    current_label = cleaned_parts[-1] if cleaned_parts else "未命名章节"
+    parent_parts = cleaned_parts[:-1]
+    return {
+        "section_path_parts": cleaned_parts,
+        "section_title": current_label,
+        "parent_section_path": " > ".join(parent_parts),
+        "heading_level": len(cleaned_parts),
+    }
+
+
+def parse_section_path(section_path: str) -> dict:
+    return build_section_hierarchy([part.strip() for part in section_path.split(">") if part.strip()])
+
+
 def split_markdown_blocks(section_lines: list[tuple[int, str]]) -> list[dict]:
     # 这里把章节文本拆成“块”，优先按空行断开，但尽量不切开 fenced code block。
     blocks: list[dict] = []
@@ -4793,6 +4815,7 @@ def build_chunk_records_for_section(
         chunk_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
         section_key = sanitize_source_key(section_path)
         chunk_id = f"chk_{source_id}_{section_key}_{start_line}_{chunk_hash[:10]}"
+        section_hierarchy = build_section_hierarchy(section["section_path"])
 
         chunk_records.append({
             "chunk_id": chunk_id,
@@ -4800,6 +4823,10 @@ def build_chunk_records_for_section(
             "source_path": source_path,
             "normalized_path": normalized_rel_path,
             "section_path": section_path,
+            "section_path_parts": section_hierarchy["section_path_parts"],
+            "section_title": section_hierarchy["section_title"],
+            "parent_section_path": section_hierarchy["parent_section_path"],
+            "heading_level": section_hierarchy["heading_level"],
             "chunk_index": index,
             "start_line": start_line,
             "end_line": end_line,
@@ -4812,7 +4839,7 @@ def build_chunk_records_for_section(
             "next_chunk": None,
             "overlap_from_previous": 0,
             "hash": chunk_hash,
-            "chunker_version": "chunk_v1",
+            "chunker_version": "chunk_v2",
             "updated_at": utc_now_iso(),
         })
 
@@ -5648,6 +5675,9 @@ def build_claim_record_from_chunk(chunk_record: dict, claim_text: str) -> dict:
     claim_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
     claim_id = f"clm_{chunk_record['source_id']}_{claim_hash[:12]}"
     now = utc_now_iso()
+    section_path_parts = chunk_record.get("section_path_parts")
+    if not section_path_parts:
+        section_path_parts = parse_section_path(chunk_record.get("section_path", "")).get("section_path_parts", [])
 
     return {
         "claim_id": claim_id,
@@ -5680,11 +5710,15 @@ def build_claim_record_from_chunk(chunk_record: dict, claim_text: str) -> dict:
                 "normalized_path": chunk_record["normalized_path"],
                 "chunk_id": chunk_record["chunk_id"],
                 "section_path": chunk_record["section_path"],
+                "section_path_parts": section_path_parts,
+                "section_title": chunk_record.get("section_title") or (section_path_parts[-1] if section_path_parts else ""),
+                "parent_section_path": chunk_record.get("parent_section_path") or " > ".join(section_path_parts[:-1]),
+                "heading_level": chunk_record.get("heading_level") or len(section_path_parts),
                 "start_line": chunk_record["start_line"],
                 "end_line": chunk_record["end_line"],
             }
         ],
-        "extraction_method": "rule_based_chunk_v1",
+        "extraction_method": "rule_based_chunk_v2",
         "created_at": now,
         "updated_at": now,
     }
@@ -6320,16 +6354,61 @@ def normalize_question_style_concept_label(label: str) -> str:
     return cleaned
 
 
-def extract_primary_section_label(claim_record: dict) -> str:
-    # 对概念页命名来说，section_path 往往比整句 claim 更接近“主题名”。
+def section_path_parts_from_claim_record(claim_record: dict) -> list[str]:
     for source_ref in claim_record.get("source_refs", []):
+        parts = source_ref.get("section_path_parts")
+        if isinstance(parts, list):
+            cleaned_parts = [normalize_question_style_concept_label(str(part)) for part in parts if str(part).strip()]
+            cleaned_parts = [part for part in cleaned_parts if part]
+            if cleaned_parts:
+                return cleaned_parts
         section_path = source_ref.get("section_path", "")
         if not section_path:
             continue
-        parts = [part.strip() for part in section_path.split(">") if part.strip()]
+        parsed = parse_section_path(section_path)
+        parts = [
+            normalize_question_style_concept_label(part)
+            for part in parsed.get("section_path_parts", [])
+            if part
+        ]
+        parts = [part for part in parts if part]
         if parts:
-            return normalize_question_style_concept_label(parts[-1])
-    return ""
+            return parts
+    return []
+
+
+def section_label_is_meaningful_context(label: str) -> bool:
+    cleaned = normalize_question_style_concept_label(label)
+    if not cleaned or is_generic_concept_label(cleaned):
+        return False
+    if text_is_question_like(cleaned):
+        return False
+    if len(cleaned) >= 18 and claim_has_standalone_predicate(cleaned):
+        return False
+    if any(marker in cleaned for marker in ("：", ":", "。", "？", "?")) and len(cleaned) >= 10:
+        return False
+    return True
+
+
+def build_hierarchical_section_label(section_parts: list[str], max_parts: int = 3) -> str:
+    if not section_parts:
+        return ""
+    meaningful_parts = [part for part in section_parts if section_label_is_meaningful_context(part)]
+    if not meaningful_parts:
+        meaningful_parts = [normalize_question_style_concept_label(part) for part in section_parts if part]
+        meaningful_parts = [part for part in meaningful_parts if part]
+    selected_parts = meaningful_parts[-max_parts:]
+    if len(selected_parts) <= 1:
+        return selected_parts[0] if selected_parts else ""
+    return " / ".join(selected_parts)
+
+
+def extract_primary_section_label(claim_record: dict) -> str:
+    # 对概念页命名来说，section_path 往往比整句 claim 更接近“主题名”。
+    parts = section_path_parts_from_claim_record(claim_record)
+    if not parts:
+        return ""
+    return build_hierarchical_section_label(parts)
 
 
 def choose_group_topic_label(claim_records: list[dict]) -> str:
@@ -6352,6 +6431,24 @@ def choose_group_topic_label(claim_records: list[dict]) -> str:
         reverse=True,
     )
     return ranked[0][0]
+
+
+def collect_section_label_aliases(claim_records: list[dict]) -> list[str]:
+    aliases: list[str] = []
+    for claim_record in claim_records:
+        parts = section_path_parts_from_claim_record(claim_record)
+        if not parts:
+            continue
+        candidates = [
+            build_hierarchical_section_label(parts),
+            normalize_question_style_concept_label(parts[-1]),
+            " > ".join(parts),
+        ]
+        for candidate in candidates:
+            cleaned = clean_concept_title_text(candidate)
+            if cleaned and cleaned not in aliases:
+                aliases.append(cleaned)
+    return aliases
 
 
 def is_generic_concept_label(label: str) -> bool:
@@ -8209,6 +8306,7 @@ def build_concept_page(
     section_alias = extract_primary_section_label(canonical_claim)
     if section_alias and section_alias != title:
         aliases.append(section_alias)
+    aliases.extend(collect_section_label_aliases(render_claim_records))
 
     summary_text = build_readable_concept_summary_text(
         title=title,
@@ -9237,13 +9335,28 @@ def build_page_field_texts(page_record: dict, page_text: str, claim_records_by_i
         claim_texts.append(claim_record.get("text", ""))
 
     source_ref_parts = []
+    hierarchy_parts = []
     for source_ref in page_record.get("source_refs", []):
         source_ref_parts.append(source_ref.get("source_id", ""))
         source_ref_parts.append(source_ref.get("source_path", ""))
+        hierarchy_parts.append(source_ref.get("section_path", ""))
+        hierarchy_parts.append(source_ref.get("section_title", ""))
+        hierarchy_parts.append(source_ref.get("parent_section_path", ""))
+        section_path_parts = source_ref.get("section_path_parts", [])
+        if isinstance(section_path_parts, list):
+            hierarchy_parts.extend(str(part) for part in section_path_parts if str(part).strip())
+        for chunk_ref in source_ref.get("chunks", []):
+            chunk_section_path = chunk_ref.get("section_path", "")
+            hierarchy_parts.append(chunk_section_path)
+            parsed = parse_section_path(chunk_section_path)
+            hierarchy_parts.extend(parsed.get("section_path_parts", []))
+    hierarchy_parts.append(page_record.get("title", ""))
+    hierarchy_parts.extend(page_record.get("aliases", []))
 
     return {
         "title": page_record.get("title", ""),
         "aliases": "\n".join(page_record.get("aliases", [])),
+        "hierarchy": "\n".join(part for part in hierarchy_parts if part),
         "summary": page_record.get("summary", ""),
         "headings": "\n".join(extract_markdown_headings(page_text)),
         "body": build_searchable_body_text(page_text),
@@ -10763,12 +10876,30 @@ def score_chunk_for_query(query_tokens: list[str], chunk_record: dict) -> tuple[
     chunk_text = "\n".join([chunk_record.get("summary", ""), chunk_record.get("text", "")])
     chunk_tokens = tokenize_for_search(chunk_text)
     matched_tokens = select_top_matches(query_tokens, chunk_tokens, limit=8)
-    if not matched_tokens:
+    section_tokens = tokenize_for_search(
+        "\n".join(
+            [
+                chunk_record.get("section_title", ""),
+                chunk_record.get("parent_section_path", ""),
+                chunk_record.get("section_path", ""),
+                "\n".join(chunk_record.get("section_path_parts", []) if isinstance(chunk_record.get("section_path_parts", []), list) else []),
+            ]
+        )
+    )
+    section_matches = select_top_matches(query_tokens, section_tokens, limit=8)
+    if not matched_tokens and not section_matches:
         return 0.0, []
     score = float(len(matched_tokens))
+    score += float(len(section_matches)) * 0.45
+    if chunk_record.get("section_title") and section_matches:
+        score += 0.2
     # 更短的 chunk 往往更聚焦，给一个很轻的偏好。
     score += 0.25 if chunk_record.get("char_count", 0) <= 600 else 0.0
-    return score, matched_tokens
+    combined_matches = []
+    for token in [*matched_tokens, *section_matches]:
+        if token not in combined_matches:
+            combined_matches.append(token)
+    return score, combined_matches[:8]
 
 
 def build_source_brief(source_ref: dict) -> dict:
@@ -10871,6 +11002,62 @@ def build_source_trail(claim_matches: list[dict], chunk_matches: list[dict]) -> 
         key=lambda item: (len(item["claim_ids"]), len(item["chunk_ids"]), item["source_id"]),
         reverse=True,
     )
+
+
+def build_hierarchy_match_explanation(result: dict, matched_chunks: list[dict]) -> dict:
+    hierarchy_tokens = result.get("field_hits", {}).get("hierarchy", []) or []
+    hierarchy_paths: list[str] = []
+    matched_parent = False
+    matched_leaf = False
+
+    for chunk in matched_chunks:
+        section_path = chunk.get("section_path")
+        if section_path and section_path not in hierarchy_paths:
+            hierarchy_paths.append(section_path)
+
+    for source_ref in result.get("source_refs", []) or []:
+        section_path = source_ref.get("section_path")
+        if section_path and section_path not in hierarchy_paths:
+            hierarchy_paths.append(section_path)
+        for chunk_ref in source_ref.get("chunks", []) or []:
+            chunk_section_path = chunk_ref.get("section_path")
+            if chunk_section_path and chunk_section_path not in hierarchy_paths:
+                hierarchy_paths.append(chunk_section_path)
+
+    for section_path in hierarchy_paths:
+        parsed = parse_section_path(section_path)
+        section_parts = parsed.get("section_path_parts", [])
+        if not section_parts:
+            continue
+        leaf_tokens = set(tokenize_for_search(section_parts[-1]))
+        parent_tokens = set(tokenize_for_search(" ".join(section_parts[:-1])))
+        if leaf_tokens.intersection(hierarchy_tokens):
+            matched_leaf = True
+        if parent_tokens.intersection(hierarchy_tokens):
+            matched_parent = True
+
+    if matched_parent and matched_leaf:
+        anchor_reason = "matched_parent_and_leaf"
+    elif matched_parent:
+        anchor_reason = "matched_parent_only"
+    elif matched_leaf:
+        anchor_reason = "matched_leaf_only"
+    else:
+        anchor_reason = "matched_hierarchy_context"
+
+    anchor_reason_text = {
+        "matched_parent_and_leaf": "同时命中了父级路径和叶子标题，因此更偏向这个层级分支。",
+        "matched_parent_only": "主要命中了父级路径，因此结果更偏向这个上层分类。",
+        "matched_leaf_only": "主要命中了叶子标题，因此结果更偏向这个具体节点。",
+        "matched_hierarchy_context": "命中了层级相关上下文，因此结果参考了章节路径信息。",
+    }.get(anchor_reason, "命中了层级路径信息。")
+
+    return {
+        "matched_tokens": hierarchy_tokens,
+        "matched_paths": hierarchy_paths[:5],
+        "anchor_reason": anchor_reason,
+        "anchor_reason_text": anchor_reason_text,
+    }
 
 
 def query_reading_focus(query_intent: str, page_type: str = "") -> str:
@@ -11120,11 +11307,14 @@ def build_result_reading_pack(
     timeline_sources = build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else []
     page_type = result.get("type", "")
     focus = query_reading_focus(query_intent, page_type=page_type)
+    hierarchy_explanation = build_hierarchy_match_explanation(result, trimmed_chunks)
     ranking_reasons = []
     if result.get("exact_match_reasons"):
         ranking_reasons.extend(result["exact_match_reasons"])
     if result.get("intent_boost_reason"):
         ranking_reasons.append(result["intent_boost_reason"])
+    if hierarchy_explanation["matched_tokens"] or hierarchy_explanation["matched_paths"]:
+        ranking_reasons.append(f"hierarchy_{hierarchy_explanation['anchor_reason']}")
     ranking_reasons.extend(sorted(result.get("field_scores", {}).keys()))
     answer_guardrails = build_answer_guardrails(
         query_intent=query_intent,
@@ -11141,7 +11331,6 @@ def build_result_reading_pack(
         answer_guardrails=answer_guardrails,
         page_type=page_type,
     )
-
     return {
         "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
         "handoff_kind": "reading_pack",
@@ -11177,6 +11366,10 @@ def build_result_reading_pack(
             "matched_fields": sorted(result.get("field_hits", {}).keys()),
             "ranking_reasons": ranking_reasons,
             "review_ids": result.get("review_ids", []),
+            "hierarchy_hits": hierarchy_explanation["matched_tokens"],
+            "hierarchy_paths": hierarchy_explanation["matched_paths"],
+            "hierarchy_anchor_reason": hierarchy_explanation["anchor_reason"],
+            "hierarchy_anchor_reason_text": hierarchy_explanation["anchor_reason_text"],
         },
         "evidence_context": {
             "matched_claims": trimmed_claims,
@@ -11231,7 +11424,8 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
     answer_guardrails = reading_pack.get("answer_guardrails", {})
     answer_handoff = reading_pack.get("answer_handoff", {})
     evidence_context = reading_pack.get("evidence_context", {})
-    matched_fields = reading_pack.get("retrieval_context", {}).get("matched_fields", [])
+    retrieval_context = reading_pack.get("retrieval_context", {})
+    matched_fields = retrieval_context.get("matched_fields", [])
     weak_match = (
         not matched_fields
         or (
@@ -11318,6 +11512,10 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             for source_ref in claim.get("source_refs", [])
         ][:5]
     )
+    hierarchy_hits = retrieval_context.get("hierarchy_hits", [])
+    hierarchy_paths = retrieval_context.get("hierarchy_paths", [])
+    hierarchy_anchor_reason = retrieval_context.get("hierarchy_anchor_reason")
+    hierarchy_anchor_reason_text = retrieval_context.get("hierarchy_anchor_reason_text")
     page_type = str(top_result.get("type", "")).strip().lower()
     page_profile = page_type_profile(page_type)
     compat_mode = page_type_compat_mode(page_type)
@@ -11349,6 +11547,14 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
         f"Fallback action: {answer_handoff.get('fallback_action', 'read_required_evidence_before_answering')}.",
         f"Risk flags: {risk_text}.",
     ]
+    if hierarchy_paths:
+        agent_summary_lines.append(
+            f"Hierarchy anchor: {' | '.join(hierarchy_paths[:3])}."
+        )
+    if hierarchy_anchor_reason_text:
+        agent_summary_lines.append(f"Hierarchy reason: {hierarchy_anchor_reason_text}")
+    elif hierarchy_anchor_reason:
+        agent_summary_lines.append(f"Hierarchy reason: {hierarchy_anchor_reason}.")
 
     base_payload.update({
         "selected_result": {
@@ -11364,6 +11570,10 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "page_type_profile": page_profile,
             "compat_mode": compat_mode,
             "ready_state": ready_state,
+            "hierarchy_hits": hierarchy_hits,
+            "hierarchy_paths": hierarchy_paths,
+            "hierarchy_anchor_reason": hierarchy_anchor_reason,
+            "hierarchy_anchor_reason_text": hierarchy_anchor_reason_text,
         },
         "alternatives": [
             {
@@ -11394,6 +11604,10 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
             "key_claims": key_claims,
             "key_chunks": key_chunks,
             "key_sources": key_sources,
+            "hierarchy_hits": hierarchy_hits,
+            "hierarchy_paths": hierarchy_paths,
+            "hierarchy_anchor_reason": hierarchy_anchor_reason,
+            "hierarchy_anchor_reason_text": hierarchy_anchor_reason_text,
         },
         "agent_summary": "\n".join(agent_summary_lines),
     })
@@ -11432,6 +11646,12 @@ def render_answer_ready_message(answer_ready_payload: dict) -> str:
         lines.append(f"  required_evidence: {', '.join(agent_brief['required_evidence_paths'])}")
     if agent_brief.get("risk_flags"):
         lines.append(f"  risk_flags: {', '.join(agent_brief['risk_flags'])}")
+    if answer_context.get("hierarchy_paths"):
+        lines.append(f"  hierarchy: {' | '.join(answer_context['hierarchy_paths'])}")
+    if answer_context.get("hierarchy_anchor_reason_text"):
+        lines.append(f"  hierarchy_reason: {answer_context.get('hierarchy_anchor_reason_text')}")
+    elif answer_context.get("hierarchy_anchor_reason"):
+        lines.append(f"  hierarchy_reason: {answer_context.get('hierarchy_anchor_reason')}")
     lines.append(f"  summary: {answer_context.get('page_summary', '')}")
 
     key_claims = answer_context.get("key_claims", [])
@@ -11516,6 +11736,16 @@ def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
         f"- ready_state: {selected_result.get('ready_state', '')}",
         f"- page_path: {selected_result.get('page_path', '')}",
         f"- page_summary: {answer_context.get('page_summary', '')}",
+    ])
+    if answer_context.get("hierarchy_paths"):
+        lines.append(f"- hierarchy_anchor: {' | '.join(answer_context.get('hierarchy_paths', [])[:3])}")
+    if answer_context.get("hierarchy_hits"):
+        lines.append(f"- hierarchy_hits: {'/'.join(answer_context.get('hierarchy_hits', []))}")
+    if answer_context.get("hierarchy_anchor_reason_text"):
+        lines.append(f"- hierarchy_reason: {answer_context.get('hierarchy_anchor_reason_text')}")
+    elif answer_context.get("hierarchy_anchor_reason"):
+        lines.append(f"- hierarchy_reason: {answer_context.get('hierarchy_anchor_reason')}")
+    lines.extend([
         "",
         "## Key Claims",
     ])
@@ -11925,6 +12155,21 @@ def command_query(args: argparse.Namespace) -> CommandResult:
             if hit_explanation:
                 lines.append(f"   hits: {hit_explanation}")
         reading_pack = result.get("reading_pack", {})
+        hierarchy_hits = reading_pack.get("retrieval_context", {}).get("hierarchy_hits", [])
+        hierarchy_paths = reading_pack.get("retrieval_context", {}).get("hierarchy_paths", [])
+        hierarchy_anchor_reason = reading_pack.get("retrieval_context", {}).get("hierarchy_anchor_reason")
+        hierarchy_anchor_reason_text = reading_pack.get("retrieval_context", {}).get("hierarchy_anchor_reason_text")
+        if hierarchy_hits or hierarchy_paths:
+            hierarchy_explanation_parts = []
+            if hierarchy_hits:
+                hierarchy_explanation_parts.append(f"hits={'/'.join(hierarchy_hits)}")
+            if hierarchy_paths:
+                hierarchy_explanation_parts.append(f"paths={' | '.join(hierarchy_paths)}")
+            if hierarchy_anchor_reason_text:
+                hierarchy_explanation_parts.append(f"reason={hierarchy_anchor_reason_text}")
+            elif hierarchy_anchor_reason:
+                hierarchy_explanation_parts.append(f"reason={hierarchy_anchor_reason}")
+            lines.append(f"   hierarchy: {'; '.join(hierarchy_explanation_parts)}")
         matched_claims = reading_pack.get("matched_claims", [])
         matched_chunks = reading_pack.get("matched_chunks", [])
         if matched_claims:

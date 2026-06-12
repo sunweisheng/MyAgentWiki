@@ -654,11 +654,28 @@ MyAgentWiki/
   - `deep` 模式会在保持 deterministic 的前提下返回更厚的 `reading_pack`，并额外给出按来源聚合的 `source_trail`
   - 当前输出候选页面、得分解释、命中字段与命中 token，并返回阅读包 `reading_pack`
   - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；`deep` 模式下还会附带 `source_trail`
+  - 标题树相关信息已经不再只保留为扁平 `section_path`：
+    - chunk 和 claim source refs 当前都会保留 `section_path_parts / section_title / parent_section_path / heading_level`
+    - concept 聚合、命名和别名已开始消费这套层级字段，避免“同名叶子标题但父节点不同”的内容被压平成同一主题
+  - query 排序当前也已消费 hierarchy 字段：
+    - page 检索会把章节路径、父级路径、层级别名和页面标题一起作为 hierarchy 检索字段参与 BM25
+    - chunk 检索会对 `section_title / parent_section_path / section_path_parts` 的命中给轻量加权
+  - `reading_pack.retrieval_context` 当前会显式解释层级命中：
+    - `hierarchy_hits`
+    - `hierarchy_paths`
+    - `hierarchy_anchor_reason`
+    - `hierarchy_anchor_reason_text`
+    - 并且 hierarchy 原因已经进入统一的 `ranking_reasons`
   - JSON 输出当前会统一附带 `workspace_summary`，便于上层 Agent 直接拿到工作区绝对路径、入口页和 lint 报告路径
   - 纯文本输出当前也会先打印 `Workspace / Entry page / Lint report` 这类绝对路径摘要，再展开候选结果
   - `query --answer-ready` 和 `answer-query` 会把 `reading_pack.answer_handoff` 渲染成给上层 Agent 直接消费的回答就绪摘要，显式返回推荐读序、必读证据路径、风险标记与降级动作
   - `--format prompt` 会进一步把回答就绪摘要压成可直接喂给上层 LLM/Agent 的 prompt block；JSON 模式下也会附带 `prompt_text`
   - `--format messages` 会返回可直接传给聊天 API 的 messages 数组；`--format chatml` 会同时返回 messages 和 ChatML 文本
+  - answer-ready 当前也会继续透传 hierarchy 锚点，包含：
+    - `selected_result.hierarchy_*`
+    - `answer_context.hierarchy_*`
+    - `agent_summary` 中的人类可读 hierarchy anchor / hierarchy reason
+    - `prompt / messages / chatml` 中给上层模型直接消费的 hierarchy anchor / hierarchy reason
   - answer-ready 输出当前使用独立版本 `answer_ready_query/v1`，与底层 `query_answer_handoff/v1` 分层演进
 - `myagentwiki review-list`
   - 已实现 review 队列查看，可列出待处理项、候选 claim、推荐动作与允许动作

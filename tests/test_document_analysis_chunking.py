@@ -70,3 +70,7 @@ def test_ingest_applies_document_analysis_to_normalized_and_chunking(tmp_path: P
     assert len(chunk_records) >= 3
     assert all(record.get("chunk_kind") == "paragraph_first" for record in chunk_records)
     assert all(record.get("topicworthiness_hint") == "note" for record in chunk_records)
+    assert all(isinstance(record.get("section_path_parts"), list) for record in chunk_records)
+    assert all("section_title" in record for record in chunk_records)
+    assert all("parent_section_path" in record for record in chunk_records)
+    assert all("heading_level" in record for record in chunk_records)
