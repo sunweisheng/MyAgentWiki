@@ -386,6 +386,41 @@ automation:
     min_confidence: 0.9
 ```
 
+如果希望通过 Codex 或 Claude Code 调用真实 LLM，可以改用包内 Agent CLI hook：
+
+```yaml
+semantic:
+  claim_role:
+    strategy: "agent_assisted"
+    command:
+      - "python3"
+      - "-m"
+      - "myagentwiki.agent_cli_hook"
+    timeout_seconds: 90
+    min_confidence: 0.75
+    batch_size: 8
+    model_key: "codex-cli"
+    prompt_version: "v1"
+    schema_version: "v1"
+```
+
+并设置环境变量：
+
+```bash
+# codex 或 claude，默认 codex
+export MYAGENTWIKI_AGENT_CLI="codex"
+# 可选：指定模型或二进制路径
+export MYAGENTWIKI_CODEX_MODEL="gpt-5.1-codex"
+export MYAGENTWIKI_CODEX_BIN="codex"
+
+# 如果改用 Claude Code：
+export MYAGENTWIKI_AGENT_CLI="claude"
+export MYAGENTWIKI_CLAUDE_MODEL="sonnet"
+export MYAGENTWIKI_CLAUDE_BIN="claude"
+```
+
+`agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex/Claude Code CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
+
 约定很简单：
 - hook 从标准输入接收 JSON payload
 - 成功时向标准输出返回 JSON

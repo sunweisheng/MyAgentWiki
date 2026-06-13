@@ -40,6 +40,8 @@ from .semantic import (
     build_semantic_decision_id,
     fingerprint_payload,
     item_type_for_task,
+    normalize_string_list,
+    normalize_semantic_hook_decision,
     semantic_batches_dir,
 )
 
@@ -1263,6 +1265,226 @@ def run_json_automation_command(
     return parsed if isinstance(parsed, dict) else None
 
 
+def semantic_structure_records_by_id(target: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    evidence_blocks = {
+        str(record.get("evidence_block_id", "")).strip(): record
+        for record in load_jsonl(target / EVIDENCE_BLOCKS_REL_PATH)
+        if str(record.get("evidence_block_id", "")).strip()
+    }
+    knowledge_units = {
+        str(record.get("knowledge_unit_id", "")).strip(): record
+        for record in load_jsonl(target / KNOWLEDGE_UNITS_REL_PATH)
+        if str(record.get("knowledge_unit_id", "")).strip()
+    }
+    return evidence_blocks, knowledge_units
+
+
+def sorted_counter_dict(counter: Counter[str], limit: int = 12) -> dict[str, int]:
+    return {
+        key: count
+        for key, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        if key
+    }
+
+
+def first_non_empty_string(values: list[object]) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def claim_structure_context(
+    claim_record: dict,
+    evidence_blocks_by_id: dict[str, dict],
+    knowledge_units_by_id: dict[str, dict],
+) -> dict:
+    knowledge_unit_ids = normalize_string_list(claim_record.get("knowledge_unit_ids"))
+    evidence_block_ids = normalize_string_list(claim_record.get("evidence_block_ids"))
+    source_refs = claim_record.get("source_refs", [])
+    if not isinstance(source_refs, list):
+        source_refs = []
+
+    for source_ref in source_refs:
+        if not isinstance(source_ref, dict):
+            continue
+        for knowledge_unit_id in normalize_string_list(source_ref.get("knowledge_unit_id")):
+            if knowledge_unit_id not in knowledge_unit_ids:
+                knowledge_unit_ids.append(knowledge_unit_id)
+        for evidence_block_id in normalize_string_list(source_ref.get("evidence_block_ids")):
+            if evidence_block_id not in evidence_block_ids:
+                evidence_block_ids.append(evidence_block_id)
+
+    knowledge_units = [
+        knowledge_units_by_id[unit_id]
+        for unit_id in knowledge_unit_ids
+        if unit_id in knowledge_units_by_id
+    ]
+    evidence_blocks = [
+        evidence_blocks_by_id[evidence_id]
+        for evidence_id in evidence_block_ids
+        if evidence_id in evidence_blocks_by_id
+    ]
+
+    section_path_parts: list[str] = []
+    section_title = ""
+    parent_section_path = ""
+    heading_level = 0
+    for source_ref in source_refs:
+        if not isinstance(source_ref, dict):
+            continue
+        if not section_path_parts:
+            section_path_parts = normalize_string_list(source_ref.get("section_path_parts"))
+        if not section_title:
+            section_title = str(source_ref.get("section_title", "")).strip()
+        if not parent_section_path:
+            parent_section_path = str(source_ref.get("parent_section_path", "")).strip()
+        if not heading_level:
+            heading_level = coerce_int(source_ref.get("heading_level", 0), 0)
+
+    if not section_path_parts:
+        for evidence_block in evidence_blocks:
+            section_path_parts = normalize_string_list(evidence_block.get("section_path_parts"))
+            if section_path_parts:
+                break
+    if not section_title and section_path_parts:
+        section_title = section_path_parts[-1]
+    if not parent_section_path and len(section_path_parts) > 1:
+        parent_section_path = " > ".join(section_path_parts[:-1])
+    if not heading_level and section_path_parts:
+        heading_level = len(section_path_parts)
+
+    content_tag_counter: Counter[str] = Counter()
+    semantic_feature_counter: Counter[str] = Counter()
+    semantic_feature_strength_counter: Counter[str] = Counter()
+    unit_kind_counter: Counter[str] = Counter()
+    evidence_kind_counter: Counter[str] = Counter()
+    metadata_key_counter: Counter[str] = Counter()
+    local_headings: list[str] = []
+    seen_content_tag_sources: set[tuple[str, str]] = set()
+
+    for knowledge_unit in knowledge_units:
+        unit_kind = str(knowledge_unit.get("unit_kind", "")).strip()
+        if unit_kind:
+            unit_kind_counter[unit_kind] += 1
+        local_heading = str(knowledge_unit.get("local_heading", "") or "").strip()
+        if local_heading and local_heading not in local_headings:
+            local_headings.append(local_heading)
+        metadata = knowledge_unit.get("metadata", {})
+        if isinstance(metadata, dict):
+            for key in metadata:
+                if str(key).strip():
+                    metadata_key_counter[str(key).strip()] += 1
+        projection = knowledge_unit.get("semantic_projection", {})
+        if isinstance(projection, dict):
+            source_key = first_non_empty_string(
+                normalize_string_list(knowledge_unit.get("evidence_block_ids"))
+                + [knowledge_unit.get("knowledge_unit_id", "")]
+            )
+            for tag in normalize_string_list(projection.get("content_tags")):
+                tag_key = (source_key or f"knowledge_unit:{len(seen_content_tag_sources)}", tag)
+                if tag_key not in seen_content_tag_sources:
+                    seen_content_tag_sources.add(tag_key)
+                    content_tag_counter[tag] += 1
+            for feature in projection.get("semantic_features", []) or []:
+                if not isinstance(feature, dict):
+                    continue
+                tag = str(feature.get("tag", "")).strip()
+                strength = str(feature.get("strength", "")).strip()
+                if tag:
+                    semantic_feature_counter[tag] += 1
+                if strength:
+                    semantic_feature_strength_counter[strength] += 1
+
+    for evidence_block in evidence_blocks:
+        block_kind = str(evidence_block.get("block_kind", "")).strip()
+        if block_kind:
+            evidence_kind_counter[block_kind] += 1
+        local_heading = str(evidence_block.get("local_heading", "") or "").strip()
+        if local_heading and local_heading not in local_headings:
+            local_headings.append(local_heading)
+        metadata = evidence_block.get("metadata", {})
+        if isinstance(metadata, dict):
+            for key in metadata:
+                if str(key).strip():
+                    metadata_key_counter[str(key).strip()] += 1
+        source_key = str(evidence_block.get("evidence_block_id", "")).strip()
+        for tag in normalize_string_list(evidence_block.get("content_tags")):
+            tag_key = (source_key or f"evidence_block:{len(seen_content_tag_sources)}", tag)
+            if tag_key not in seen_content_tag_sources:
+                seen_content_tag_sources.add(tag_key)
+                content_tag_counter[tag] += 1
+        for feature in evidence_block.get("semantic_features", []) or []:
+            if not isinstance(feature, dict):
+                continue
+            tag = str(feature.get("tag", "")).strip()
+            strength = str(feature.get("strength", "")).strip()
+            if tag:
+                semantic_feature_counter[tag] += 1
+            if strength:
+                semantic_feature_strength_counter[strength] += 1
+
+    return {
+        "section_path_parts": section_path_parts,
+        "section_title": section_title,
+        "parent_section_path": parent_section_path,
+        "heading_level": heading_level,
+        "local_headings": local_headings[:5],
+        "unit_kind_counts": sorted_counter_dict(unit_kind_counter),
+        "evidence_block_kind_counts": sorted_counter_dict(evidence_kind_counter),
+        "content_tag_counts": sorted_counter_dict(content_tag_counter),
+        "semantic_feature_counts": sorted_counter_dict(semantic_feature_counter),
+        "semantic_feature_strength_counts": sorted_counter_dict(semantic_feature_strength_counter),
+        "metadata_key_counts": sorted_counter_dict(metadata_key_counter),
+        "source_ref_count": len(source_refs),
+        "knowledge_unit_ids": knowledge_unit_ids[:8],
+        "evidence_block_ids": evidence_block_ids[:12],
+    }
+
+
+def page_intent_group_context(grouped_claims: list[dict]) -> dict:
+    role_counter: Counter[str] = Counter()
+    hint_counter: Counter[str] = Counter()
+    content_tag_counter: Counter[str] = Counter()
+    unit_kind_counter: Counter[str] = Counter()
+    evidence_kind_counter: Counter[str] = Counter()
+    semantic_feature_counter: Counter[str] = Counter()
+    section_counter: Counter[str] = Counter()
+    local_headings: list[str] = []
+
+    for claim_record in grouped_claims:
+        role = claim_knowledge_role(claim_record)
+        if role:
+            role_counter[role] += 1
+        hint_counter.update(claim_page_intent_hints(claim_record))
+
+        context = claim_record.get("structure_context", {})
+        if not isinstance(context, dict):
+            context = {}
+        content_tag_counter.update(dict(context.get("content_tag_counts", {}) or {}))
+        unit_kind_counter.update(dict(context.get("unit_kind_counts", {}) or {}))
+        evidence_kind_counter.update(dict(context.get("evidence_block_kind_counts", {}) or {}))
+        semantic_feature_counter.update(dict(context.get("semantic_feature_counts", {}) or {}))
+        section_path = " > ".join(normalize_string_list(context.get("section_path_parts")))
+        if section_path:
+            section_counter[section_path] += 1
+        for heading in normalize_string_list(context.get("local_headings")):
+            if heading not in local_headings:
+                local_headings.append(heading)
+
+    return {
+        "knowledge_role_counts": sorted_counter_dict(role_counter),
+        "page_intent_hint_counts": sorted_counter_dict(hint_counter),
+        "content_tag_counts": sorted_counter_dict(content_tag_counter),
+        "unit_kind_counts": sorted_counter_dict(unit_kind_counter),
+        "evidence_block_kind_counts": sorted_counter_dict(evidence_kind_counter),
+        "semantic_feature_counts": sorted_counter_dict(semantic_feature_counter),
+        "section_path_counts": sorted_counter_dict(section_counter),
+        "representative_local_headings": local_headings[:8],
+    }
+
+
 def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
     if task_name == "document_analysis":
         records = load_jsonl(target / "state" / "normalized.jsonl")
@@ -1317,6 +1539,7 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
 
     if task_name == "claim_role":
         records = load_jsonl(target / "state" / "claims.jsonl")
+        evidence_blocks_by_id, knowledge_units_by_id = semantic_structure_records_by_id(target)
         items = []
         for record in records:
             claim_id = str(record.get("claim_id", "")).strip()
@@ -1333,12 +1556,18 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
                     "quality_safe_auto_ready": record.get("quality_safe_auto_ready"),
                     "source_ids": record.get("source_ids", []),
                     "source_refs": record.get("source_refs", []),
+                    "structure_context": claim_structure_context(
+                        record,
+                        evidence_blocks_by_id=evidence_blocks_by_id,
+                        knowledge_units_by_id=knowledge_units_by_id,
+                    ),
                 }
             )
         return items
 
     if task_name == "page_intent":
         records = load_jsonl(target / "state" / "claims.jsonl")
+        evidence_blocks_by_id, knowledge_units_by_id = semantic_structure_records_by_id(target)
         groups: dict[str, list[dict]] = {}
         for record in records:
             if record.get("lifecycle_status", "active") != "active":
@@ -1346,7 +1575,13 @@ def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
             bucket_key = build_concept_group_key(record)
             if not bucket_key:
                 continue
-            groups.setdefault(bucket_key, []).append(record)
+            enriched_record = dict(record)
+            enriched_record["structure_context"] = claim_structure_context(
+                record,
+                evidence_blocks_by_id=evidence_blocks_by_id,
+                knowledge_units_by_id=knowledge_units_by_id,
+            )
+            groups.setdefault(bucket_key, []).append(enriched_record)
 
         items = []
         for bucket_key, grouped_claims in sorted(groups.items()):
@@ -1367,13 +1602,14 @@ def normalize_semantic_batch_results(
     hook_result: dict,
     batch_items: list[dict],
     config: SemanticTaskConfig,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     decisions = hook_result.get("decisions", [])
     if not isinstance(decisions, list):
-        return []
+        return [], []
 
     item_map = {str(item.get("item_id")): item for item in batch_items if item.get("item_id")}
     normalized: list[dict] = []
+    skipped: list[dict] = []
     for decision in decisions:
         if not isinstance(decision, dict):
             continue
@@ -1382,6 +1618,25 @@ def normalize_semantic_batch_results(
             continue
         confidence = coerce_float(decision.get("confidence", 0.0), 0.0)
         if confidence < config.min_confidence:
+            skipped.append({
+                "item_id": item_id,
+                "decision_status": "rejected",
+                "reason_code": str(decision.get("reason_code", "")).strip() or "semantic_batch_low_confidence",
+                "confidence": confidence,
+                "risk_flags": ["semantic_decision_low_confidence"],
+            })
+            continue
+        normalized_decision = normalize_semantic_hook_decision(task_name, decision)
+        if normalized_decision["decision_status"] != "accepted":
+            skipped.append({
+                "item_id": item_id,
+                "decision_status": normalized_decision["decision_status"],
+                "reason_code": str(decision.get("reason_code", "")).strip() or "semantic_batch_result",
+                "confidence": confidence,
+                "risk_flags": normalized_decision["risk_flags"],
+                "abstain_reason": normalized_decision["abstain_reason"],
+                "missing_fields": normalized_decision["missing_fields"],
+            })
             continue
         item_payload = item_map[item_id]
         input_fingerprint = fingerprint_payload(
@@ -1396,9 +1651,13 @@ def normalize_semantic_batch_results(
                 "task_type": task_name,
                 "item_type": item_type_for_task(task_name),
                 "item_ids": [item_id],
-                "decision": decision.get("decision"),
+                "decision": normalized_decision["decision"],
+                "decision_status": normalized_decision["decision_status"],
                 "confidence": confidence,
                 "reason_code": str(decision.get("reason_code", "")).strip() or "semantic_batch_result",
+                "risk_flags": normalized_decision["risk_flags"],
+                "supporting_ids": normalized_decision["supporting_ids"],
+                "abstain_reason": normalized_decision["abstain_reason"],
                 "prompt_version": config.prompt_version,
                 "model_key": config.model_key,
                 "schema_version": config.schema_version,
@@ -1407,7 +1666,7 @@ def normalize_semantic_batch_results(
                 "superseded_by": [],
             }
         )
-    return normalized
+    return normalized, skipped
 
 
 def run_semantic_batch_task(
@@ -1458,7 +1717,7 @@ def run_semantic_batch_task(
             payload=payload,
             timeout_seconds=config.timeout_seconds,
         ) if config.enabled else None
-        normalized_results = normalize_semantic_batch_results(task_name, hook_result or {}, batch_items, config)
+        normalized_results, skipped_results = normalize_semantic_batch_results(task_name, hook_result or {}, batch_items, config)
 
         batch_report = {
             "task_name": task_name,
@@ -1466,6 +1725,8 @@ def run_semantic_batch_task(
             "item_ids": [str(item.get("item_id")) for item in batch_items],
             "cached_item_ids": cached_ids,
             "decision_count": len(normalized_results),
+            "skipped_decision_count": len(skipped_results),
+            "skipped_decisions": skipped_results,
             "created_at": utc_now_iso(),
         }
         write_json(
@@ -1555,6 +1816,7 @@ def apply_claim_role_decisions_to_claim_records(
 ) -> list[dict]:
     latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
     claims_by_id = {record["claim_id"]: dict(record) for record in claim_records}
+    evidence_blocks_by_id, knowledge_units_by_id = semantic_structure_records_by_id(target)
     changed = False
 
     for record in claim_records:
@@ -1568,6 +1830,11 @@ def apply_claim_role_decisions_to_claim_records(
             "quality_safe_auto_ready": record.get("quality_safe_auto_ready"),
             "source_ids": record.get("source_ids", []),
             "source_refs": record.get("source_refs", []),
+            "structure_context": claim_structure_context(
+                record,
+                evidence_blocks_by_id=evidence_blocks_by_id,
+                knowledge_units_by_id=knowledge_units_by_id,
+            ),
         }
         fingerprint = fingerprint_payload(
             task_name="claim_role",
@@ -1726,9 +1993,107 @@ def apply_claim_candidate_quality_decisions_to_claim_records(
     return ordered_records, archived_claim_ids, affected_review_ids
 
 
+SPECIALIZED_PAGE_INTENTS = {"guide", "example", "reference", "timeline"}
+PAGE_INTENT_ROLE_SIGNALS = {
+    "guide": {"procedure"},
+    "example": {"example"},
+}
+PAGE_INTENT_CONTENT_TAG_SIGNALS = {
+    "guide": {"procedural_language"},
+    "example": {"cases"},
+    "reference": {"rules"},
+    "timeline": {"temporal_language"},
+}
+PAGE_INTENT_BLOCK_SIGNALS = {
+    "reference": {"table_row", "metadata_line"},
+    "example": {"code_example"},
+}
+
+
+def counter_value(counter_payload: dict, key: str) -> int:
+    if not isinstance(counter_payload, dict):
+        return 0
+    return coerce_int(counter_payload.get(key, 0), 0)
+
+
+def sum_counter_values(counter_payload: dict, keys: set[str]) -> int:
+    return sum(counter_value(counter_payload, key) for key in keys)
+
+
+def page_intent_signal_counts(page_intent: str, item_payload: dict) -> dict[str, int]:
+    group_context = item_payload.get("group_context", {})
+    if not isinstance(group_context, dict):
+        group_context = {}
+    return {
+        "hint_count": counter_value(group_context.get("page_intent_hint_counts", {}), page_intent),
+        "role_count": sum_counter_values(
+            group_context.get("knowledge_role_counts", {}),
+            PAGE_INTENT_ROLE_SIGNALS.get(page_intent, set()),
+        ),
+        "content_tag_count": sum_counter_values(
+            group_context.get("content_tag_counts", {}),
+            PAGE_INTENT_CONTENT_TAG_SIGNALS.get(page_intent, set()),
+        ),
+        "block_count": sum_counter_values(
+            group_context.get("evidence_block_kind_counts", {}),
+            PAGE_INTENT_BLOCK_SIGNALS.get(page_intent, set()),
+        ),
+    }
+
+
+def downgrade_specialized_page_intent(grouped_claims: list[dict]) -> str:
+    return "concept" if should_generate_concept_page(grouped_claims) else "topic"
+
+
+def page_intent_has_enough_group_evidence(page_intent: str, item_payload: dict) -> bool:
+    if page_intent not in SPECIALIZED_PAGE_INTENTS:
+        return True
+    counts = page_intent_signal_counts(page_intent, item_payload)
+    multi_signal_count = counts["hint_count"] + counts["role_count"] + counts["content_tag_count"]
+    return multi_signal_count >= 2 or counts["block_count"] >= 1
+
+
+def validate_page_intent_candidate(
+    page_intent: str,
+    grouped_claims: list[dict],
+    item_payload: dict,
+    decision_record: dict | None,
+    route_reason: str,
+) -> tuple[str, str]:
+    normalized_intent = str(page_intent or "").strip().lower() or "topic"
+    if normalized_intent not in SPECIALIZED_PAGE_INTENTS:
+        return normalized_intent, route_reason
+
+    counts = page_intent_signal_counts(normalized_intent, item_payload)
+    if page_intent_has_enough_group_evidence(normalized_intent, item_payload):
+        return normalized_intent, route_reason
+
+    risk_flags = []
+    decision_content_tags: list[str] = []
+    if isinstance(decision_record, dict):
+        risk_flags = normalize_string_list(decision_record.get("risk_flags"))
+        decision = decision_record.get("decision", {})
+        if isinstance(decision, dict):
+            decision_content_tags = normalize_string_list(decision.get("content_tags"))
+    expected_content_tags = PAGE_INTENT_CONTENT_TAG_SIGNALS.get(normalized_intent, set())
+    decision_tag_signal = bool(expected_content_tags & set(decision_content_tags))
+    source_is_strong = (
+        decision_record is not None
+        and "strong_" in str(route_reason)
+        and not any("ambiguous" in flag for flag in risk_flags)
+    )
+    has_any_signal = any(count > 0 for count in counts.values())
+    if source_is_strong and (has_any_signal or decision_tag_signal):
+        return normalized_intent, route_reason
+
+    downgraded_intent = downgrade_specialized_page_intent(grouped_claims)
+    return downgraded_intent, f"page_intent_validation_downgraded_{normalized_intent}_insufficient_group_evidence"
+
+
 def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
     if not grouped_claims:
         return "reject"
+    item_payload = build_page_intent_item_payload("heuristic_bucket", grouped_claims)
     hint_counts: Counter[str] = Counter()
     for claim_record in grouped_claims:
         for hint in claim_page_intent_hints(claim_record):
@@ -1736,8 +2101,13 @@ def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
             if normalized_hint:
                 hint_counts[normalized_hint] += 1
     for preferred in ("reject", "timeline", "reference", "guide", "example", "concept", "topic"):
-        if hint_counts.get(preferred):
-            return preferred
+        if not hint_counts.get(preferred):
+            continue
+        if preferred in SPECIALIZED_PAGE_INTENTS and not page_intent_has_enough_group_evidence(preferred, item_payload):
+            continue
+        if preferred == "reject" and hint_counts[preferred] < len(grouped_claims):
+            continue
+        return preferred
     return "concept" if should_generate_concept_page(grouped_claims) else "topic"
 
 
@@ -1776,6 +2146,7 @@ def build_page_intent_item_payload(bucket_key: str, grouped_claims: list[dict]) 
         "claim_texts": preview_texts,
         "claim_count": len(claim_ids),
         "claim_semantics": claim_semantics,
+        "group_context": page_intent_group_context(ordered_claims),
     }
 
 
@@ -1785,11 +2156,21 @@ def apply_page_intent_decisions_to_claim_groups(
     task_config: SemanticTaskConfig,
 ) -> dict[str, dict]:
     latest_decisions = build_latest_semantic_decisions_by_fingerprint(load_semantic_decisions(target))
+    evidence_blocks_by_id, knowledge_units_by_id = semantic_structure_records_by_id(target)
     page_routes: dict[str, dict] = {}
     new_route_decisions: list[dict] = []
 
     for bucket_key, grouped_claims in concept_claim_groups.items():
-        item_payload = build_page_intent_item_payload(bucket_key, grouped_claims)
+        enriched_grouped_claims = []
+        for record in grouped_claims:
+            enriched_record = dict(record)
+            enriched_record["structure_context"] = claim_structure_context(
+                record,
+                evidence_blocks_by_id=evidence_blocks_by_id,
+                knowledge_units_by_id=knowledge_units_by_id,
+            )
+            enriched_grouped_claims.append(enriched_record)
+        item_payload = build_page_intent_item_payload(bucket_key, enriched_grouped_claims)
         fingerprint = fingerprint_payload(
             task_name="page_intent",
             item_payloads=[item_payload],
@@ -1811,6 +2192,13 @@ def apply_page_intent_decisions_to_claim_groups(
             page_intent = choose_bucket_page_intent(grouped_claims)
 
         original_page_intent = page_intent
+        page_intent, route_reason = validate_page_intent_candidate(
+            page_intent=page_intent,
+            grouped_claims=grouped_claims,
+            item_payload=item_payload,
+            decision_record=decision_record,
+            route_reason=route_reason,
+        )
         if page_intent == "topic" and should_generate_concept_page(grouped_claims):
             page_intent = "concept"
             route_reason = "topic_promoted_to_concept_by_claim_group"
@@ -4473,6 +4861,92 @@ def normalize_list_item_text(text: str) -> str:
     return strip_markdown_inline_formatting(cleaned)
 
 
+def append_semantic_feature(
+    features: list[dict],
+    tag: str,
+    category: str,
+    strength: str,
+    evidence: str,
+) -> None:
+    feature = {
+        "tag": tag,
+        "category": category,
+        "strength": strength,
+        "evidence": evidence,
+    }
+    if feature not in features:
+        features.append(feature)
+
+
+def semantic_features_for_evidence(
+    text: str,
+    block_kind: str,
+    metadata: dict,
+    section_path_parts: list[str],
+    local_heading: str | None,
+) -> list[dict]:
+    features: list[dict] = []
+    combined_context = " ".join([
+        *[str(item) for item in section_path_parts],
+        str(local_heading or ""),
+        text,
+    ])
+
+    if block_kind in {"table_row", "metadata_line"}:
+        append_semantic_feature(features, "rules", "structure", "strong", block_kind)
+        append_semantic_feature(features, "reference_structure", "structure", "strong", block_kind)
+    if block_kind == "code_example":
+        append_semantic_feature(features, "cases", "structure", "strong", block_kind)
+        append_semantic_feature(features, "example_structure", "structure", "strong", block_kind)
+    if block_kind == "list_item_with_body":
+        append_semantic_feature(features, "local_heading_body", "structure", "medium", block_kind)
+
+    cells = metadata.get("cells") if isinstance(metadata, dict) else None
+    if isinstance(cells, list) and len([cell for cell in cells if str(cell).strip()]) >= 2:
+        append_semantic_feature(features, "reference_structure", "structure", "strong", "table_cells")
+
+    if isinstance(metadata, dict):
+        metadata_keys = [str(key).strip() for key in metadata if str(key).strip() and key != "cells"]
+        if metadata_keys:
+            append_semantic_feature(features, "metadata_fact", "structure", "strong", "metadata_keys")
+
+    if any(marker in combined_context for marker in ("案例：", "示例：", "场景：")):
+        append_semantic_feature(features, "cases", "text_pattern", "strong", "explicit_example_label")
+    elif "案例" in combined_context:
+        append_semantic_feature(features, "cases", "text_pattern", "weak", "case_marker")
+
+    if any(marker in combined_context for marker in ("规则清单", "参数列表", "字段表", "配置项", "FAQ")):
+        append_semantic_feature(features, "rules", "text_pattern", "strong", "reference_label")
+    elif "规则" in combined_context:
+        append_semantic_feature(features, "rules", "text_pattern", "weak", "rule_marker")
+
+    if any(marker in combined_context for marker in ("步骤", "首先", "然后", "最后", "第一步", "第二步", "第三步", "流程", "方法")):
+        append_semantic_feature(features, "procedural_language", "text_pattern", "medium", "procedure_marker")
+    if any(marker in combined_context for marker in ("时间线", "起初", "随后", "后来", "历程", "演变")):
+        append_semantic_feature(features, "temporal_language", "text_pattern", "medium", "temporal_marker")
+    if "培训" in combined_context:
+        append_semantic_feature(features, "training", "text_pattern", "weak", "training_marker")
+    if "指标" in combined_context or "数据" in combined_context:
+        append_semantic_feature(features, "metrics", "text_pattern", "weak", "metrics_marker")
+
+    return features
+
+
+def content_tags_from_semantic_features(features: list[dict]) -> list[str]:
+    structure_only_tags = {"local_heading_body", "metadata_fact", "reference_structure", "example_structure"}
+    tags: list[str] = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        tag = str(feature.get("tag", "")).strip()
+        category = str(feature.get("category", "")).strip()
+        if category == "structure" or tag in structure_only_tags:
+            continue
+        if tag and tag not in tags:
+            tags.append(tag)
+    return sorted(tags)
+
+
 def build_evidence_blocks_from_structure(structure_blocks: list[dict]) -> list[dict]:
     evidence_blocks: list[dict] = []
 
@@ -4489,7 +4963,6 @@ def build_evidence_blocks_from_structure(structure_blocks: list[dict]) -> list[d
         text = str(block.get("text", "")).strip()
         local_heading = None
         metadata = dict(block.get("attributes", {}))
-        content_tags: list[str] = []
         extraction_hint = "single_structure_block"
 
         if block_type == "heading":
@@ -4530,20 +5003,18 @@ def build_evidence_blocks_from_structure(structure_blocks: list[dict]) -> list[d
             block_kind = "metadata_line" if metadata and len(metadata) == 1 else "paragraph"
             extraction_hint = "metadata_extracted_from_paragraph" if block_kind == "metadata_line" else "paragraph_as_evidence"
 
-        if "案例" in text:
-            content_tags.append("cases")
-        if "规则" in text:
-            content_tags.append("rules")
-        if "培训" in text:
-            content_tags.append("training")
-        if "指标" in text or "数据" in text:
-            content_tags.append("metrics")
-
         start_line = min(item["start_line"] for item in structure_group)
         end_line = max(item["end_line"] for item in structure_group)
         structure_block_ids = [item["structure_block_id"] for item in structure_group]
         evidence_id = build_evidence_block_id(block["source_id"], structure_block_ids, start_line, text)
         heading_path_parts = block.get("heading_path_parts", [])
+        semantic_features = semantic_features_for_evidence(
+            text=text,
+            block_kind=block_kind,
+            metadata=metadata,
+            section_path_parts=heading_path_parts,
+            local_heading=local_heading,
+        )
         evidence_blocks.append({
             "evidence_block_id": evidence_id,
             "source_id": block["source_id"],
@@ -4559,7 +5030,8 @@ def build_evidence_blocks_from_structure(structure_blocks: list[dict]) -> list[d
             "start_line": start_line,
             "end_line": end_line,
             "metadata": metadata,
-            "content_tags": sorted(set(content_tags)),
+            "semantic_features": semantic_features,
+            "content_tags": content_tags_from_semantic_features(semantic_features),
             "extraction_hint": extraction_hint,
             "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "created_at": utc_now_iso(),
@@ -4625,6 +5097,7 @@ def build_knowledge_units_from_evidence(evidence_blocks: list[dict]) -> list[dic
             "semantic_decision_ids": [],
             "semantic_projection": {
                 "content_tags": evidence_block.get("content_tags", []),
+                "semantic_features": evidence_block.get("semantic_features", []),
             },
             "created_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
@@ -8132,6 +8605,35 @@ def page_semantic_consistency_issues(page_record: dict, claim_records_by_id: dic
         if roles and roles.issubset({"meta", "structural_shell"}):
             issues.append(f"timeline_page_semantically_thin:{','.join(sorted(roles))}")
 
+    return issues
+
+
+def page_intent_brake_issues(page_record: dict) -> list[str]:
+    page_route = page_record.get("page_route", {}) if isinstance(page_record.get("page_route"), dict) else {}
+    route_reason = str(page_route.get("route_reason", "")).strip()
+    if route_reason.startswith("page_intent_validation_downgraded_"):
+        return [route_reason]
+    return []
+
+
+def claim_semantic_risk_issues(
+    claim_record: dict,
+    semantic_decisions_by_id: dict[str, dict],
+) -> list[str]:
+    issues: list[str] = []
+    if not is_live_claim_record(claim_record):
+        return issues
+    if claim_record.get("status") == "needs_review" or claim_record.get("review_reason"):
+        return issues
+    for decision_id in claim_record.get("semantic_decision_ids", []) or []:
+        decision_record = semantic_decisions_by_id.get(str(decision_id))
+        if not decision_record or decision_record.get("task_type") != "claim_role":
+            continue
+        risk_flags = normalize_string_list(decision_record.get("risk_flags"))
+        ambiguous_flags = sorted(flag for flag in risk_flags if "ambiguous" in flag)
+        if ambiguous_flags:
+            issues.append(f"{claim_record.get('claim_id')}:{','.join(ambiguous_flags)}")
+            break
     return issues
 
 
@@ -14882,6 +15384,12 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
             )
 
         claim_records = load_jsonl(target / "state" / "claims.jsonl") if (target / "state" / "claims.jsonl").exists() else []
+        semantic_decision_records = load_semantic_decisions(target) if semantic_decisions_path(target).exists() else []
+        semantic_decisions_by_id = {
+            str(record.get("decision_id", "")).strip(): record
+            for record in semantic_decision_records
+            if str(record.get("decision_id", "")).strip()
+        }
         if claim_records:
             claim_records = [ensure_claim_lifecycle_defaults(record) for record in claim_records]
             live_claim_records = filter_live_claim_records(claim_records)
@@ -14910,6 +15418,25 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 name="historical_claims_not_live",
                 ok=all(record.get("lifecycle_status") in {"superseded", "archived"} for record in historical_claim_records),
                 details="Historical claim records should not remain in active lifecycle state.",
+            )
+            claim_semantic_risk_issues_by_id = {
+                record["claim_id"]: claim_semantic_risk_issues(record, semantic_decisions_by_id)
+                for record in live_claim_records
+            }
+            claim_semantic_risk_issues_by_id = {
+                claim_id: issues
+                for claim_id, issues in claim_semantic_risk_issues_by_id.items()
+                if issues
+            }
+            claim_semantic_risk_preview = ", ".join(
+                issues[0]
+                for issues in list(claim_semantic_risk_issues_by_id.values())[:8]
+            ) or "No live claims carry unreviewed ambiguous semantic decision risk flags."
+            add_check(
+                name="claim_semantic_risk_flags_reviewed",
+                ok=len(claim_semantic_risk_issues_by_id) == 0,
+                details=claim_semantic_risk_preview,
+                severity="warning",
             )
 
         review_records = load_jsonl(target / "state" / "reviews.jsonl") if (target / "state" / "reviews.jsonl").exists() else []
@@ -15115,6 +15642,25 @@ def command_lint(args: argparse.Namespace) -> CommandResult:
                 name="page_semantic_consistency",
                 ok=len(semantic_consistency_issues) == 0,
                 details=semantic_consistency_preview,
+                severity="warning",
+            )
+            page_brake_issues = {
+                record["page_id"]: page_intent_brake_issues(record)
+                for record in live_page_records
+            }
+            page_brake_issues = {
+                page_id: issues
+                for page_id, issues in page_brake_issues.items()
+                if issues
+            }
+            page_brake_preview = ", ".join(
+                f"{page_id}:{'/'.join(issues[:2])}"
+                for page_id, issues in list(page_brake_issues.items())[:8]
+            ) or "No live pages were routed through semantic page-intent downgrade brakes."
+            add_check(
+                name="semantic_page_intent_brakes_reviewed",
+                ok=len(page_brake_issues) == 0,
+                details=page_brake_preview,
                 severity="warning",
             )
 

@@ -15,7 +15,7 @@
 当你主要关心下面这些问题时，再读本文档：
 
 - 为什么不能只在概念页生成末端补几个标题过滤规则
-- 为什么要把 `document analysis / claim role / page intent` 拆成正式语义分析阶段
+- 为什么要把 `document analysis / claim candidate quality / claim role / page intent / page route` 拆成正式语义分析阶段
 - 为什么语义决策必须独立成账本
 - 为什么 LLM 要优先批处理，而不是单条高频调用
 - 为什么 grounded 改写只能发生在证据和页型已经确定之后
@@ -64,10 +64,14 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 这意味着 LLM 最适合做的是：
 
 - 文档结构判定
+- 短句候选质量判定
 - Claim 角色判定
 - 页面意图判定
+- 页面路由复核
 - 灰区候选的 accept / reject / rename / reroute
 - grounded 的可读化改写
+
+当前实现里，真实 LLM 接入不直接依赖某个云 API，而是通过 CLI-first 的 `myagentwiki.agent_cli_hook` 调用 Codex 或 Claude Code。默认工作区仍使用包内保守 `agent_hook`，因此没有登录 CLI、模型不可用、超时或输出无法解析时，系统会回退到保守路径，而不是中断 `ingest`。
 
 ### 3. 语义分析应该作为正式阶段，而不是零散 hook
 
@@ -87,6 +91,9 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 能用脚本稳定解决的问题，不交给 LLM
 - 只有在字符串规则不足以可靠判定语义角色时，才进入 LLM 灰区
 - 不能因为 LLM 看起来更灵活，就把本可确定的事情交给模型
+- Markdown 结构、Evidence Block、Knowledge Unit、section path、表格行、局部标题等结构证据优先于局部关键词
+
+中文文档尤其不能让单个词一票决定语义角色。`案例 / 规则 / 历史 / 如何 / 用于` 等词只应提供弱特征或风险提示；只有当句式、结构、组级上下文共同支持时，才应升级为 `example / reference / timeline / guide / concept` 等页型信号。
 
 短句 / 短 claim 是典型灰区：
 
@@ -123,6 +130,16 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 便于缓存、重试和预算管理
 - 便于后续统一审计与回放
 
+当前已落地的语义批处理任务包括：
+
+- `document_analysis`
+- `claim_candidate_quality`
+- `claim_role`
+- `page_intent`
+- `page_route`
+
+批处理 payload 会携带 `structure_context / group_context / semantic_features / source_refs / evidence ids` 等结构信息，提示词也明确要求优先使用结构证据，不要对中文关键词做一票判定。
+
 ### 语义账本与证据账本必须分离
 
 证据层负责回答“材料里有什么”。
@@ -153,17 +170,20 @@ LLM 只能在已有 `normalized / chunks / claims / pages / reviews` 证据上�
 
 ## 与当前实现最相关的专题结论
 
-### 1. `document analysis / claim role / page intent` 应视为同一条语义主链
+### 1. `document analysis / claim candidate quality / claim role / page intent / page route` 应视为同一条语义主链
 
 不要把它们理解为互不相关的局部优化。
 
-这三者共同决定：
+这些阶段共同决定：
 
 - 文档怎么切
+- 短 claim 是否值得保留
 - Claim 怎么分类
 - 页面怎么路由
 
-如果前两步没收口，第三步再聪明也会不断被噪声拖累。
+如果前几步没收口，页面路由再聪明也会不断被噪声拖累。
+
+当前实现中，`page_intent` 不是单条 claim 的即时反应，而是 claim group 级判断；`page_route` 进一步把最终 `route_target / route_reason / rejected_alternatives` 写成可回放语义决策。
 
 ### 2. `review-auto` 和 `stable promotion` 本质上也属于语义协同链的一部分
 
@@ -189,9 +209,10 @@ LLM 只能在已有 `normalized / chunks / claims / pages / reviews` 证据上�
 
 若后续需要继续完善本专题稿，建议只沿这几个方向补充：
 
-- 各类语义分析阶段的输入 schema 与输出 schema
-- 批调度器如何分桶、分片、缓存和重试
+- 各类语义分析阶段的输入 schema 与输出 schema 的稳定化说明
+- 批调度器如何分桶、分片、缓存、重试和预算控制
 - `abstain` 与 fallback 的标准协议
 - 语义决策如何参与 lint、review 和 page rebuild
+- 如何把 warning 级 semantic brakes 展示给用户，而不是只留在 JSON / lint report
 
 如果要修改系统主流程、主术语、主数据模型或主边界，请优先更新主文档，而不是先改这里。

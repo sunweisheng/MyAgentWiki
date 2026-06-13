@@ -1210,12 +1210,29 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 - 生成 `page_intent_hints`
 - 给出 `concept_candidate_score`
 - 给出内容标签 `content_tags`
+- 给出可审计的 `risk_flags / reason_code / supporting_ids`
 
 原因：
 
 如果不在这里先做角色判定，页面生成阶段就只能反复从局部文本猜语义，越写越补丁化。
 
 关键词只能作为弱特征，不应作为最终判定。例如“案例”可以增加 `cases` 标签，但不能单独把页面路由为 `example`；“规则”可以增加 `rules` 标签，但不能单独把页面路由为 `reference`。
+
+当前实现已将 `claim_role` 的批处理输入扩展为结构优先 payload。每条 claim 除文本外，还会带上：
+
+- `structure_context.section_path_parts / section_title / parent_section_path / local_headings`
+- `unit_kind_counts / evidence_block_kind_counts / metadata_key_counts`
+- `content_tag_counts / semantic_feature_counts / semantic_feature_strength_counts`
+- `knowledge_unit_ids / evidence_block_ids / source_refs`
+
+默认保守 hook 会优先读取这些结构证据。例如 Markdown 表格行可以作为强 `reference` 证据，代码示例块可以作为强 `example` 证据；但普通中文冒号句或局部关键词不会直接压过正文语义。
+
+对中文高风险词，当前实现采用“强模式 + 负面语境 + risk flag”的保守策略：
+
+- `案例：... / 示例：... / 输入-过程-结果` 才能强支撑 `example`
+- `参数表 / 字段表 / 配置表 / Markdown 表格行` 才能强支撑 `reference`
+- `起初 / 随后 / 后来` 等组级连续演进结构才强支撑 `timeline`
+- `案例库 / 产品规则 / 历史数据 / 如何` 等语境会生成 `ambiguous_*` 风险标记，而不是一票决定页型
 
 这些结果的权威归属是 SemanticDecision。Knowledge Unit / Claim 只能保存投影字段或 `semantic_decision_id`，不能把语义判断伪装成证据字段。
 
@@ -1240,6 +1257,15 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 因此“包含案例”不等于“这是案例页”，“包含规则”不等于“这是参考页”，“包含步骤”不等于“这是指南页”。
 
 页面路由结果必须写入 SemanticDecision 或等价语义账本，至少保留 `page_intent / route_target / route_reason / supporting_unit_ids / rejected_alternatives`。页面 frontmatter 可以保存路由投影，但不能成为路由判断的唯一权威来源。
+
+当前实现已将 `page_intent` 改为 claim group 级判断。输入 payload 包含 `claim_semantics` 与 `group_context`，其中 `group_context` 汇总了角色分布、page intent hint 分布、结构块类型、内容标签、语义特征和章节路径。页面路由还会经过二次校验：
+
+- 单条 specialized hint 不足以生成 `guide / example / reference / timeline`
+- specialized 页型需要组级角色、内容标签或结构证据支撑
+- 证据不足时降级为 `topic`，再由概念条件决定是否提升为 `concept`
+- 降级原因会写入 route reason，例如 `page_intent_validation_downgraded_*`
+
+这使系统可以在同一批中文资料中同时生成流程指南、案例复盘、参数参考、时间线、普通概念页和歧义工作记录，而不会因局部关键词把页面分散到错误目录。
 
 #### grounded 改写
 
@@ -1273,6 +1299,18 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 4. 脚本负责校验 schema、对象存在性、来源回链、span 覆盖、字段枚举、状态机约束和 grounded 约束
 5. 校验通过后，脚本写入 KnowledgeUnit、Claim、SemanticDecision、ReviewItem 或 Page projection
 6. 校验失败时，脚本必须记录 rejected proposal 或 lint 诊断，不能静默丢弃
+
+当前语义任务契约已覆盖：
+
+- `document_analysis`
+- `claim_candidate_quality`
+- `claim_role`
+- `page_intent`
+- `page_route`
+
+每类任务都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch` 会把缺字段、低置信度、`abstain` 或 malformed 输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
+
+真实 LLM 接入采用 CLI-first 策略。默认工作区模板仍使用包内保守 `myagentwiki.agent_hook`；如果需要让 Codex 或 Claude Code 调用真实模型，可把具体 semantic task 的 command 改为 `python3 -m myagentwiki.agent_cli_hook`。该 hook 会将 payload 包装为结构优先提示词，并要求返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
 
 LLM 必须允许放弃判断：
 
@@ -1838,6 +1876,8 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 已能检查工作区目录结构、状态文件、核心 ID 唯一性、Claim / Page / Review 基础追踪关系
 - 已能检查 `canonical_id` 唯一性、alias registry 覆盖情况、search index 覆盖情况
 - 已新增概念页标题质量 warning，用来显式暴露“结构词标题、过短标题、问句壳标题”等问题
+- 已新增语义风险 warning，用来暴露 claim 级 `ambiguous_*` 风险标记和 page intent 降级刹车
+- 已能检查 page type、page intent、page route 与 claim role / intent hints 的一致性
 
 ### 测试设计重点
 
@@ -1857,6 +1897,8 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `page -> claim -> knowledge_unit -> evidence_block -> source` 追踪链
 - query 权重与意图路由
 - 语义批处理与语义账本
+- 真实 LLM CLI hook 的 prompt / schema / 输出解析 / fallback
+- 中文多文档类型混合导入时的结构优先页面路由
 - review 六种动作与恢复闭环
 - lint 报告与非可重试错误分流
 - Windows、macOS、Linux 的基础兼容约束
@@ -1867,6 +1909,8 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 负责人、日期、人数、标签、岗位人数等进入 metadata，并按规则生成可检索事实
 - 同一结构用途的章节不会因为局部“规则 / 案例 / 清单”分散到不同页面目录
 - raw / normalized 到 Evidence Block、Knowledge Unit、Claim 的覆盖报告能区分有意跳过和疑似漏抽
+- `案例库 / 产品规则 / 历史数据` 等中文歧义词不会一票触发 specialized page type
+- 真正的案例复盘、参数表、流程指南、演进时间线仍能进入对应页型
 
 当前仓库已落地的代表性测试包括：
 
@@ -1875,6 +1919,11 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `tests/test_claim_extraction.py`：Claim 抽取测试
 - `tests/test_review_detection.py`：审核候选检测测试
 - `tests/test_query_alias_and_lint.py`：查询、别名与 lint 测试
+- `tests/test_semantic_batch.py`：语义批处理、缓存、结构上下文与页面路由重算测试
+- `tests/test_agent_cli_hook.py`：Codex / Claude Code CLI hook 的 prompt、schema 与解析测试
+- `tests/test_page_intent_routing.py`：结构优先页型路由与中文歧义词回归测试
+- `tests/test_claim_role_concept_filter.py`：claim role 对概念候选过滤和结构化参考证据的测试
+- `tests/test_structure_knowledge_pipeline.py`：Structure IR、Evidence Block、Knowledge Unit 与 semantic features 测试
 - `tests/test_e2e_workflow.py`：端到端主闭环测试
 - `scripts/validate_workflow.py`：交付级工作流烟雾验证脚本
 
@@ -1885,20 +1934,23 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 统一 CLI 骨架与主命令入口
 - 工作区初始化、模板生成、Git 基线提交
 - 多格式标准化及部分降级路径
-- Chunk、Claim、早期自动页生成，以及较新的可读 `concept / overview` 页面基础
+- Structure IR、Evidence Block、Knowledge Unit、Chunk、Claim 与页面生成主链路
 - alias registry、search index、`reading_pack`
 - Claim review 与 alias conflict review
 - `review-apply` 之后的页面、索引、状态收口
 - lint 与 lint 报告
+- `semantic/` 目录、`state/semantic_decisions.jsonl`、semantic batch 缓存与任务契约
+- `document_analysis / claim_candidate_quality / claim_role / page_intent / page_route` 五类语义批处理阶段
+- `structure_context / group_context / semantic_features` 已进入语义批处理 payload
+- `agent_cli_hook` 已支持通过 Codex / Claude Code CLI 调用真实 LLM
+- `concept / guide / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
 - 覆盖主闭环的端到端和关键回归测试
 
 ### 当前仍在继续重构和收口的部分
 
-- `semantic/` 目录与正式 `semantic_decisions` 账本的全面收口
-- Markdown Structure IR、Evidence Block、Knowledge Unit 三层对象的正式落地
-- document analysis / structure review / knowledge unit / claim role / page intent 五类批量语义分析阶段
-- `abstain / prompt_version / schema_version` 等语义协议
-- 页面族谱继续收敛为 `concept / guide / example / topic / duty / role / timeline / reference / overview / source-summary`
+- 结构覆盖率报告和漏抽 lint 的进一步补齐
+- `duty / role` 等更细页面族谱是否独立成正式页型
+- `content_tags / semantic_features` 是否稳定进入 page frontmatter
 - `source-summary` 从默认回收页收缩为来源入口视图
 - Claim 从“候选知识对象总称”收缩为 Knowledge Unit 的稳定事实子集
 - 更细粒度的日志系统

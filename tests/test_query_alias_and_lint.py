@@ -1907,6 +1907,49 @@ def test_lint_warns_on_page_semantic_consistency_conflicts(tmp_path: Path) -> No
     assert "page_type_intent_mismatch" in checks["page_semantic_consistency"]["details"]
 
 
+def test_lint_warns_on_semantic_page_intent_downgrade_brakes(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "ambiguous.md").write_text(
+        "# 项目复盘\n\n"
+        "团队整理历史数据用于分析转化趋势。\n\n"
+        "我们沉淀案例库，方便新人学习常见问题。\n\n"
+        "产品规则在这次迭代中需要继续完善。\n\n"
+        "这个说明用于帮助团队理解背景。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "LintSemanticBrakes",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    pages_path = workspace_dir / "state" / "pages.jsonl"
+    page_records = load_jsonl(pages_path)
+    live_semantic_page = next(
+        record
+        for record in page_records
+        if not record.get("removed") and record.get("type") in {"concept", "topic"}
+    )
+    live_semantic_page.setdefault("page_route", {})
+    live_semantic_page["page_route"]["route_reason"] = "page_intent_validation_downgraded_reference_insufficient_group_evidence"
+    pages_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli("lint", "--target-dir", str(workspace_dir))
+    checks = {item["name"]: item for item in result["checks"]}
+    assert checks["semantic_page_intent_brakes_reviewed"]["ok"] is False
+    assert "page_intent_validation_downgraded" in checks["semantic_page_intent_brakes_reviewed"]["details"]
+    assert checks["claim_semantic_risk_flags_reviewed"]["ok"] is False
+    assert "ambiguous_" in checks["claim_semantic_risk_flags_reviewed"]["details"]
+
+
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
     # 初始化后的工作区应该直接带 alias registry，占位也好过缺文件。
     source_dir = tmp_path / "raw"

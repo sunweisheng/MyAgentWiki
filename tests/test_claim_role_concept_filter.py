@@ -96,3 +96,81 @@ def test_claim_role_can_promote_short_definition_with_quality_clearance(tmp_path
     target_claim = next(record for record in claim_records if record.get("text") == "用于保留回链")
     assert target_claim.get("quality_decision_source") == "semantic_batch"
     assert target_claim.get("knowledge_role") == "definition"
+
+
+def test_claim_role_does_not_promote_ambiguous_chinese_markers(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "ambiguous.md").write_text(
+        "# 项目复盘\n\n"
+        "团队整理历史数据用于分析转化趋势。\n\n"
+        "我们沉淀案例库，方便新人学习常见问题。\n\n"
+        "产品规则在这次迭代中需要继续完善。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "AmbiguousClaimRole",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    by_text = {record.get("text"): record for record in claim_records}
+
+    history_claim = by_text["团队整理历史数据用于分析转化趋势"]
+    assert history_claim.get("knowledge_role") == "fact"
+    assert history_claim.get("page_intent_hints") == ["topic"]
+
+    case_claim = by_text["我们沉淀案例库，方便新人学习常见问题"]
+    assert case_claim.get("knowledge_role") == "fact"
+    assert case_claim.get("page_intent_hints") == ["topic"]
+
+    rules_claim = by_text["产品规则在这次迭代中需要继续完善"]
+    assert rules_claim.get("knowledge_role") == "fact"
+    assert rules_claim.get("page_intent_hints") == ["topic"]
+
+    semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
+    role_records = [
+        record for record in semantic_records
+        if record.get("task_type") == "claim_role"
+    ]
+    assert any("ambiguous_case_keyword" in record.get("risk_flags", []) for record in role_records)
+    assert any("ambiguous_reference_keyword" in record.get("risk_flags", []) for record in role_records)
+
+
+def test_claim_role_uses_structure_evidence_for_reference(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "reference.md").write_text(
+        "# 配置参考\n\n"
+        "| 字段 | 值 |\n"
+        "| --- | --- |\n"
+        "| timeout_seconds | 45 |\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "StructuredReferenceRole",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    table_claim = next(record for record in claim_records if "timeout_seconds" in record.get("text", ""))
+    assert table_claim.get("knowledge_role") == "fact"
+    assert table_claim.get("page_intent_hints") == ["reference"]

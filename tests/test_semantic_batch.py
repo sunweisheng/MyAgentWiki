@@ -6,7 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from myagentwiki.cli import load_semantic_task_config, load_workspace_config
+from myagentwiki.cli import (
+    collect_semantic_task_items,
+    load_semantic_task_config,
+    load_workspace_config,
+    normalize_semantic_batch_results,
+)
 from myagentwiki.semantic import build_semantic_decision_id, fingerprint_payload
 
 
@@ -66,6 +71,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     assert 'schema_version: "v1"' in config_text
     assert "workspace:" in config_text
     assert "semantic:" in config_text
+    assert "agent_cli_hook:" in config_text
     assert "batch_scheduler:" in config_text
     assert "document_analysis:" in config_text
     assert "claim_candidate_quality:" in config_text
@@ -116,6 +122,10 @@ def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:
         if record.get("task_type") == "claim_role"
     ]
     assert claim_role_decisions
+    assert all(record.get("decision_status") == "accepted" for record in claim_role_decisions)
+    assert all("risk_flags" in record for record in claim_role_decisions)
+    assert all("supporting_ids" in record for record in claim_role_decisions)
+    assert all("abstain_reason" in record for record in claim_role_decisions)
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     projected_claims = [
         record for record in claim_records
@@ -137,6 +147,142 @@ def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:
     second = run_cli("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir))
     assert second["summary"]["cache_hits"] >= 1
     assert second["summary"]["written_decision_count"] == 0
+
+
+def test_semantic_batch_contract_skips_abstain_and_malformed_decisions(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "notes.md").write_text("# 笔记\n\n系统需要保留来源回链。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "SemanticContract",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    config = load_semantic_task_config(load_workspace_config(workspace_dir), "claim_role")
+    batch_items = [
+        {
+            "item_id": "claim-accepted",
+            "claim_id": "claim-accepted",
+            "text": "系统需要保留来源回链。",
+        },
+        {
+            "item_id": "claim-abstain",
+            "claim_id": "claim-abstain",
+            "text": "来源回链。",
+        },
+        {
+            "item_id": "claim-malformed",
+            "claim_id": "claim-malformed",
+            "text": "示例文本。",
+        },
+    ]
+    normalized, skipped = normalize_semantic_batch_results(
+        "claim_role",
+        {
+            "decisions": [
+                {
+                    "item_id": "claim-accepted",
+                    "decision": {
+                        "knowledge_role": "fact",
+                        "page_intent_hints": ["topic"],
+                        "concept_candidate_score": 0.45,
+                    },
+                    "confidence": config.min_confidence,
+                    "reason_code": "test_contract_accept",
+                    "risk_flags": ["ambiguous_chinese_marker"],
+                    "supporting_ids": ["evidence-1"],
+                },
+                {
+                    "item_id": "claim-abstain",
+                    "decision": "abstain",
+                    "confidence": config.min_confidence,
+                    "reason_code": "test_contract_abstain",
+                    "abstain_reason": "insufficient_context",
+                },
+                {
+                    "item_id": "claim-malformed",
+                    "decision": {"knowledge_role": "fact"},
+                    "confidence": config.min_confidence,
+                    "reason_code": "test_contract_missing_fields",
+                },
+            ],
+        },
+        batch_items,
+        config,
+    )
+
+    assert [record["item_ids"] for record in normalized] == [["claim-accepted"]]
+    accepted = normalized[0]
+    assert accepted["decision_status"] == "accepted"
+    assert accepted["risk_flags"] == ["ambiguous_chinese_marker"]
+    assert accepted["supporting_ids"] == ["evidence-1"]
+    assert accepted["abstain_reason"] == ""
+    assert {record["item_id"] for record in skipped} == {"claim-abstain", "claim-malformed"}
+    malformed = next(record for record in skipped if record["item_id"] == "claim-malformed")
+    assert malformed["decision_status"] == "rejected"
+    assert "semantic_decision_missing_required_fields" in malformed["risk_flags"]
+    assert sorted(malformed["missing_fields"]) == ["concept_candidate_score", "page_intent_hints"]
+
+
+def test_semantic_batch_items_include_structure_context(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "ops.md").write_text(
+        "# 运营手册\n\n"
+        "## 支付问题\n\n"
+        "- **渠道故障案例复盘**\n\n"
+        "对典型故障案例进行复盘，沉淀处理流程。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "SemanticStructureContext",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_role_items = collect_semantic_task_items(workspace_dir, "claim_role")
+    target_item = next(
+        item for item in claim_role_items
+        if "典型故障案例" in item.get("text", "")
+    )
+    structure_context = target_item["structure_context"]
+    assert structure_context["section_path_parts"] == ["运营手册", "支付问题"]
+    assert structure_context["section_title"] == "支付问题"
+    assert structure_context["local_headings"] == ["渠道故障案例复盘"]
+    assert structure_context["unit_kind_counts"] == {"statement": 1}
+    assert structure_context["evidence_block_kind_counts"] == {"list_item_with_body": 1}
+    assert structure_context["content_tag_counts"] == {"cases": 1, "procedural_language": 1}
+    assert structure_context["semantic_feature_counts"]["cases"] >= 1
+    assert structure_context["semantic_feature_counts"]["local_heading_body"] >= 1
+    assert structure_context["semantic_feature_strength_counts"]["medium"] >= 1
+    assert structure_context["knowledge_unit_ids"]
+    assert structure_context["evidence_block_ids"]
+
+    page_intent_items = collect_semantic_task_items(workspace_dir, "page_intent")
+    grouped_item = next(
+        item for item in page_intent_items
+        if target_item["claim_id"] in item.get("claim_ids", [])
+    )
+    group_context = grouped_item["group_context"]
+    assert group_context["content_tag_counts"] == {"cases": 1, "procedural_language": 1}
+    assert group_context["semantic_feature_counts"]["local_heading_body"] >= 1
+    assert group_context["unit_kind_counts"] == {"statement": 1}
+    assert group_context["evidence_block_kind_counts"] == {"list_item_with_body": 1}
+    assert group_context["section_path_counts"] == {"运营手册 > 支付问题": 1}
+    assert group_context["representative_local_headings"] == ["渠道故障案例复盘"]
 
 
 def test_semantic_batch_dry_run_does_not_persist(tmp_path: Path) -> None:
@@ -241,17 +387,10 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
         load_workspace_config(workspace_dir),
         "claim_role",
     )
-    claim_role_payload = {
-        "item_id": claim_record["claim_id"],
-        "claim_id": claim_record["claim_id"],
-        "text": claim_record.get("text", ""),
-        "claim_type": claim_record.get("claim_type"),
-        "quality_label": claim_record.get("quality_label"),
-        "quality_reason": claim_record.get("quality_reason"),
-        "quality_safe_auto_ready": claim_record.get("quality_safe_auto_ready"),
-        "source_ids": claim_record.get("source_ids", []),
-        "source_refs": claim_record.get("source_refs", []),
-    }
+    claim_role_payload = next(
+        item for item in collect_semantic_task_items(workspace_dir, "claim_role")
+        if item.get("claim_id") == claim_record["claim_id"]
+    )
     input_fingerprint = fingerprint_payload(
         task_name="claim_role",
         item_payloads=[claim_role_payload],
@@ -270,8 +409,12 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
                 "page_intent_hints": ["guide"],
                 "concept_candidate_score": 0.2,
             },
+            "decision_status": "accepted",
             "confidence": 0.99,
             "reason_code": "test_claim_role_override",
+            "risk_flags": [],
+            "supporting_ids": [claim_record["claim_id"]],
+            "abstain_reason": "",
             "prompt_version": claim_role_config.prompt_version,
             "model_key": claim_role_config.model_key,
             "schema_version": claim_role_config.schema_version,
@@ -283,13 +426,14 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    refreshed_pages = [
+    refreshed_claim = next(
         record
-        for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
-        if not record.get("removed")
-    ]
-    assert any(record.get("type") == "guide" for record in refreshed_pages)
-    assert all(record.get("type") != "concept" for record in refreshed_pages)
+        for record in load_jsonl(workspace_dir / "state" / "claims.jsonl")
+        if record.get("claim_id") == claim_record["claim_id"]
+    )
+    assert refreshed_claim.get("knowledge_role") == "procedure"
+    assert refreshed_claim.get("page_intent_hints") == ["guide"]
+    assert refreshed_claim["semantic_projection"]["knowledge_role"] == "procedure"
 
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     checks = {item["name"]: item for item in lint_result["checks"]}
