@@ -21,7 +21,7 @@
 
 - [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
   - 当前重构计划主文档，适合配合主详细设计文档一起看“下一步准备怎么落”。
-  - 版本迁移、兼容性收口、实施分期等更偏执行规划的内容，建议放在这里持续维护，而不是回灌到主详细设计正文。
+  - 结构优先链路、阶段性实现顺序、旧机制清理和测试收口等执行规划，建议放在这里持续维护，而不是回灌到主详细设计正文。
 
 - [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
   - 运行依赖、平台差异、安装方式与降级能力说明。

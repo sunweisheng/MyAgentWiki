@@ -114,7 +114,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 版本迁移、兼容动作和实施分期属于专题内容，应优先在设计文档和实施计划文档中维护
+- 系统尚未发布，当前不维护旧版本迁移和旧兼容动作；实现、设计文档和测试都直接以当前正式流程为准
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -314,29 +314,6 @@ python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format me
 - 想直接把结果交给上层回答器或 API 时，用 `answer-query`
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 - 想让 Agent 先自动收口高把握审核项，再把剩余需要你判断的部分整理成继续对话的输入时，用 `review-auto`
-
-### 6. 工作区兼容与迁移
-
-```bash
-python3 -m myagentwiki compat-report --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki compat-report --target-dir /path/to/MyNotesWiki --to-schema-version v2
-python3 -m myagentwiki migrate --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki migrate --target-dir /path/to/MyNotesWiki --format prompt
-python3 -m myagentwiki migrate --apply --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki migrate --rollback --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki migrate-schema-confirm --confirm \
-  --target-dir /path/to/MyNotesWiki \
-  --from-version unversioned \
-  --to-version v1
-python3 -m myagentwiki migrate-followups --target-dir /path/to/MyNotesWiki
-```
-
-推荐用法：
-- 想先看旧工作区与当前 CLI 的兼容风险时，用 `compat-report`
-- 想拿到迁移计划、风险分层和 handoff 载荷时，用 `migrate`
-- schema path 被降成 `report_only` 且提示需要确认时，用 `migrate-schema-confirm`
-- 想恢复最近一次迁移前的关键状态与配置时，用 `migrate --rollback`
-- 更完整的迁移边界、确认账本和 follow-up 机制，建议直接看详细设计文档与实现计划文档
 
 当前新初始化工作区默认会把审核、stable 提升、可读概念页和综述页所需的包内 Agent hook 一并接好；后续是否真的产出 `stable / concept / overview`，仍取决于 review 收口结果、hook 判定和页面生成条件：
 
@@ -598,11 +575,8 @@ MyAgentWiki/
 - `myagentwiki review-list`
 - `myagentwiki review-apply`
 - `myagentwiki review-auto`
-- `myagentwiki compat-report`
-- `myagentwiki migrate`
-- `myagentwiki migrate-decisions`
-- `myagentwiki migrate-followups`
-- `myagentwiki migrate-schema-confirm`
+- `myagentwiki render-page`
+- `myagentwiki render-readable-concept`
 - `myagentwiki semantic-batch`
 
 当前实现状态：
@@ -698,27 +672,8 @@ MyAgentWiki/
   - `edit_then_resume` 支持“人工先修改 `claims/*.json`，再让系统从当前 review 状态继续收口”，不会要求整条 ingest 全量重跑
   - JSON 输出当前会附带 `workspace_summary`，纯文本输出会显式打印工作区绝对路径与当前处理的 review 标识
   - review 动作执行后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与页面检索索引
-- `myagentwiki compat-report`
-  - 已实现工作区兼容性检查与迁移候选收口，统一返回 schema migration 与 compatibility cleanup 两类候选
-  - 当前会输出 `action_catalog`、`schema_guard`、`target_schema_version`、`schema_registry` 诊断，以及 `auto_plan / report_only` 风险分层
-  - 当前支持显式 `--to-schema-version`，可直接面向已知未来版本做 path planning
-- `myagentwiki migrate`
-  - 已实现 `--plan`、`--apply`、`--rollback` 三种模式
-  - 当前 `--apply` 会先写 migration report 和 backup snapshot，再执行 schema migration / compatibility cleanup
-  - 当前 `--rollback` 可恢复最近一次或指定 backup dir 的关键状态文件与配置
-  - 当前 `--format prompt|messages|chatml` 只面向 `report_only` 灰区输出 handoff，不会把确定性 `apply_supported` 动作重新交给 LLM 判定
-  - 当前计划输出会把 schema migration 放在前面，并显式区分“目标版本未知”“目标版本已知但 path 未注册”“path 需确认”“path 可自动规划”
-- `myagentwiki migrate-schema-confirm`
-  - 已实现显式确认型 schema path 的 ledger 收口
-  - 当前确认记录写入 `state/schema_confirmations.jsonl`，后续重新规划时可把对应 schema path 从 `report_only` 恢复到 `auto_plan`
-- `myagentwiki migrate-decisions`
-  - 已实现外部 Agent / LLM 返回的 migration 灰区判断 ingest 与 apply
-  - 当前标准化结果写入 `state/migration_decisions.jsonl`，而不是直接跳过账本改状态
-- `myagentwiki migrate-followups`
-  - 已实现 migration follow-up queue 的列出、完成和提升为 review
-  - 当前 follow-up queue 写入 `state/migration_followups.jsonl`
 - `myagentwiki semantic-batch`
-  - 已实现 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类语义批处理入口
+  - 已实现 `document_analysis / claim_candidate_quality / claim_role / page_intent / page_route` 五类语义批处理入口
   - 当前支持批处理、缓存命中、dry-run 和统一语义账本写回
   - `claim_candidate_quality` 当前专门处理短句灰区：它不会替代确定性噪声过滤，而是批量判断短 claim 更像可保留陈述、上下文碎片、结构壳标题，还是可安全进入 `safe_auto`
   - `page_intent` 的缓存命中当前会显式依赖 claim 侧的 `knowledge_role / page_intent_hints / concept_candidate_score`；如果 `claim_role` 结果发生变化，对应页面路由会自动失效重算，而不会继续沿用旧的页型判断
@@ -837,13 +792,12 @@ python scripts/validate_workflow.py --keep-workspace
 
 ## 开发说明
 
-当前仓库重点已经从“先打通主链路”转为“保持主闭环稳定，并继续把语义层、页面层和迁移层收口得更清楚”。
+当前仓库重点已经从“先打通主链路”转为“保持主闭环稳定，并继续把结构层、语义层、页面层和可追溯性收口得更清楚”。
 
 接下来适合继续推进的方向包括：
 
-- 更真实的未来 schema transition 定义与对应 action handler
-  - 当前迁移骨架、风险分层、confirmation ledger、decision/followup ledger 和 registry 自校验都已经具备
-  - 但当前仍只内建最小 `unversioned -> v1` schema 升级动作；未来 `v2 / v3` 仍需要等真实 schema 变更出现后再补定向 transition
+- Markdown Structure IR、Evidence Block、Knowledge Unit 与 Claim 的覆盖率报告继续增强
+- 语义决策账本与页面路由的 schema 校验继续收口
 - 更深入的 `stable / disputed` Claim 治理
 - `qa-note` 正式页面提升流程
 - entity / overview 等更高层 Wiki 页面生成与统一页面族谱收口

@@ -429,58 +429,6 @@ def test_wiki_index_escapes_paths_with_spaces(tmp_path: Path) -> None:
     assert "Chunk%20Lint.md" in index_text
 
 
-def test_workspace_summary_text_surfaces_legacy_compatibility_hint(tmp_path: Path) -> None:
-    source_dir = tmp_path / "raw"
-    source_dir.mkdir()
-    (source_dir / "claim.md").write_text(
-        "# Claim\n\n"
-        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
-        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
-        encoding="utf-8",
-    )
-    (source_dir / "chunk.md").write_text(
-        "# Chunk\n\n"
-        "Chunk 是用于承载局部原文切片的证据单元。\n\n"
-        "Chunk 用于把原始资料拆成可追踪、可回链的阅读片段。\n",
-        encoding="utf-8",
-    )
-
-    workspace_dir = tmp_path / "workspace"
-    run_cli(
-        "init",
-        "--source-dir",
-        str(source_dir),
-        "--project-name",
-        "WorkspaceCompatibilityHint",
-        "--target-dir",
-        str(workspace_dir),
-    )
-    run_cli("ingest", "--target-dir", str(workspace_dir))
-
-    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    for claim_id in [
-        record["claim_id"]
-        for record in claim_records
-        if record.get("claim_type") == "definition"
-    ]:
-        run_cli("claim-set-status", claim_id, "stable", "--target-dir", str(workspace_dir))
-
-    query_stdout = run_cli_text("query", "Claim", "--target-dir", str(workspace_dir))
-    assert "Compatibility:" not in query_stdout
-
-    compat_stdout = run_cli_text("compat-report", "--target-dir", str(workspace_dir))
-    assert f"Workspace: {workspace_dir.resolve()}" in compat_stdout
-    assert "Migration candidates:" in compat_stdout
-
-    migrate_stdout = run_cli_text("migrate", "--target-dir", str(workspace_dir))
-    assert f"Workspace: {workspace_dir.resolve()}" in migrate_stdout
-    assert "Planned actions:" in migrate_stdout
-
-    migrate_apply_stdout = run_cli_text("migrate", "--apply", "--target-dir", str(workspace_dir))
-    assert f"Workspace: {workspace_dir.resolve()}" in migrate_apply_stdout
-    assert "Applied actions:" in migrate_apply_stdout
-
-
 def test_ingest_skips_hidden_files_and_hidden_directories_in_raw(tmp_path: Path) -> None:
     # raw 下所有 . 开头的文件和目录都不应进入 ingest。
     source_dir = tmp_path / "raw"

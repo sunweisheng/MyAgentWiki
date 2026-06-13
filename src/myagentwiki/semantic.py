@@ -11,6 +11,7 @@ SEMANTIC_TASK_ITEM_TYPES = {
     "claim_candidate_quality": "claim_candidate",
     "claim_role": "claim",
     "page_intent": "claim_group",
+    "page_route": "claim_group",
 }
 
 

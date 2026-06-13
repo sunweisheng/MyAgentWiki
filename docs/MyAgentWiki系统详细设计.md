@@ -23,32 +23,38 @@
 
 它的核心任务，是把用户的原始资料持续编译成三层产物：
 
-1. 证据层：`normalized/`、`chunks/`、`claims/`
+1. 证据层：`normalized/`、Markdown 结构中间表示、证据块（Evidence Blocks）、知识单元（Knowledge Units）、`claims/`
 2. 语义层：语义决策（semantic decisions）、知识角色（knowledge roles）、页面意图（page intents）
 3. 展示层：`wiki/`、`indexes/`、阅读包（reading_pack）、回答交接载荷（answer-ready payload）
 
-因此，系统主线虽然仍然可以写成 `raw -> normalized -> chunks -> claims -> wiki`，但真正的理解方式不应再是“从文件一路生成页面”，而应改成下面这条更完整的编译链：
+因此，系统主线不应再理解为“把文件切成句子，再把句子拼成页面”，而应改成下面这条结构优先的编译链：
 
-1. `raw -> normalized -> chunks -> claims`：构建证据中间表示（evidence intermediate representation）
-2. `claims -> semantic decisions`：补充结构角色、知识角色、页面意图和编译约束
-3. `semantic decisions -> reviews / stable promotion / page routing`：把无法安全自动收口的部分送入审核，把高把握对象送入后续页面重建
-4. `pages / indexes / reading_pack / answer-ready`：把证据和语义结果编译成面向人和面向上层 Agent 的不同视图
+1. `raw -> normalized Markdown`：把异构来源统一成 Markdown 表达
+2. `normalized Markdown -> Markdown Structure IR`：解析标题、段落、列表、表格、引用、代码块、行号和父子关系
+3. `Markdown Structure IR -> Evidence Blocks`：形成可回链、可引用、可组合的原文结构块
+4. `Evidence Blocks -> Knowledge Units`：从结构块中抽取候选知识对象，保留局部标题、上下文和结构元信息
+5. `Knowledge Units -> claims / metadata / semantic decisions`：把事实声明、结构字段和语义判断分层落账
+6. `semantic decisions -> reviews / stable promotion / page routing`：把无法安全自动收口的部分送入审核，把高把握对象送入后续页面重建
+7. `pages / indexes / reading_pack / answer-ready`：把证据和语义结果编译成面向人和面向上层 Agent 的不同视图
 
 系统的关键能力包括：
 
 - 从用户原始知识目录同级初始化一个新的 Wiki 工程
 - 支持 `Word / Excel / PDF / Markdown / 图片` 五类输入
-- 维护独立的声明层（Claim layer），并逐步向更宽泛的知识单元层（Knowledge Unit layer）演进
-- 建立 `page -> claim -> chunk -> source` 的可追踪证据链
+- 维护结构优先的 Markdown 中间表示，避免过早按句子或换行丢失上下文
+- 维护独立的知识单元层（Knowledge Unit layer）和声明层（Claim layer）
+- 建立 `page -> claim -> knowledge_unit -> evidence_block -> source` 的可追踪证据链
 - 用多字段 BM25、页面类型权重、页面状态权重组织检索
-- 用受限 LLM 处理脚本难以稳定解决的语义角色判定、页面意图判定、保守重命名和 grounded 改写
+- 用受控 LLM 处理脚本难以稳定解决的知识单元抽取、语义角色判定、页面意图判定、保守重命名和 grounded 改写
 - 用审核队列、提稳流程、账本收口和回放机制保证长期可维护性
 
 系统的核心设计哲学是：
 
 - 确定性证据优先，按需使用语义判断（deterministic evidence first, semantic where needed）
-- 脚本负责证据编译和状态落盘，LLM 负责受限语义分析和 grounded 表达
+- Markdown 结构优先，局部关键词只能作为弱特征，不能单独决定知识角色或页面目录
+- 脚本负责证据编译、schema 校验、grounded 校验和状态落盘，LLM 负责受限语义分析、候选提案和 grounded 表达
 - LLM 不是事实来源，不能绕过现有证据直接制造新事实
+- LLM 输出默认是 proposal，只有通过脚本校验、回链校验和状态机约束后，才能进入 live 账本
 - 所有高风险改动都必须有可追踪账本、可回读证据和明确恢复入口
 
 ## 系统定位与核心原则（System Positioning And Principles）
@@ -63,31 +69,46 @@
 - 页面会同时服务概念解释、综述组织、来源入口、问答沉淀等多种视图
 - 页面中的可读表达可能被 LLM 改写，而证据层不应该随表达风格变化而漂移
 
-因此，系统必须先让 `normalized / chunks / claims` 稳定下来，再决定页面怎么组织。
+因此，系统必须先让 `normalized / Markdown Structure IR / Evidence Blocks / Knowledge Units / claims` 稳定下来，再决定页面怎么组织。
 
 ### 2. LLM 是受限语义分析器，不是事实写作者
 
 LLM 在系统中的职责是：
 
 - 判断文档结构是否可靠
-- 判断 Claim 更像定义、事实、步骤、示例还是结构壳
-- 判断一组稳定 Claim 更适合长成概念页、指南页、示例页、主题页、参考页还是只留在来源视图
+- 在已解析的 Evidence Block 上抽取 Knowledge Unit，或从同一证据范围内为 Knowledge Unit 补充局部标题、父级章节、字段名等上下文
+- 判断 Knowledge Unit / Claim 更像定义、事实、步骤、示例、结构元信息还是结构壳
+- 判断一组稳定 Knowledge Unit / Claim 更适合长成概念页、指南页、示例页、主题页、参考页还是只留在来源视图
 - 在证据和页型都已确定后，做 grounded 的可读化表达
 
 LLM 不应直接做的事包括：
 
-- 跳过 `normalized / chunks / claims` 直接写知识页
+- 跳过 `normalized / Evidence Blocks / Knowledge Units / claims` 直接写知识页
 - 把没有来源支持的句子写入权威账本
 - 在没有回链对象的情况下生成“看起来很合理”的新事实
+- 把推断、常识、行业经验或补充解释伪装成原文事实
 - 把审核动作、生命周期变化、规范名归属等高风险状态修改成纯自由文本结论
+
+LLM 输出的每个候选对象都必须携带回链依据，例如 `evidence_block_id`、`source_refs`、`start_line / end_line`、`reason_code`。如果无法回链，输出只能作为临时分析结果，不得进入 live 证据账本。
+
+这里的“补全”只允许补上下文，不允许补事实。
+
+例如原文结构是：
+
+```text
+- 平台运营组
+  负责人：许颖超
+```
+
+LLM 可以帮助形成“平台运营组负责人是许颖超”这类有结构来源的候选事实；但不能进一步写成“许颖超负责平台整体运营管理”，除非 Evidence Block 中已有等价表达。
 
 ### 3. 语义层必须独立成账本
 
-语义判断不能直接混入证据账本，否则系统会失去可回放性。
+语义判断不能直接混入证据账本并成为权威字段，否则系统会失去可回放性。
 
-例如同一条 Claim：
+例如同一条 Knowledge Unit / Claim：
 
-- 它的 `claim_id`、`source_refs`、`lifecycle_status` 属于证据和生命周期真相
+- 它的 `knowledge_unit_id / claim_id`、`source_refs`、`lifecycle_status` 属于证据和生命周期真相
 - 它是否更像 `definition / procedure / example / structural_shell`，则属于语义判断真相
 
 这两类信息分层保存的好处是：
@@ -95,6 +116,8 @@ LLM 不应直接做的事包括：
 - 模型升级、提示词升级时，可以只重跑语义层
 - 证据层不需要因为语义策略变动而整体重写
 - query、lint、review、page rebuild 都能解释“这次为什么这么做”
+
+证据账本里可以保存语义决策的投影字段，方便检索和调试；但这些投影字段不能成为权威来源。权威来源应是 `SemanticDecision` 或等价语义账本，并通过 `semantic_decision_id`、`semantic_decision_version` 或输入指纹回链。
 
 ### 4. 审核不是兜底补丁，而是恢复机制的一部分
 
@@ -123,21 +146,23 @@ LLM 不应直接做的事包括：
 ```mermaid
 flowchart TD
     A["原始资料（raw）"] --> B["标准化文档（normalized）"]
-    B --> C["证据切块（chunks）"]
-    C --> D["知识声明（claims）"]
-    D --> E["语义决策（semantic decisions）"]
-    E --> F["审核与提稳（reviews / stable promotion）"]
-    F --> G["页面与索引（wiki / indexes）"]
-    G --> H["阅读包（reading_pack）"]
-    H --> I["回答交接（answer-ready）"]
+    B --> C["Markdown Structure IR"]
+    C --> D["证据块（Evidence Blocks）"]
+    D --> E["知识单元（Knowledge Units）"]
+    E --> F["知识声明与元信息（claims / metadata）"]
+    F --> G["语义决策（semantic decisions）"]
+    G --> H["审核与提稳（reviews / stable promotion）"]
+    H --> I["页面与索引（wiki / indexes）"]
+    I --> J["阅读包（reading_pack）"]
+    J --> K["回答交接（answer-ready）"]
 
-    E --> J["语义账本（semantic ledger）"]
-    D --> K["证据账本（evidence ledger）"]
-    F --> L["审核账本（review ledger）"]
+    G --> L["语义账本（semantic ledger）"]
+    F --> M["证据账本（evidence ledger）"]
+    H --> N["审核账本（review ledger）"]
 
-    F --> M["恢复入口（review-apply / edit_then_resume）"]
-    M --> G
-    M --> H
+    H --> O["恢复入口（review-apply / edit_then_resume）"]
+    O --> I
+    O --> J
 ```
 
 ### 证据主链（Evidence Chain）
@@ -146,9 +171,11 @@ flowchart TD
 
 这条链固定为：
 
-`source -> normalized -> chunk -> claim -> page`
+`source -> normalized -> structure_block -> evidence_block -> knowledge_unit -> claim / metadata -> page`
 
-读者需要能够从页面一路回读到声明、切块、标准化文档和原始来源，而不是停留在一段被改写过的摘要上。
+读者需要能够从页面一路回读到声明、知识单元、证据块、标准化文档和原始来源，而不是停留在一段被改写过的摘要上。
+
+`chunk` 仍可作为检索和增量处理的粗粒度容器，但它不应再承担“最小证据单元”的全部职责。真正的证据原子应是 Evidence Block，默认来源于 Markdown Structure IR 中的段落、列表项、表格行、引用块、标题和相邻正文组合。
 
 ### 语义补充链（Semantic Supplement Chain）
 
@@ -156,28 +183,30 @@ flowchart TD
 
 这条链固定为：
 
-`claim / page candidate -> semantic decision -> review or page routing -> readable rendering`
+`knowledge_unit / claim / page candidate -> semantic decision -> review or page routing -> readable rendering`
 
 它解释的是：
 
 - 为什么这个 chunk 没有被当成主题候选
-- 为什么这条 Claim 被判断为步骤、示例或结构壳
-- 为什么一组稳定 Claim 会被路由成 `concept / guide / topic / reference`
+- 为什么这个 Evidence Block 被组合成某个 Knowledge Unit
+- 为什么这条 Knowledge Unit / Claim 被判断为步骤、示例、结构元信息或结构壳
+- 为什么一组稳定 Knowledge Unit / Claim 会被路由成 `concept / guide / topic / reference`
 - 为什么某个可读页面允许 LLM 改写，另一个只保留 deterministic 骨架
 
 ### 证据链与语义链如何串起来
 
 为了避免“证据链”和“LLM 语义补充工作链条”各写各的，系统要求这两条链在对象层显式相连：
 
-1. `claim` 保留 `source_refs`
-2. `semantic decision` 保留 `item_ids`、`task_type`、`input_fingerprint`
+1. `knowledge_unit / claim` 保留 `source_refs`
+2. `semantic decision` 保留 `item_ids`、`task_type`、`input_fingerprint` 和判定原因
 3. `page` 或 `review` 能通过 `semantic_decision_id` 或等价关系回查到语义判断来源
-4. `reading_pack` 和 `answer-ready` 只能消费已回链的 page / claim / chunk / source，而不是消费脱离证据链的自由文本
+4. `reading_pack` 和 `answer-ready` 只能消费已回链的 page / claim / knowledge_unit / evidence_block / source，而不是消费脱离证据链的自由文本
 
 这意味着上层回答器读到的每一层摘要，都应有回退路径：
 
 - 回到页面摘要
 - 回到关键 Claim
+- 回到对应 Knowledge Unit 和 Evidence Block
 - 回到匹配 Chunk
 - 回到来源摘要或原始来源入口
 
@@ -187,11 +216,14 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | Source | 记录原始来源及处理状态 | `state/sources.jsonl` | CLI | 不能随意重建 |
 | NormalizedDocument | 统一文档表示 | `normalized/*.md` + `state/normalized.jsonl` | CLI | 可由 `raw` 重新生成 |
-| Chunk | 证据单元 | `state/chunks.jsonl` | CLI | 可由 `normalized` 重新生成 |
-| Claim | 知识声明层 | `claims/*.json` + `state/claims.jsonl` | CLI，必要时人工编辑后走恢复 | 可重建，但需保留历史态 |
-| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl` | CLI / Agent hook | 可按输入重跑 |
+| MarkdownStructureIR | Markdown 结构树与位置映射 | `state/structure_blocks.jsonl` 或等价结构账本 | CLI | 可由 `normalized` 重新生成 |
+| EvidenceBlock | 最小可回链证据块 | `state/evidence_blocks.jsonl` 或等价证据账本 | CLI | 可由结构 IR 重新生成 |
+| Chunk | 检索和增量处理容器 | `state/chunks.jsonl` | CLI | 可由 `normalized` / Evidence Blocks 重新生成 |
+| KnowledgeUnit | 候选知识对象 | `state/knowledge_units.jsonl` 或等价知识单元账本 | CLI；LLM 只能提交候选 | 可重建，但需保留决策链 |
+| Claim | 稳定知识声明层 | `claims/*.json` + `state/claims.jsonl` | CLI，必要时人工编辑后走恢复 | 可重建，但需保留历史态 |
+| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl` | CLI 写入；Agent hook / LLM 提交候选 | 可按输入重跑 |
 | ReviewItem | 风险暂停点与恢复入口 | `reviews/*.json` + `state/reviews.jsonl` | CLI | 不能静默丢失 |
-| WikiPage | 面向人阅读的视图 | `wiki/**/*.md` + `state/pages.jsonl` | CLI / grounded rewrite | 可重建，但需遵守生命周期 |
+| WikiPage | 面向人阅读的视图 | `wiki/**/*.md` + `state/pages.jsonl` | CLI 写骨架；LLM 只做受控改写候选 | 可重建，但需遵守生命周期 |
 | Search Index | 排序与快速检索 | `indexes/search_pages.jsonl` | CLI | 可重建 |
 | Alias Registry | 别名扩展与规范名治理 | `indexes/aliases.json` + 覆盖层 | CLI / review-apply | 可重建，但人工覆盖需保留 |
 | Reading Pack | 查询交接上下文 | `query` 输出 | CLI | 可按 query 重算 |
@@ -222,7 +254,7 @@ flowchart TD
 用户运行 `init` 后生成的工作区负责承载：
 
 - sibling `raw/` 原始资料目录引用
-- `normalized / chunks / claims` 证据层产物
+- `normalized / structure_blocks / evidence_blocks / knowledge_units / chunks / claims` 证据层产物
 - `semantic/` 或等价语义账本目录
 - `wiki / indexes` 展示层产物
 - `state / reviews / reports / logs` 状态与控制层
@@ -234,10 +266,10 @@ flowchart TD
 
 - 母仓库升级时，不应直接覆盖用户工作区里的 `state/`、`claims/`、`reviews/`、`wiki/`
 - 用户工作区内容更新时，也不应反向改写母仓库文档和模板
-- 模板演进应优先通过“新工作区生成 + 老工作区渐进迁移”吸收
-- Agent 不应跳过 CLI 直接批量手改账本来模拟迁移
+- 系统未发布阶段，模板和账本结构演进以“直接更新实现 + 重新生成测试工作区 + 必要时重跑 ingest”收口
+- Agent 不应跳过 CLI 直接批量手改账本来模拟生成流程
 
-迁移、版本守卫、兼容性规划、显式迁移动作等内容属于单独的实施专题，主文档只保留必要边界说明，不在这里展开全部细节。
+当前不提供旧工作区兼容层或显式迁移命令；`schema_version` 只作为当前格式和协议的可追踪标记，而不是旧版本迁移框架。
 
 ## 目录设计（Directory Design）
 
@@ -383,9 +415,93 @@ flowchart TD
 - `location_map` 让后续 chunk、claim、页面和引用能回到原位置
 - `document_kind / structure_quality / chunk_strategy_hint` 让后续流程知道这份文档该怎么切、怎么读、该有多保守
 
+### MarkdownStructureIR（Markdown 结构中间表示）
+
+表示 normalized Markdown 被解析后的结构树。
+
+最小字段：
+
+- `structure_block_id`：结构块唯一标识
+- `source_id`：所属来源 ID
+- `normalized_path`：标准化文档路径
+- `block_type`：块类型，例如 `heading / paragraph / list_item / table / table_row / blockquote / code_block`
+- `text`：块文本或表格行文本
+- `raw_markdown`：对应原始 Markdown 片段
+- `heading_path_parts`：所在标题路径
+- `parent_block_id`：父级结构块
+- `previous_block_id`：前一结构块
+- `next_block_id`：后一结构块
+- `children_block_ids`：子结构块列表
+- `start_line`：起始行号
+- `end_line`：结束行号
+- `attributes`：结构属性，例如列表层级、表格列名、代码语言、引用层级
+- `hash`：结构块内容哈希
+
+设计原因：
+
+- Markdown 本身已经携带大量知识结构，不能在 claim 抽取前被过早压平成纯文本
+- 标题、列表项、表格行、引用块和代码块的语义不能只靠换行和关键词恢复
+- 后续 Evidence Block、Knowledge Unit、Claim、页面和 reading pack 都应能回到结构块
+
+### EvidenceBlock（证据块）
+
+表示可引用、可回链、可组合的最小证据单元。
+
+最小字段：
+
+- `evidence_block_id`：证据块唯一标识
+- `source_id`：所属来源 ID
+- `normalized_path`：标准化文档路径
+- `structure_block_ids`：对应结构块列表
+- `block_kind`：证据块类型，例如 `section_heading / paragraph / list_item_with_body / table_row / quote / code_example / metadata_line`
+- `text`：用于抽取和检索的证据文本
+- `local_heading`：局部标题，例如列表项标题或表格行主题
+- `context_before`：必要的前置上下文摘要或引用
+- `context_after`：必要的后置上下文摘要或引用
+- `section_path_parts`：章节路径数组
+- `start_line`：起始行号
+- `end_line`：结束行号
+- `metadata`：从结构中直接读出的字段，例如负责人、日期、人数、标签、表格列值
+- `content_tags`：弱内容标签，例如 `rules / cases / training / metrics`
+- `hash`：证据块内容哈希
+
+设计原因：
+
+- Evidence Block 是真正回答“这段知识来自哪里”的证据原子
+- 一个 Evidence Block 可以由多个 Markdown 结构块组合而成，例如“列表标题 + 下方正文”
+- 结构字段和可读文本都应保留，避免标题丢失、正文失去上下文或结构元信息漏抽
+
+### KnowledgeUnit（知识单元）
+
+表示从 Evidence Block 中抽取出的候选知识对象。
+
+最小字段：
+
+- `knowledge_unit_id`：知识单元唯一标识
+- `text`：知识单元文本
+- `normalized_text`：归一化文本
+- `unit_kind`：证据单元类型，例如 `statement / metadata_fact / table_fact / structural_shell`
+- `local_heading`：局部标题
+- `metadata`：结构化字段
+- `evidence_block_ids`：支撑证据块
+- `source_refs`：来源引用指针
+- `extraction_reason`：抽取原因，例如 `local_heading_attached_to_body / metadata_extracted_owner`
+- `quality_label`：质量标签
+- `status`：处理状态
+- `lifecycle_status`：生命周期状态
+- `semantic_decision_ids`：关联语义决策 ID 列表
+- `semantic_projection`：语义层投影字段，只用于检索和调试，不作为权威来源
+
+设计原因：
+
+- Claim 不再承担所有“候选知识”的职责
+- Knowledge Unit 可以表示结构元信息、表格事实、局部标题+正文、待审片段等多种对象
+- 只有适合长期事实追踪的 Knowledge Unit 才提升或编译成 Claim
+- `content_tags / knowledge_role / page_intent` 等语义判断的权威来源是 SemanticDecision，Knowledge Unit 中最多保存投影或回链
+
 ### Chunk（证据切块）
 
-表示从标准化文档切分出的处理单元和证据单元。
+表示从标准化文档和 Evidence Blocks 组织出的检索、摘要和增量处理容器。
 
 最小字段：
 
@@ -415,14 +531,15 @@ flowchart TD
 
 设计原因：
 
-- Chunk 同时承担检索、摘要、Claim 抽取、溯源、增量更新和语义分析输入的职责
+- Chunk 承担检索、摘要、增量更新和批处理上下文职责，但不再是唯一的最小证据单元
 - `previous_chunk / next_chunk` 用来补足上下文，而不是直接复制 overlap 文本
 - `chunk_kind / topicworthiness_hint` 让后续流程区分结构壳、主题段、步骤段、总结段等不同角色
 - `section_path_parts / section_title / parent_section_path / heading_level` 让标题树不再只剩下一条扁平字符串，后续 claim、concept page、query 排序和 answer-ready 都可以继续消费父子层级关系
+- Chunk 应引用其覆盖的 Evidence Blocks；Claim / Knowledge Unit 的精确回链优先走 Evidence Block，再回到 Chunk 和 Source
 
 ### Claim（知识声明）
 
-表示独立知识声明，是系统当前最核心的知识枢纽层。
+表示从 Knowledge Unit 中提升出的稳定知识声明，是系统事实追踪和冲突治理的核心层。
 
 最小字段：
 
@@ -431,15 +548,16 @@ flowchart TD
 - `normalized_text`：归一化后的声明文本
 - `status`：声明状态
 - `source_ids`：关联来源 ID 列表
+- `knowledge_unit_ids`：关联知识单元 ID 列表
+- `evidence_block_ids`：关联证据块 ID 列表
 - `chunk_ids`：关联切块 ID 列表
 - `page_ids`：关联页面 ID 列表
 - `conflict_group`：冲突分组标识
 - `duplicate_candidates`：重复候选列表
 - `review_reason`：进入审核的原因
 - `claim_type`：声明类型
-- `knowledge_role`：知识角色
-- `page_intent_hints`：页面意图提示
-- `concept_candidate_score`：概念页候选分
+- `semantic_decision_ids`：关联语义决策 ID 列表
+- `semantic_projection`：语义层投影字段，例如 `knowledge_role / page_intent_hints / concept_candidate_score / content_tags`
 - `source_refs`：来源引用指针
 - `lifecycle_status`：生命周期状态
 - `superseded_by`：被哪些后续声明替代
@@ -452,7 +570,8 @@ flowchart TD
 - Claim 把“知识结论”从“页面文本”中独立出来
 - 同一条 Claim 可以被多个页面复用
 - `source_refs` 比 `source_ids` 更重要，因为它回答“来自来源里的哪里”
-- `knowledge_role` 和 `page_intent_hints` 不是为了立刻生成页面，而是为了让后续语义和页面路由有共同语言
+- `knowledge_unit_ids / evidence_block_ids` 让 Claim 可以回到结构化证据，而不是只回到粗粒度 chunk
+- `semantic_projection` 不是 Claim 的事实权威，只是 SemanticDecision 的缓存视图，用来让后续语义、页面路由、检索和调试有共同语言
 
 当前实现：
 
@@ -547,9 +666,9 @@ flowchart TD
 
 当前实现：
 
-- 当前设计不再要求保留 `concept-summary` 等早期页型兼容
+- 当前设计只维护正式页面族谱，不保留早期页型兼容层
 - 页型体系直接以正式页面族谱为准，由 `concept / guide / example / topic / reference / timeline / overview / source-summary / qa-note` 等页型承担主流程
-- query、migrate 与兼容清理应围绕正式页型和明确迁移动作设计，而不是长期维持早期页型并存
+- 系统未发布阶段不提供旧页型迁移层；CLI 只维护当前正式页型和当前工作区 schema
 
 ### 状态、生命周期与自动化等级
 
@@ -807,28 +926,44 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 已实现第一版 query normalization、alias 精确扩展和 canonical 目标回传
 - 已实现轻量意图识别
 
-## 切块层（Chunking Layer）
+## Markdown 结构与证据块层（Markdown Structure And Evidence Block Layer）
 
 ### 这一层在系统中的角色
 
-切块层不是单纯“把文档切小”，而是把文档中间表示进一步编译成证据单元（evidence units）。
+normalized Markdown 之后的第一任务不是立刻切 claim，而是先把 Markdown 编译成结构中间表示，再从结构中形成 Evidence Blocks。
 
 它同时承担：
 
-- 检索单元
-- 摘要单元
-- Claim 抽取单元
-- 溯源单元
+- Markdown 结构解析
+- 局部标题与正文组合
+- 表格、列表、引用、代码块保真
+- 结构 metadata 抽取
+- Knowledge Unit 抽取输入
+- 精确溯源单元
+- 检索和摘要的下游输入
 - 增量更新单元
 - 语义分析输入单元
 
-### 默认切分规则
+### 默认结构解析规则
 
-- 先按 Markdown 标题切
-- 超长块再按段落切
-- 过短块与相邻块合并
-- 代码块、表格、引用块尽量整体保留
-- 预留 overlap 字段，但当前默认不复制重叠文本
+- 先解析 Markdown 标题树，保留 `heading_path_parts`
+- 段落、列表项、表格行、引用块、代码块都先成为结构块
+- 列表项若只有局部标题，且下方相邻段落属于该列表项，应组合成 `list_item_with_body` Evidence Block
+- 表格应保留表头、行号、列值和 Markdown 原文；表格行可成为 Evidence Block
+- 结构标签、日期、负责人、人数、标签、来源、状态等先进入 metadata，不直接丢弃
+- 代码块默认不进入普通 Claim 抽取，但可作为 `code_example` Evidence Block 被示例页或来源视图消费
+- 过短块不再仅按字符数过滤；先判断它是结构壳、metadata、局部标题还是完整短事实
+
+### Chunk 与 Evidence Block 的关系
+
+Chunk 仍保留为检索、摘要和批处理容器，但它应由 Evidence Blocks 组合而成。
+
+默认关系：
+
+- Evidence Block 是最小证据原子
+- Chunk 是一组相邻 Evidence Blocks 的容器
+- Knowledge Unit 从 Evidence Block 抽取，而不是直接从压平后的 Chunk 文本抽取
+- reading pack 可同时返回 chunk 摘要和命中的 Evidence Blocks
 
 ### 允许被文档分析覆盖的策略
 
@@ -838,6 +973,8 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - timeline 文档优先按事件切
 - table-heavy 文档优先按表格行组切
 - chat log 优先按轮次切
+
+但无论采用哪种策略，都不能破坏 Structure IR 与 Evidence Block 的回链。策略只决定 Evidence Blocks 如何组合成 Chunk，不应决定是否丢弃结构信息。
 
 ### 默认参数
 
@@ -862,28 +999,81 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 - `chunk_id` 必须稳定
 - 不能破坏代码块、表格、引用块
-- 若 chunk 规则变化导致大规模 `chunk_id` 变更，应进入审慎收口，而不是静默覆盖旧引用
+- 若 chunk 规则变化导致大规模 `chunk_id` 变更，应通过重建、lint 和覆盖率报告显式收口，而不是静默覆盖现有引用
+- `structure_block_id / evidence_block_id` 必须稳定
+- Evidence Block 必须能回到 normalized Markdown 的行号或位置映射
+- 覆盖率检查应能区分“结构标签被有意跳过”和“知识内容疑似漏抽”
 
-## 声明层（Claim Layer）
+## 知识单元与声明层（Knowledge Unit And Claim Layer）
 
 ### 这一层在系统中的角色
 
 当前对外术语仍保留 Claim，但更准确的理解方式是：
 
-它是“知识单元层”的第一版实现，而不是默认等于“可以直接长成页面的结论”。
+Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对象的总称。
 
 它的职责是：
 
-- 从 chunk 中抽取可追踪的知识单元
+- 从 Evidence Block 中抽取可追踪的 Knowledge Unit
+- 将结构 metadata 和普通事实分层保存
+- 将适合长期追踪的 Knowledge Unit 提升为 Claim
 - 把页面组织与知识结论解耦
 - 为后续语义分析、检索、审核和页面路由提供共同对象
 
 ### 设计原则
 
+- 结构块优先于句子切分
+- Knowledge Unit 必须保留局部标题、结构上下文和 Evidence Block 回链
 - Claim 不依附于某一页
 - 同一条 Claim 可以被多个页面复用
 - Claim 必须能正向回到来源，也能被页面反向引用
 - 并非所有 Claim 都适合作为正式页面的核心结论
+
+### 默认抽取粒度
+
+默认候选粒度按结构块而不是换行句子：
+
+- 段落块默认作为完整候选
+- 列表项标题 + 下方正文默认作为一个候选
+- 表格行默认作为一个候选，并保留列名
+- 标题行默认作为结构上下文，不单独生成普通 Claim，除非它本身是明确事实
+- metadata 行默认生成结构字段，并按需要生成可检索事实
+- 长段落可以拆成多条 Knowledge Unit，但拆分后的每条都必须保留局部标题和 Evidence Block 回链
+
+### 结构 metadata 与可检索事实
+
+系统采用双轨策略：
+
+1. 结构字段进入 Evidence Block / Knowledge Unit 的 `metadata`
+2. 用户可能查询的结构事实可生成带上下文的 Claim
+
+例如 Markdown 中出现：
+
+```text
+### 平台运营组
+
+负责人：许颖超
+小组人数：4人
+```
+
+应先抽成结构字段：
+
+```json
+{
+  "section_title": "平台运营组",
+  "metadata": {
+    "负责人": "许颖超",
+    "小组人数": "4人"
+  }
+}
+```
+
+并可生成可检索事实：
+
+```text
+平台运营组负责人是许颖超
+平台运营组小组人数为4人
+```
 
 ### Claim 状态
 
@@ -929,12 +1119,15 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 同样是定义类句子，可能既是页面核心，也可能只是来源里的局部说明
 - 只有把“句型”和“系统角色”拆开，后续 page intent 才能稳定做路由
 
-### 当前抽取策略的重点
+### 抽取策略的重点
 
-当前规则抽取采用：
+抽取策略应采用：
 
-- 整句优先
-- 子句只作补充候选
+- 结构块优先
+- 局部标题和正文合并
+- metadata 和普通事实分层
+- 整句可作为 Knowledge Unit 内部的补充候选
+- 子句只作补充候选，且必须保留父级结构上下文
 - 明显依赖前文的从句、元描述、对话前缀、孤立纯日期标题、结构噪声主动降权或过滤
 
 这样做的原因，是为了避免“像文本但不是知识声明”的碎片误入 Claim 层。
@@ -958,11 +1151,12 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 建议统一为以下几类：
 
 1. 文档分析（document analysis pass）
-2. 切块策略评审（chunk policy pass）
-3. Claim 角色判定（claim role pass）
-4. 页面意图判定（page intent pass）
-5. grounded 改写（grounded rewrite pass）
-6. 概览页综合（overview synthesis pass）
+2. Markdown 结构评审（structure review pass）
+3. Knowledge Unit 抽取与补全（knowledge unit pass）
+4. Claim 角色判定（claim role pass）
+5. 页面意图判定（page intent pass）
+6. grounded 改写（grounded rewrite pass）
+7. 概览页综合（overview synthesis pass）
 
 ### 每一类阶段分别做什么
 
@@ -973,22 +1167,57 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 判断文档更像 `article / note / faq / tutorial / spec / chat_log / reference / timeline`
 - 判断结构质量，例如 `clean / mostly_clean / noisy / ocr_broken`
 - 给出 `chunk_strategy_hint`
+- 给出结构用途提示，例如 `learning_note / work_doc / meeting_note / project_doc / personal_reference`
 
 原因：
 
 很多后面的问题，其实是文档结构一开始就没有被区分。
 
+#### Markdown 结构评审
+
+目标：
+
+- 判断 Structure IR 是否保留了标题、列表、表格、引用和代码块
+- 判断局部标题是否应与相邻正文组合
+- 判断结构行是 metadata、结构壳、正文标题还是短事实
+- 给出 Evidence Block 组合建议
+
+原因：
+
+中文个人文档中常见“标题 + 空行 + 正文”“列表标题 + 正文”“字段：值”“表格行”等结构。如果在这一层丢失结构，后面只能靠关键词和句子长度猜测，容易产生标题 claim、上下文缺失和元信息漏抽。
+
+#### Knowledge Unit 抽取与补全
+
+目标：
+
+- 从 Evidence Block 中抽取 Knowledge Unit
+- 为正文补充局部标题、父级章节、字段名、表头等已存在的结构上下文
+- 把负责人、日期、人数、标签、表格列值等抽成 metadata
+- 对需要检索的 metadata 生成带上下文的事实候选
+- 给每个输出附上 `evidence_block_id / source_refs / reason_code`
+
+原因：
+
+LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不能脱离 Evidence Block 自由写事实。
+
+这一阶段的 `metadata_fact` 应优先由脚本按模板生成；LLM 可以建议候选，但脚本必须确认主语、字段名、字段值和上下文都来自 Evidence Block、Structure IR 或已落账 metadata。无法确认时，只能进入 review 或保留为 metadata，不得提升为 Claim。
+
 #### Claim 角色判定
 
 目标：
 
-- 给 Claim 补 `knowledge_role`
-- 补 `page_intent_hints`
+- 为 Knowledge Unit / Claim 生成 `knowledge_role`
+- 生成 `page_intent_hints`
 - 给出 `concept_candidate_score`
+- 给出内容标签 `content_tags`
 
 原因：
 
 如果不在这里先做角色判定，页面生成阶段就只能反复从局部文本猜语义，越写越补丁化。
+
+关键词只能作为弱特征，不应作为最终判定。例如“案例”可以增加 `cases` 标签，但不能单独把页面路由为 `example`；“规则”可以增加 `rules` 标签，但不能单独把页面路由为 `reference`。
+
+这些结果的权威归属是 SemanticDecision。Knowledge Unit / Claim 只能保存投影字段或 `semantic_decision_id`，不能把语义判断伪装成证据字段。
 
 #### 页面意图判定
 
@@ -997,20 +1226,33 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 判断对象是否值得成页
 - 判断更适合成什么页
 - 在灰区候选上允许 `accept / reject / rename / reroute`
+- 优先依据结构用途和 Evidence Block 组合关系，再参考内容标签
 
 原因：
 
 “先生成标题再看标题好不好”是不稳定的，正确顺序应该是“先判页型，再命名，再渲染”。
+
+页面类型和内容标签必须分离：
+
+- `page_intent / type` 回答“这页承担什么阅读用途”
+- `content_tags` 回答“这页包含哪些局部内容特征”
+
+因此“包含案例”不等于“这是案例页”，“包含规则”不等于“这是参考页”，“包含步骤”不等于“这是指南页”。
+
+页面路由结果必须写入 SemanticDecision 或等价语义账本，至少保留 `page_intent / route_target / route_reason / supporting_unit_ids / rejected_alternatives`。页面 frontmatter 可以保存路由投影，但不能成为路由判断的唯一权威来源。
 
 #### grounded 改写
 
 目标：
 
 - 在页型、证据和结构骨架已经确定之后，做可读化表达
+- 让页面段落、摘要句和列表项尽量保留 `claim_id / knowledge_unit_id / evidence_block_id` 回链
 
 原因：
 
 这样可以让 LLM 的自由度只落在表达层，而不是事实层和结构层。
+
+grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或 metadata 支撑的事实句。如果为了阅读体验生成概括句，页面必须能回到支撑对象集合；无法回链的概括只能标记为临时表达，不能进入 stable 页面。
 
 ### 语义层的统一输入输出约束
 
@@ -1018,8 +1260,27 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 1. 脚本先做初筛
 2. 灰区候选打包送入 LLM
-3. LLM 返回严格 JSON schema
+3. LLM 返回严格 JSON schema，且每个对象必须回链 Evidence Block 或已落账对象
 4. 脚本做 schema 校验、grounded 校验、账本写回和缓存收口
+
+### LLM 输出提交协议
+
+所有 LLM 阶段都采用“候选提交，脚本验收”的协议：
+
+1. LLM 只能输出 proposal，不直接写 live 账本
+2. proposal 必须符合当前任务的 JSON schema
+3. proposal 必须包含 `task_type / target_ids / evidence_block_ids 或 ledger_object_ids / reason_code / confidence / abstain`
+4. 脚本负责校验 schema、对象存在性、来源回链、span 覆盖、字段枚举、状态机约束和 grounded 约束
+5. 校验通过后，脚本写入 KnowledgeUnit、Claim、SemanticDecision、ReviewItem 或 Page projection
+6. 校验失败时，脚本必须记录 rejected proposal 或 lint 诊断，不能静默丢弃
+
+LLM 必须允许放弃判断：
+
+- `abstain=true`：证据不足、结构不清、类型不确定或需要人工判断
+- `needs_review=true`：可形成候选，但自动落账风险较高
+- `reject_reason`：拒绝生成的原因，例如 `insufficient_evidence / ambiguous_heading / conflicting_context / unsupported_inference`
+
+这条协议的目标，是让 LLM 参与理解，但不掌握最终写入权。
 
 这条约束也适用于短句 / 短 claim：
 
@@ -1027,6 +1288,17 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 脚本层只应继续拦截纯链接、路径、speaker 前缀、纯日期、表格线等明显垃圾
 - 对“短但可能有意义”的候选，应进入独立的质量灰区批处理，由 LLM 返回 `standalone / fragment / title_shell / noise` 这类受限标签
 - 只有在质量判定明确放行时，短 claim 才应继续进入 `safe_auto`
+
+LLM 输出应包含可解释原因，例如：
+
+- `local_heading_attached_to_body`
+- `metadata_extracted_owner`
+- `metadata_fact_generated_for_search`
+- `content_tag_case_but_page_type_topic`
+- `claim_rejected_structural_label`
+- `table_row_compiled_as_metadata_fact`
+
+没有 reason 和回链的输出不得进入 live 账本。
 
 ### 批处理与缓存
 
@@ -1098,8 +1370,8 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 如果没有这一步，系统很容易出现：
 
 - 磁盘上的人工改动已经发生
-- 内存或账本里的旧状态还没刷新
-- 后续页面和索引用旧状态继续生成
+- 内存或账本里的当前状态还没刷新
+- 后续页面和索引用未刷新状态继续生成
 
 所以人工改 Claim 后，必须通过 `review-apply ... edit_then_resume` 把改动重新纳入闭环。
 
@@ -1161,6 +1433,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - `guide`：指南页
 - `example`：示例页
 - `topic`：主题页
+- `duty / role`：职责、角色或组织分工页
 - `overview`：综述页
 - `reference`：参考页
 - `timeline`：时间线页
@@ -1171,7 +1444,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 ### 模板为什么要跟 page intent 对齐
 
-页面模板不应只按“旧页型名字”区分，而应按 page intent 选择模板族。
+页面模板不应只按静态页型名字区分，而应按 page intent 选择模板族。
 
 例如：
 
@@ -1179,8 +1452,42 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 指南页：目标、前置条件、步骤、变体、注意事项、来源
 - 示例页：场景、输入、过程、结果、可迁移点、来源
 - 主题页 / 综述页：问题空间、关键子主题、证据入口、相关页面、来源
+- 职责页 / 角色页：对象身份、结构元信息、职责范围、协作关系、来源
 - 参考页：术语表、规则表、参数清单、来源
 - 来源摘要页：原文概览、核心观点、可下钻证据、与现有页面的联系 / 冲突、后续建议
+
+### 页面路由原则
+
+页面路由应采用结构用途优先、内容标签辅助的策略：
+
+1. 先看来源结构和 Evidence Block 组合关系
+2. 再看 Knowledge Unit 的角色分布
+3. 最后参考 `content_tags`
+
+局部关键词不得一票决定页面目录。例如：
+
+- 文档或章节整体是职责说明时，即使局部出现“规则 / 案例 / 清单”，也不应直接进入 `reference` 或 `example`
+- 只有当结构整体是参数表、字段表、FAQ、术语表时，才应优先进入 `reference`
+- 只有当结构整体是具体案例复盘、输入-过程-结果、场景-迁移点时，才应优先进入 `example`
+
+页面 frontmatter 可以同时保存：
+
+```yaml
+type: topic
+content_tags:
+  - rules
+  - cases
+  - training
+```
+
+这让页面目录表达阅读用途，标签表达局部内容特征。
+
+页面路由不是页面生成器的临时副作用。它应当来自可回放的语义决策，并能解释：
+
+- 为什么选择当前 `type`
+- 哪些 Evidence Block / Knowledge Unit / Claim 支撑这个选择
+- 哪些候选目录被拒绝
+- 是否存在人工覆盖或审核恢复动作
 
 ### grounded 改写的边界
 
@@ -1194,6 +1501,10 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 - 可追踪性
 - 可读性
 - 对表达层升级的空间
+
+页面中的摘要段、结论段、列表项和关键小标题，都应尽量保留段落级或条目级回链。最低要求是页面 frontmatter 或页面账本能列出该页使用的 `claim_ids / knowledge_unit_ids / evidence_block_ids / semantic_decision_ids`，并且 reading pack 能按这些 ID 回读证据。
+
+如果 LLM 改写生成的句子无法回到任何支撑对象，脚本应将其拒绝、降级为草稿表达，或触发 review，而不是直接写入 stable 页面。
 
 当前可读页体系中，`concept` 与 `overview` 是最先被打磨的两类页面。
 
@@ -1239,7 +1550,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 - 标题、别名、摘要、正文的重要性不同
 - 页面类型和页面状态本身也携带回答可靠性信息
-- evidence 类问题不应永远由同一类旧页型兜底
+- evidence 类问题不应永远由同一类页面兜底
 
 ### 当前默认权重
 
@@ -1503,6 +1814,9 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 至少包括：
 
 - 标准化巡检
+- Markdown Structure IR 巡检
+- Evidence Block 覆盖巡检
+- Knowledge Unit 覆盖巡检
 - 切块巡检
 - 元数据巡检
 - Wiki 链接巡检
@@ -1511,6 +1825,13 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 页面质量巡检
 - 语义决策巡检
 - 页面意图一致性巡检
+
+结构覆盖巡检应能回答：
+
+- normalized Markdown 中哪些结构块没有进入 Evidence Block
+- 哪些 Evidence Block 没有进入 Knowledge Unit / metadata / intentional skip
+- 哪些 Knowledge Unit 没有进入 Claim、metadata 或 review
+- 跳过原因是结构标签、代码块、噪声，还是疑似漏抽
 
 当前实现：
 
@@ -1530,12 +1851,22 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 
 - 初始化与 Git 基线
 - 五类输入标准化与降级路径
-- `page -> claim -> chunk -> source` 追踪链
+- Markdown Structure IR 对标题、列表、表格、引用、代码块、空行和中文标点的解析
+- Evidence Block 对“列表标题 + 正文”“表格行”“字段：值”的组合
+- Knowledge Unit 对结构 metadata、局部标题和正文上下文的保留
+- `page -> claim -> knowledge_unit -> evidence_block -> source` 追踪链
 - query 权重与意图路由
 - 语义批处理与语义账本
 - review 六种动作与恢复闭环
 - lint 报告与非可重试错误分流
 - Windows、macOS、Linux 的基础兼容约束
+
+新增回归场景应覆盖：
+
+- 列表标题不单独生成普通 Claim，正文 Claim 保留标题上下文
+- 负责人、日期、人数、标签、岗位人数等进入 metadata，并按规则生成可检索事实
+- 同一结构用途的章节不会因为局部“规则 / 案例 / 清单”分散到不同页面目录
+- raw / normalized 到 Evidence Block、Knowledge Unit、Claim 的覆盖报告能区分有意跳过和疑似漏抽
 
 当前仓库已落地的代表性测试包括：
 
@@ -1564,23 +1895,24 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 ### 当前仍在继续重构和收口的部分
 
 - `semantic/` 目录与正式 `semantic_decisions` 账本的全面收口
-- document analysis / claim role / page intent 三类批量语义分析阶段
+- Markdown Structure IR、Evidence Block、Knowledge Unit 三层对象的正式落地
+- document analysis / structure review / knowledge unit / claim role / page intent 五类批量语义分析阶段
 - `abstain / prompt_version / schema_version` 等语义协议
-- 页面族谱继续收敛为 `concept / guide / example / topic / timeline / reference / overview / source-summary`
+- 页面族谱继续收敛为 `concept / guide / example / topic / duty / role / timeline / reference / overview / source-summary`
 - `source-summary` 从默认回收页收缩为来源入口视图
-- Claim 向更宽泛 Knowledge Unit 的抽象演进
+- Claim 从“候选知识对象总称”收缩为 Knowledge Unit 的稳定事实子集
 - 更细粒度的日志系统
 - 更完整的跨平台实机验证矩阵
 
 ### 主文档不再承担的内容
 
-为保持主线清晰，以下内容不再在本文档中展开所有历史细节：
+为保持主线清晰，以下内容不再在本文档中展开：
 
-- 版本迁移与兼容动作的完整专题设计
 - 早期多份设计稿中的重复叙述
 - 过于细碎的版本阶段命名
+- 尚未进入实现计划的成本优化、批量调度和部署形态讨论
 
-这些内容应放在专题文档或实施计划文档中维护，并从主文档链接过去。
+系统未发布阶段不维护旧版本兼容专题；当格式变化影响现有样例工作区时，优先通过重跑固定流程、lint 和测试来收口。
 
 ## 阅读与维护约定（Reading And Maintenance Convention）
 

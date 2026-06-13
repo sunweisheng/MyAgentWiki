@@ -61,10 +61,6 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     assert str((workspace_dir / "semantic").resolve()) in created
     assert str((workspace_dir / "semantic" / "batches").resolve()) in created
     assert (workspace_dir / "state" / "semantic_decisions.jsonl").exists()
-    assert (workspace_dir / "state" / "migration_decisions.jsonl").exists()
-    assert (workspace_dir / "state" / "migration_followups.jsonl").exists()
-    assert (workspace_dir / "state" / "migration_runs.jsonl").exists()
-    assert (workspace_dir / "state" / "schema_confirmations.jsonl").exists()
 
     config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
     assert 'schema_version: "v1"' in config_text
@@ -87,7 +83,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
         ).stdout.splitlines()
         if line.strip()
     }
-    assert "state/schema_confirmations.jsonl" in tracked_files
+    assert "state/semantic_decisions.jsonl" in tracked_files
 
 
 def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:
@@ -115,7 +111,26 @@ def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:
     first = run_cli("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir))
     assert first["summary"]["item_count"] >= 1
     first_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
-    assert any(record.get("task_type") == "claim_role" for record in first_records)
+    claim_role_decisions = [
+        record for record in first_records
+        if record.get("task_type") == "claim_role"
+    ]
+    assert claim_role_decisions
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    projected_claims = [
+        record for record in claim_records
+        if record.get("semantic_projection", {}).get("knowledge_role")
+    ]
+    assert projected_claims
+    assert any(
+        decision["decision_id"] in claim.get("semantic_decision_ids", [])
+        for decision in claim_role_decisions
+        for claim in projected_claims
+    )
+    assert all(
+        claim["semantic_projection"]["knowledge_role"] == claim.get("knowledge_role")
+        for claim in projected_claims
+    )
     assert first["summary"]["cache_hits"] >= 1
     assert first["summary"]["written_decision_count"] == 0
 
@@ -183,6 +198,10 @@ def test_semantic_batch_claim_candidate_quality_writes_short_claim_decisions(tmp
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     assert any(record.get("quality_decision_source") == "semantic_batch" for record in claim_records)
     assert any(record.get("quality_safe_auto_ready") is True for record in claim_records if record.get("text") == "保留回链")
+    quality_claim = next(record for record in claim_records if record.get("text") == "保留回链")
+    assert quality_claim["semantic_decision_ids"]
+    assert quality_claim["semantic_projection"]["quality_safe_auto_ready"] is True
+    assert quality_claim["semantic_projection"]["quality_label"] == quality_claim["quality_label"]
 
 
 def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) -> None:

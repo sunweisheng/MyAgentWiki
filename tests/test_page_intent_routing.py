@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from myagentwiki.cli import build_page_intent_item_payload, choose_bucket_page_intent, claim_role_blocks_concept_path
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +35,50 @@ def load_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def assert_routed_page_has_page_route_decision(workspace_dir: Path, page_record: dict) -> None:
+    page_route = page_record.get("page_route", {})
+    semantic_decision_id = page_route.get("semantic_decision_id")
+    assert semantic_decision_id
+    assert semantic_decision_id in page_record.get("semantic_decision_ids", [])
+    assert page_route.get("route_target") == page_record.get("type")
+
+    semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
+    route_decision = next(
+        record for record in semantic_records
+        if record.get("decision_id") == semantic_decision_id
+    )
+    assert route_decision["task_type"] == "page_route"
+    assert route_decision["decision"]["route_target"] == page_record.get("type")
+
+
+def test_claim_semantic_readers_prefer_projection() -> None:
+    claim_record = {
+        "claim_id": "clm_projection_only",
+        "text": "示例步骤用于验证 projection 读取。",
+        "knowledge_role": None,
+        "page_intent_hints": [],
+        "concept_candidate_score": 0.0,
+        "semantic_projection": {
+            "knowledge_role": "procedure",
+            "page_intent_hints": ["guide"],
+            "concept_candidate_score": 0.82,
+        },
+    }
+
+    assert choose_bucket_page_intent([claim_record]) == "guide"
+    assert claim_role_blocks_concept_path(claim_record) is True
+
+    payload = build_page_intent_item_payload("projection_bucket", [claim_record])
+    assert payload["claim_semantics"] == [
+        {
+            "claim_id": "clm_projection_only",
+            "knowledge_role": "procedure",
+            "page_intent_hints": ["guide"],
+            "concept_candidate_score": 0.82,
+        }
+    ]
+
+
 def test_page_intent_routes_workflow_to_guide_page(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -49,7 +95,8 @@ def test_page_intent_routes_workflow_to_guide_page(tmp_path: Path) -> None:
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     pages = [record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl") if not record.get("removed")]
-    assert any(record.get("type") == "guide" for record in pages)
+    guide_page = next(record for record in pages if record.get("type") == "guide")
+    assert_routed_page_has_page_route_decision(workspace_dir, guide_page)
 
 
 def test_page_intent_routes_example_content_to_example_page(tmp_path: Path) -> None:
