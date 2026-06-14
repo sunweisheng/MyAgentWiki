@@ -33,11 +33,11 @@ def test_split_claim_candidates_keeps_short_meaningful_sentence() -> None:
     assert candidates == ["系统必须保留回链"]
 
 
-def test_split_claim_candidates_keeps_short_standalone_clause_from_long_sentence() -> None:
+def test_split_claim_candidates_does_not_split_chinese_connective_clauses() -> None:
     text = "系统会先建立索引，同时保留回链，并且支持增量更新。"
 
     candidates = split_claim_candidates_from_text(text)
 
     assert "系统会先建立索引，同时保留回链，并且支持增量更新" in candidates
-    assert "保留回链" in candidates
-    assert "支持增量更新" in candidates
+    assert "保留回链" not in candidates
+    assert "支持增量更新" not in candidates

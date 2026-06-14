@@ -244,7 +244,7 @@ flowchart TD
 - `src/myagentwiki/`：项目核心源码目录，包含 CLI、主流程和核心实现
 - `templates/`：工作区初始化模板目录
 - `tests/`：自动化测试目录
-- `scripts/`：辅助脚本与交付级验证脚本目录
+- `scripts/`：交付级验证脚本目录
 - `docs/`：项目文档目录，包含详细设计、运行说明、排障文档和资料沉淀
 
 它负责的是“如何编译”和“如何约束 Agent”，而不是承载用户知识资产本体。
@@ -286,7 +286,7 @@ flowchart TD
 - `src/myagentwiki/`：CLI 与核心实现
 - `templates/`：工作区模板
 - `tests/`：自动化测试
-- `scripts/`：验证脚本与辅助工具
+- `scripts/`：交付级验证脚本
 
 ### 初始化后的用户工作区目录
 
@@ -924,7 +924,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 - 已实现多字段 BM25 检索与页面权重叠加
 - 已实现第一版 query normalization、alias 精确扩展和 canonical 目标回传
-- 已实现轻量意图识别
+- 已实现英文轻量意图识别，并支持通过 `--intent` 显式覆盖；中文等自然语言意图不再依赖词面自动判断
 
 ## Markdown 结构与证据块层（Markdown Structure And Evidence Block Layer）
 
@@ -1227,12 +1227,13 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 
 默认保守 hook 会优先读取这些结构证据。例如 Markdown 表格行可以作为强 `reference` 证据，代码示例块可以作为强 `example` 证据；但普通中文冒号句或局部关键词不会直接压过正文语义。
 
-对中文高风险词，当前实现采用“强模式 + 负面语境 + risk flag”的保守策略：
+对中文关键词，当前实现采用“默认不决策”的保守策略：
 
-- `案例：... / 示例：... / 输入-过程-结果` 才能强支撑 `example`
-- `参数表 / 字段表 / 配置表 / Markdown 表格行` 才能强支撑 `reference`
-- `起初 / 随后 / 后来` 等组级连续演进结构才强支撑 `timeline`
-- `案例库 / 产品规则 / 历史数据 / 如何` 等语境会生成 `ambiguous_*` 风险标记，而不是一票决定页型
+- `案例 / 示例 / 首先 / 然后 / 如何 / 规则 / 历史 / 用于` 等词面不会单独决定 `knowledge_role`、`page_intent` 或 `claim_type`
+- Markdown 表格行、metadata 行等结构证据可以支撑 `reference`
+- 代码示例块等结构证据可以支撑 `example`
+- `guide / timeline` 这类用途默认需要上游语义投影、人工/Agent 决策，或后续更明确的语言无关结构证据
+- 旧的 `ambiguous_*` 中文关键词风险标记已从默认 hook 中移除；Lint 仍会暴露语义层写入的风险标记和 page intent 降级刹车
 
 这些结果的权威归属是 SemanticDecision。Knowledge Unit / Claim 只能保存投影字段或 `semantic_decision_id`，不能把语义判断伪装成证据字段。
 
@@ -1265,7 +1266,7 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 - 证据不足时降级为 `topic`，再由概念条件决定是否提升为 `concept`
 - 降级原因会写入 route reason，例如 `page_intent_validation_downgraded_*`
 
-这使系统可以在同一批中文资料中同时生成流程指南、案例复盘、参数参考、时间线、普通概念页和歧义工作记录，而不会因局部关键词把页面分散到错误目录。
+这使系统可以在同一批中文资料中稳定保留普通概念页和结构明确的参考/示例页；流程指南、案例复盘、时间线等 specialized 页型需要结构证据或显式语义投影支撑，而不会因局部中文关键词被分散到错误目录。
 
 #### grounded 改写
 
@@ -1876,7 +1877,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 已能检查工作区目录结构、状态文件、核心 ID 唯一性、Claim / Page / Review 基础追踪关系
 - 已能检查 `canonical_id` 唯一性、alias registry 覆盖情况、search index 覆盖情况
 - 已新增概念页标题质量 warning，用来显式暴露“结构词标题、过短标题、问句壳标题”等问题
-- 已新增语义风险 warning，用来暴露 claim 级 `ambiguous_*` 风险标记和 page intent 降级刹车
+- 已新增语义风险 warning，用来暴露 claim 级语义风险标记和 page intent 降级刹车
 - 已能检查 page type、page intent、page route 与 claim role / intent hints 的一致性
 
 ### 测试设计重点
@@ -1909,8 +1910,8 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 负责人、日期、人数、标签、岗位人数等进入 metadata，并按规则生成可检索事实
 - 同一结构用途的章节不会因为局部“规则 / 案例 / 清单”分散到不同页面目录
 - raw / normalized 到 Evidence Block、Knowledge Unit、Claim 的覆盖报告能区分有意跳过和疑似漏抽
-- `案例库 / 产品规则 / 历史数据` 等中文歧义词不会一票触发 specialized page type
-- 真正的案例复盘、参数表、流程指南、演进时间线仍能进入对应页型
+- `案例库 / 产品规则 / 历史数据 / 如何 / 用于` 等中文词面不会一票触发 specialized page type
+- 参数表、代码示例等结构明确的内容仍能进入对应页型；流程指南、案例复盘、演进时间线需要显式语义投影或更明确的结构证据
 
 当前仓库已落地的代表性测试包括：
 

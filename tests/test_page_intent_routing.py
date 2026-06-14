@@ -126,7 +126,7 @@ def test_page_intent_heuristic_accepts_group_level_reference_evidence() -> None:
     assert choose_bucket_page_intent(claim_records) == "reference"
 
 
-def test_page_intent_routes_workflow_to_guide_page(tmp_path: Path) -> None:
+def test_page_intent_does_not_route_chinese_workflow_words_to_guide_page(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "guide.md").write_text(
@@ -142,11 +142,10 @@ def test_page_intent_routes_workflow_to_guide_page(tmp_path: Path) -> None:
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     pages = [record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl") if not record.get("removed")]
-    guide_page = next(record for record in pages if record.get("type") == "guide")
-    assert_routed_page_has_page_route_decision(workspace_dir, guide_page)
+    assert not any(record.get("type") == "guide" for record in pages)
 
 
-def test_page_intent_routes_example_content_to_example_page(tmp_path: Path) -> None:
+def test_page_intent_does_not_route_chinese_example_words_to_example_page(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "example.md").write_text(
@@ -161,7 +160,7 @@ def test_page_intent_routes_example_content_to_example_page(tmp_path: Path) -> N
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     pages = [record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl") if not record.get("removed")]
-    assert any(record.get("type") == "example" for record in pages)
+    assert not any(record.get("type") == "example" for record in pages)
 
 
 def test_page_intent_routes_reference_content_to_reference_page(tmp_path: Path) -> None:
@@ -169,8 +168,10 @@ def test_page_intent_routes_reference_content_to_reference_page(tmp_path: Path) 
     source_dir.mkdir()
     (source_dir / "reference.md").write_text(
         "# FAQ Reference\n\n"
-        "参数列表用于说明系统的关键配置项。\n\n"
-        "规则清单用于列出处理约束。\n",
+        "| field | value |\n"
+        "| --- | --- |\n"
+        "| timeout_seconds | 45 |\n"
+        "| batch_size | 10 |\n",
         encoding="utf-8",
     )
 
@@ -182,7 +183,7 @@ def test_page_intent_routes_reference_content_to_reference_page(tmp_path: Path) 
     assert any(record.get("type") == "reference" for record in pages)
 
 
-def test_page_intent_routes_timeline_content_to_timeline_page(tmp_path: Path) -> None:
+def test_page_intent_does_not_route_chinese_timeline_words_to_timeline_page(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "timeline.md").write_text(
@@ -198,7 +199,7 @@ def test_page_intent_routes_timeline_content_to_timeline_page(tmp_path: Path) ->
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     pages = [record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl") if not record.get("removed")]
-    assert any(record.get("type") == "timeline" for record in pages)
+    assert not any(record.get("type") == "timeline" for record in pages)
 
 
 def test_chinese_ambiguous_keywords_do_not_single_vote_page_intent(tmp_path: Path) -> None:
@@ -225,22 +226,21 @@ def test_chinese_ambiguous_keywords_do_not_single_vote_page_intent(tmp_path: Pat
     assert pages == []
 
 
-def test_strong_case_review_still_routes_to_example(tmp_path: Path) -> None:
-    source_dir = tmp_path / "raw"
-    source_dir.mkdir()
-    (source_dir / "incident_case.md").write_text(
-        "# 案例复盘\n\n"
-        "案例：某城市出现车辆离线后，团队先定位网络异常，再回滚配置，最终恢复服务。\n\n"
-        "该场景的输入是告警记录，过程是排查和回滚，结果是恢复运营。\n",
-        encoding="utf-8",
-    )
+def test_structure_code_example_hint_routes_to_example() -> None:
+    claim_records = [
+        {
+            "claim_id": "clm_code_example",
+            "text": "print('hello wiki')",
+            "knowledge_role": "example",
+            "page_intent_hints": ["example"],
+            "concept_candidate_score": 0.2,
+            "structure_context": {
+                "evidence_block_kind_counts": {"code_example": 1},
+            },
+        },
+    ]
 
-    workspace_dir = tmp_path / "workspace"
-    run_cli("init", "--source-dir", str(source_dir), "--project-name", "StrongExample", "--target-dir", str(workspace_dir))
-    run_cli("ingest", "--target-dir", str(workspace_dir))
-
-    pages = [record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl") if not record.get("removed")]
-    assert any(record.get("type") == "example" for record in pages)
+    assert choose_bucket_page_intent(claim_records) == "example"
 
 
 def test_mixed_chinese_document_types_route_by_structure_not_keywords(tmp_path: Path) -> None:
@@ -311,10 +311,10 @@ def test_mixed_chinese_document_types_route_by_structure_not_keywords(tmp_path: 
         for record in live_pages
         if record.get("type") != "source-summary"
     }
-    assert page_types_by_title["导入流程指南"] == "guide"
-    assert page_types_by_title["客诉案例复盘"] == "example"
+    assert page_types_by_title["导入流程指南"] == "concept"
+    assert page_types_by_title["客诉案例复盘"] == "concept"
     assert page_types_by_title["配置参数参考"] == "reference"
-    assert page_types_by_title["系统演进时间线"] == "timeline"
+    assert page_types_by_title["系统演进时间线"] == "concept"
     assert page_types_by_title["BM25 学习笔记"] == "concept"
     assert page_types_by_title["项目复盘"] == "concept"
 
@@ -323,8 +323,8 @@ def test_mixed_chinese_document_types_route_by_structure_not_keywords(tmp_path: 
         for record in load_jsonl(workspace_dir / "state" / "claims.jsonl")
         if record.get("lifecycle_status", "active") == "active"
     }
-    assert claims_by_text["案例：某城市出现车辆离线后，团队先定位网络异常，再回滚配置，最终恢复服务"].get("knowledge_role") == "example"
-    assert claims_by_text["案例：某城市出现车辆离线后，团队先定位网络异常，再回滚配置，最终恢复服务"].get("page_intent_hints") == ["example"]
+    assert claims_by_text["案例：某城市出现车辆离线后，团队先定位网络异常，再回滚配置，最终恢复服务"].get("knowledge_role") == "fact"
+    assert claims_by_text["案例：某城市出现车辆离线后，团队先定位网络异常，再回滚配置，最终恢复服务"].get("page_intent_hints") == ["topic"]
     assert claims_by_text["团队整理历史数据用于分析转化趋势"].get("page_intent_hints") == ["topic"]
     assert claims_by_text["我们沉淀案例库，方便新人学习常见问题"].get("page_intent_hints") == ["topic"]
     assert claims_by_text["产品规则在这次迭代中需要继续完善"].get("page_intent_hints") == ["topic"]
@@ -336,8 +336,8 @@ def test_mixed_chinese_document_types_route_by_structure_not_keywords(tmp_path: 
         if record.get("task_type") == "claim_role"
         for flag in record.get("risk_flags", [])
     ]
-    assert "ambiguous_case_keyword" in role_risk_flags
-    assert "ambiguous_reference_keyword" in role_risk_flags
+    assert "ambiguous_case_keyword" not in role_risk_flags
+    assert "ambiguous_reference_keyword" not in role_risk_flags
 
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     assert lint_result["summary"]["ok"] is True
@@ -345,22 +345,20 @@ def test_mixed_chinese_document_types_route_by_structure_not_keywords(tmp_path: 
     assert "page_semantic_consistency" not in failed_checks
 
 
-def test_page_intent_reject_blocks_question_shell_pages(tmp_path: Path) -> None:
-    source_dir = tmp_path / "raw"
-    source_dir.mkdir()
-    (source_dir / "questions.md").write_text(
-        "# Questions\n\n"
-        "为什么要做知识库？\n\n"
-        "如何才能整理页面？\n",
-        encoding="utf-8",
-    )
-
-    workspace_dir = tmp_path / "workspace"
-    run_cli("init", "--source-dir", str(source_dir), "--project-name", "RejectIntent", "--target-dir", str(workspace_dir))
-    run_cli("ingest", "--target-dir", str(workspace_dir))
-
-    pages = [
-        record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
-        if not record.get("removed") and record.get("type") in {"concept", "guide", "example", "topic", "reference", "timeline"}
+def test_page_intent_reject_blocks_question_hint_groups() -> None:
+    claim_records = [
+        {
+            "claim_id": "clm_question_1",
+            "text": "为什么要做知识库?",
+            "knowledge_role": "reject",
+            "page_intent_hints": ["reject"],
+        },
+        {
+            "claim_id": "clm_question_2",
+            "text": "如何才能整理页面?",
+            "knowledge_role": "reject",
+            "page_intent_hints": ["reject"],
+        },
     ]
-    assert pages == []
+
+    assert choose_bucket_page_intent(claim_records) == "reject"

@@ -296,12 +296,12 @@ python3 -m myagentwiki ingest \
 ### 5. 查询与审核
 
 ```bash
-python3 -m myagentwiki query "什么是知识声明层" --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki query "如何生成 wiki 页面" --reading-depth deep --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki query "什么是知识声明层" --answer-ready --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki answer-query "这个结论的来源证据是什么" --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki answer-query "什么是知识声明层" --format prompt --target-dir /path/to/MyNotesWiki
-python3 -m myagentwiki answer-query "什么是知识声明层" --format messages --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki query "什么是知识声明层" --intent definition --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki query "如何生成 wiki 页面" --intent how_to --reading-depth deep --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki query "什么是知识声明层" --intent definition --answer-ready --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "这个结论的来源证据是什么" --intent evidence --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "什么是知识声明层" --intent definition --format prompt --target-dir /path/to/MyNotesWiki
+python3 -m myagentwiki answer-query "什么是知识声明层" --intent definition --format messages --target-dir /path/to/MyNotesWiki
 python3 -m myagentwiki review-list --target-dir /path/to/MyNotesWiki
 python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki
 python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --dry-run
@@ -611,7 +611,6 @@ MyAgentWiki/
 - `myagentwiki review-apply`
 - `myagentwiki review-auto`
 - `myagentwiki render-page`
-- `myagentwiki render-readable-concept`
 - `myagentwiki semantic-batch`
 
 当前实现状态：
@@ -634,8 +633,8 @@ MyAgentWiki/
   - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
   - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失
   - 当前已经实现来源视图页与可读概念页，并会同步生成对应页面、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
-  - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择更像定义、能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类定义短语会优先于说明性长句
-  - 当前概念页展示层会把“概念名 + 定义短语”组合成更可读的代表陈述，例如 `LLM Wiki 一种利用 LLM 构建个人知识库的模式`
+  - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类短语会优先于说明性长句
+  - 当前概念页展示层直接展示选出的代表 Claim，不再靠中文“是 / 用于”等词面把短语强行改写成定义句
   - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
   - 当前概念页生成已加入四层收口规则：先用强规则过滤明显坏标题，再做标题质量评分；灰区候选才会交给 Agent hook 做受限判别；最终 `lint` 会把低质量概念标题显式报成 warning
   - 强规则当前会优先拦截 `示例`、`总结`、单字中文标题、问句壳标题这类明显更像结构节点而不是概念名的候选，减少“章节标题被误生成为概念页”
@@ -654,8 +653,8 @@ MyAgentWiki/
 - `myagentwiki query`
   - 已实现基于 `pages + claims + wiki` 产物的多字段 BM25 检索
   - 当前会综合 `title`、`aliases`、`summary`、`headings`、`body`、`claim_text`、`source_refs` 打分，并叠加页面类型权重与页面状态权重
-  - 当前已接入第一版 query normalization、alias 扩展、canonical 命中回传、轻量意图识别
-  - alias/title/canonical 精确命中会参与排序加权；definition/evidence 等意图会对更合适的页面类型做轻微调权
+  - 当前已接入第一版 query normalization、alias 扩展、canonical 命中回传，以及英文轻量意图识别；中文等自然语言意图建议由调用方显式传入 `--intent`
+  - alias/title/canonical 精确命中会参与排序加权；显式 `definition / evidence / how_to / timeline / compare / overview` 等意图会对阅读路径和页面类型做轻微调权
   - `evidence` 类问题会更偏向 `source-summary`，并在阅读包里优先保留可回链的 claim/chunk 证据线索
   - `compare / timeline / how_to` 也会在阅读包中返回不同 focus，帮助 Agent 判断优先读声明、时间线证据还是步骤性 chunk
   - `timeline` 类问题会额外返回按来源分组的 `timeline_sources`

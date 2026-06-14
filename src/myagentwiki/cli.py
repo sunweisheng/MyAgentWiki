@@ -90,7 +90,7 @@ EVIDENCE_BLOCKS_REL_PATH = Path("state") / "evidence_blocks.jsonl"
 KNOWLEDGE_UNITS_REL_PATH = Path("state") / "knowledge_units.jsonl"
 SEMANTIC_DECISIONS_REL_PATH = Path("state") / "semantic_decisions.jsonl"
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
-NEGATION_MARKERS = ("不", "不是", "没有", "无法", "不能", "未", "无", "禁止", "不要", "not ", "no ", "never ", "cannot ")
+NEGATION_MARKERS = ("not ", "no ", "never ", "cannot ")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
     "pillow": "PIL",
@@ -202,32 +202,30 @@ ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
 SEMANTIC_TASK_NAMES = ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent", "page_route")
 WORKSPACE_SCHEMA_VERSION = "v1"
-WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION = "v1"
-WORKSPACE_SCHEMA_VERSION_ORDER = ("v1",)
 QUERY_INTENT_MARKERS = {
     "overview": (
-        "概览", "概况", "总览", "总述", "整体", "全局", "框架", "脉络", "overview",
-        "主要讲什么", "主要内容", "整体内容", "有哪些主题",
+        "overview", "summary",
     ),
     "definition": (
-        "是什么", "什么是", "定义", "是指", "指什么", "介绍一下", "what is", "define",
+        "what is", "define", "definition",
     ),
     "compare": (
-        "区别", "对比", "比较", "差异", "vs", "versus", "compare",
+        "vs", "versus", "compare", "difference",
     ),
     "timeline": (
-        "时间线", "演变", "历史", "历程", "timeline",
+        "timeline", "history",
     ),
     "reference": (
-        "参数", "清单", "列表", "faq", "FAQ", "参考", "规则", "字段", "配置项", "reference",
+        "faq", "reference",
     ),
     "how_to": (
-        "如何", "怎么", "步骤", "做法", "实践", "how to", "tutorial",
+        "how to", "tutorial",
     ),
     "evidence": (
-        "来源", "证据", "出处", "引用", "依据", "为什么", "source", "evidence", "trace",
+        "source", "evidence", "trace", "citation",
     ),
 }
+QUERY_INTENT_CHOICES = ("lookup", *QUERY_INTENT_MARKERS.keys())
 QUERY_INTENT_FIELD_MULTIPLIERS = {
     "lookup": {},
     "overview": {
@@ -274,55 +272,8 @@ QUERY_INTENT_FIELD_MULTIPLIERS = {
         "hierarchy": 1.08,
     },
 }
-CLAIM_DEPENDENT_PREFIXES = (
-    "旨在",
-    "以便",
-    "从而",
-    "从而让",
-    "从而使",
-    "但",
-    "具体细节",
-    "而不是",
-    "并且",
-    "同时",
-    "以及",
-    "其中",
-    "例如",
-    "比如",
-)
-CLAIM_META_PREFIXES = (
-    "这是一",
-    "这是",
-    "本文件",
-    "本文",
-    "这份",
-    "这个",
-    "该文",
-    "该文件",
-)
-CLAIM_STANDALONE_PREDICATE_MARKERS = (
-    "是",
-    "不是",
-    "意味着",
-    "需要",
-    "应该",
-    "可以",
-    "能够",
-    "会",
-    "能",
-    "支持",
-    "保留",
-    "保持",
-    "维护",
-    "构成",
-    "属于",
-    "记录",
-    "标注",
-    "更新",
-    "提取",
-    "整合",
-    "构建",
-)
+CLAIM_DEPENDENT_PREFIXES = ()
+CLAIM_META_PREFIXES = ()
 
 
 @dataclass
@@ -439,7 +390,6 @@ def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> di
     schema_guard = {
         "status": "unknown",
         "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
-        "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
     }
     config_path = target_dir / "config" / "project.yml"
     if config_path.exists():
@@ -493,7 +443,7 @@ def render_workspace_summary_message(
         lines.append(
             "Schema guard: "
             f"workspace_schema={summary.get('schema_version')}, "
-            f"supported={schema_guard.get('minimum_supported_schema_version')}..{schema_guard.get('expected_schema_version')}"
+            f"expected={schema_guard.get('expected_schema_version')}"
         )
     elif summary.get("schema_version"):
         lines.append(f"Schema version: {summary.get('schema_version')}")
@@ -1012,29 +962,11 @@ def load_workspace_config(target: Path) -> dict:
     return load_simple_yaml(config_path)
 
 
-def workspace_schema_version_rank(schema_version: str | None) -> int | None:
-    normalized = str(schema_version or "").strip()
-    if not normalized:
-        return None
-    try:
-        return WORKSPACE_SCHEMA_VERSION_ORDER.index(normalized)
-    except ValueError:
-        return None
-
-
 def workspace_schema_guard_status(schema_version: str | None) -> str:
     normalized = str(schema_version or "").strip() or None
     if normalized is None:
         return "missing_schema_version"
-
-    current_rank = workspace_schema_version_rank(normalized)
-    minimum_rank = workspace_schema_version_rank(WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION)
-    expected_rank = workspace_schema_version_rank(WORKSPACE_SCHEMA_VERSION)
-    if current_rank is None or minimum_rank is None or expected_rank is None:
-        return "unsupported"
-    if minimum_rank <= current_rank <= expected_rank:
-        return "supported"
-    return "unsupported"
+    return "supported" if normalized == WORKSPACE_SCHEMA_VERSION else "unsupported"
 
 
 def normalize_optional_cli_string(value) -> str | None:
@@ -1046,23 +978,6 @@ def normalize_optional_cli_string(value) -> str | None:
     return normalized
 
 
-def update_workspace_schema_version(target: Path, schema_version: str) -> None:
-    config_path = target / "config" / "project.yml"
-    if not config_path.exists():
-        raise ValueError(f"Missing config/project.yml in {target}.")
-    config_text = config_path.read_text(encoding="utf-8")
-    updated_text, replacement_count = re.subn(
-        r'(^\s*schema_version:\s*")[^"]*(".*$)',
-        rf'\g<1>{schema_version}\2',
-        config_text,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if replacement_count == 0:
-        raise ValueError("Could not update workspace.schema_version in config/project.yml.")
-    atomic_write_text(config_path, updated_text, encoding="utf-8")
-
-
 def workspace_schema_guard_payload(target: Path) -> dict:
     config_path = target / "config" / "project.yml"
     if not config_path.exists():
@@ -1070,7 +985,6 @@ def workspace_schema_guard_payload(target: Path) -> dict:
             "status": "missing_config",
             "workspace_schema_version": None,
             "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
-            "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
         }
     config = load_simple_yaml(config_path)
     workspace_block = config.get("workspace", {})
@@ -1082,7 +996,6 @@ def workspace_schema_guard_payload(target: Path) -> dict:
         "status": status,
         "workspace_schema_version": schema_version,
         "expected_schema_version": WORKSPACE_SCHEMA_VERSION,
-        "minimum_supported_schema_version": WORKSPACE_MIN_SUPPORTED_SCHEMA_VERSION,
     }
 
 
@@ -1103,7 +1016,7 @@ def ensure_workspace_schema_supported(target: Path) -> None:
     raise ValueError(
         "Workspace schema guard failed: "
         f"workspace.schema_version={payload['workspace_schema_version']} is not supported by this CLI "
-        f"(supported={payload['minimum_supported_schema_version']}..{payload['expected_schema_version']}). "
+        f"(expected={payload['expected_schema_version']}). "
         "Re-initialize the workspace with the current CLI before attempting mutating commands."
     )
 
@@ -4886,12 +4799,6 @@ def semantic_features_for_evidence(
     local_heading: str | None,
 ) -> list[dict]:
     features: list[dict] = []
-    combined_context = " ".join([
-        *[str(item) for item in section_path_parts],
-        str(local_heading or ""),
-        text,
-    ])
-
     if block_kind in {"table_row", "metadata_line"}:
         append_semantic_feature(features, "rules", "structure", "strong", block_kind)
         append_semantic_feature(features, "reference_structure", "structure", "strong", block_kind)
@@ -4909,25 +4816,6 @@ def semantic_features_for_evidence(
         metadata_keys = [str(key).strip() for key in metadata if str(key).strip() and key != "cells"]
         if metadata_keys:
             append_semantic_feature(features, "metadata_fact", "structure", "strong", "metadata_keys")
-
-    if any(marker in combined_context for marker in ("案例：", "示例：", "场景：")):
-        append_semantic_feature(features, "cases", "text_pattern", "strong", "explicit_example_label")
-    elif "案例" in combined_context:
-        append_semantic_feature(features, "cases", "text_pattern", "weak", "case_marker")
-
-    if any(marker in combined_context for marker in ("规则清单", "参数列表", "字段表", "配置项", "FAQ")):
-        append_semantic_feature(features, "rules", "text_pattern", "strong", "reference_label")
-    elif "规则" in combined_context:
-        append_semantic_feature(features, "rules", "text_pattern", "weak", "rule_marker")
-
-    if any(marker in combined_context for marker in ("步骤", "首先", "然后", "最后", "第一步", "第二步", "第三步", "流程", "方法")):
-        append_semantic_feature(features, "procedural_language", "text_pattern", "medium", "procedure_marker")
-    if any(marker in combined_context for marker in ("时间线", "起初", "随后", "后来", "历程", "演变")):
-        append_semantic_feature(features, "temporal_language", "text_pattern", "medium", "temporal_marker")
-    if "培训" in combined_context:
-        append_semantic_feature(features, "training", "text_pattern", "weak", "training_marker")
-    if "指标" in combined_context or "数据" in combined_context:
-        append_semantic_feature(features, "metrics", "text_pattern", "weak", "metrics_marker")
 
     return features
 
@@ -5507,9 +5395,7 @@ def text_is_question_like(text: str) -> bool:
     cleaned = clean_claim_candidate_text(text)
     if not cleaned:
         return False
-    if cleaned.endswith(("？", "?")):
-        return True
-    return any(cleaned.startswith(prefix) for prefix in ("问题", "为什么", "如何", "怎么", "是否", "什么是"))
+    return cleaned.endswith(("？", "?"))
 
 
 def claim_starts_with_dependent_prefix(text: str) -> bool:
@@ -5527,10 +5413,7 @@ def claim_starts_with_meta_prefix(text: str) -> bool:
 
 
 def claim_has_standalone_predicate(text: str) -> bool:
-    cleaned = clean_claim_candidate_text(text)
-    if not cleaned:
-        return False
-    return any(marker in cleaned for marker in CLAIM_STANDALONE_PREDICATE_MARKERS)
+    return False
 
 
 def claim_can_stand_alone(text: str) -> bool:
@@ -5539,18 +5422,11 @@ def claim_can_stand_alone(text: str) -> bool:
         return False
     if claim_starts_with_dependent_prefix(cleaned):
         return False
-    return claim_has_standalone_predicate(cleaned) or cleaned[:1].isalnum() or "\u4e00" <= cleaned[:1] <= "\u9fff"
+    return bool(cleaned)
 
 
 def claim_is_definition_like_phrase(text: str) -> bool:
-    cleaned = clean_claim_candidate_text(text)
-    if not cleaned:
-        return False
-    if claim_starts_with_dependent_prefix(cleaned) or claim_starts_with_meta_prefix(cleaned):
-        return False
-    if len(cleaned) > 48:
-        return False
-    return bool(re.match(r"^(一种|一类|一个|一套|一组|一条|一项).+", cleaned))
+    return False
 
 
 def claim_candidate_is_noise(text: str) -> bool:
@@ -5585,11 +5461,7 @@ def claim_candidate_is_noise(text: str) -> bool:
     ]
     if len(natural_chars) < 4:
         return True
-    if (
-        len(natural_chars) < 8
-        and not claim_has_standalone_predicate(cleaned)
-        and not claim_is_definition_like_phrase(cleaned)
-    ):
+    if len(natural_chars) < 4:
         return True
     return False
 
@@ -5601,14 +5473,10 @@ def split_long_claim_candidate(text: str, max_chars: int = 140) -> list[str]:
     if not cleaned:
         return []
 
-    has_multi_clause_signal = any(
-        marker in cleaned
-        for marker in ("因此", "所以", "同时", "此外", "另外", "但是", "不过", "而且", "并且")
-    ) and any(marker in cleaned for marker in ("，", ",", "；", ";"))
-    if len(cleaned) <= max_chars and not has_multi_clause_signal:
+    if len(cleaned) <= max_chars:
         return [cleaned]
 
-    secondary_parts = re.split(r"(?<=[，,；;。！？!?])\s*|(?=(?:但是|不过|因此|所以|同时|此外|另外|而且|并且|而是))", cleaned)
+    secondary_parts = re.split(r"(?<=[,;。！？!?；])\s*", cleaned)
     refined_parts: list[str] = []
     for raw_part in secondary_parts:
         part = clean_claim_candidate_text(raw_part)
@@ -5629,6 +5497,8 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
     raw_pieces = re.split(r"(?<=[。！？!?；;])\s*|\n{1,}|(?<=\.)\s{2,}", text)
 
     for raw_piece in raw_pieces:
+        if re.match(r"^\s*#{1,6}\s+\S+", raw_piece):
+            continue
         piece = clean_claim_candidate_text(raw_piece)
         if claim_candidate_is_noise(piece):
             continue
@@ -5659,21 +5529,9 @@ def split_claim_candidates_from_text(text: str) -> list[str]:
 
 
 def classify_claim_type(text: str) -> str:
-    # 先给 Claim 一个启发式类型，后面接入 Agent 时可以被重写或提升。
+    # Claim semantics are handled by the semantic passes; this field stays conservative.
     cleaned = clean_claim_candidate_text(text)
     lowered = cleaned.lower()
-    if any(keyword in text for keyword in ("注意", "警告", "风险", "不要", "禁止")):
-        return "warning"
-    if any(keyword in text for keyword in ("步骤", "做法", "如何", "怎么", "先", "然后")):
-        return "procedure"
-    if any(keyword in text for keyword in ("因为", "因此", "导致", "使得", "原因")):
-        return "causal"
-    if any(keyword in text for keyword in ("相比", "对比", "区别", "优于", "弱于")):
-        return "comparison"
-    if claim_is_definition_like_phrase(cleaned):
-        return "definition"
-    if any(keyword in text for keyword in ("是", "是指", "定义", "叫做")):
-        return "definition"
     if any(keyword in lowered for keyword in ("better", "worse", "useful", "important", "effective")):
         return "evaluation"
     return "fact"
@@ -7581,16 +7439,10 @@ def claim_record_rank_key(claim_record: dict, group_topic_label: str = "") -> tu
 
 
 def build_display_claim_text(claim_record: dict, concept_title: str = "") -> str:
-    # 概念页里的代表陈述优先展示成“概念名 + 定义短语”，
-    # 这样比孤立的“一种……”更像一句可读的说明。
     raw_text = markdown_to_plain_text(claim_record.get("text", ""))
     cleaned = clean_claim_candidate_text(raw_text)
     if not cleaned:
         return raw_text.strip()
-
-    title = clean_concept_title_text(concept_title)
-    if title and claim_is_definition_like_phrase(cleaned) and not cleaned.lower().startswith(title.lower()):
-        return clean_concept_title_text(f"{title} {cleaned}")
     return cleaned
 
 
@@ -10779,11 +10631,6 @@ def build_result_reading_pack(
                 "_score": (
                     chunk_score + 0.5
                     if query_intent == "evidence" and chunk_record.get("source_id")
-                    else chunk_score + 0.45
-                    if query_intent == "how_to" and any(
-                        marker in (chunk_record.get("text", "") + chunk_record.get("summary", ""))
-                        for marker in ("步骤", "首先", "然后", "最后", "如何", "怎么")
-                    )
                     else chunk_score + 0.25
                     if query_intent == "timeline" and chunk_record.get("source_id")
                     else chunk_score
@@ -11021,8 +10868,10 @@ def build_answer_ready_payload(query_payload: dict) -> dict:
     hierarchy_anchor_reason_text = retrieval_context.get("hierarchy_anchor_reason_text")
     page_type = str(top_result.get("type", "")).strip().lower()
     page_profile = page_type_profile(page_type)
+    query_intent = str(query_payload.get("intent", "")).strip().lower()
     answer_shape = (
-        "step_by_step" if answer_handoff.get("answer_mode") == "chunks_first"
+        "timeline_evidence" if query_intent == "timeline"
+        else "step_by_step" if answer_handoff.get("answer_mode") == "chunks_first"
         else "worked_example" if page_profile == "example"
         else "topic_orientation" if page_profile == "topic"
         else "reference_sheet" if page_profile == "reference"
@@ -11349,6 +11198,7 @@ def build_query_payload(
     claim_limit: int,
     chunk_limit: int,
     reading_depth: str = "standard",
+    intent: str | None = None,
 ) -> dict:
     # query 当前走“现算现查”策略：
     # 直接读取 state/pages.jsonl + claims + wiki 页面，避免先做一层复杂索引器。
@@ -11367,7 +11217,8 @@ def build_query_payload(
 
     normalized_query = normalized_query_payload["normalized_query"]
     query_tokens = normalized_query_payload["query_tokens"]
-    query_intent = normalized_query_payload["intent"]
+    explicit_intent = str(intent or "").strip().lower()
+    query_intent = explicit_intent if explicit_intent in QUERY_INTENT_CHOICES else normalized_query_payload["intent"]
     documents, document_source = ensure_query_documents(target, page_records, claim_records_by_id)
 
     field_document_frequencies = {
@@ -11508,6 +11359,7 @@ def command_query(args: argparse.Namespace) -> CommandResult:
         claim_limit=claim_limit,
         chunk_limit=chunk_limit,
         reading_depth=reading_depth,
+        intent=getattr(args, "intent", None),
     )
     if getattr(args, "answer_ready", False):
         answer_ready_payload = build_answer_ready_payload(payload)
@@ -11714,6 +11566,7 @@ def command_answer_query(args: argparse.Namespace) -> CommandResult:
         claim_limit=claim_limit,
         chunk_limit=chunk_limit,
         reading_depth=reading_depth,
+        intent=getattr(args, "intent", None),
     )
     answer_ready_payload = build_answer_ready_payload(query_payload)
     answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
@@ -15194,11 +15047,6 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     )
 
 
-def command_stub(args: argparse.Namespace) -> CommandResult:
-    # 预留命令占位，方便先把 CLI 骨架搭起来，再逐步补真实能力。
-    return CommandResult(message=f"MyAgentWiki command scaffold: {args.command}")
-
-
 def command_lint(args: argparse.Namespace) -> CommandResult:
     # lint 在 V1 里承担“结构 + 基础质量巡检”双重职责：
     # - 目录与状态文件是否完整
@@ -15803,12 +15651,6 @@ def command_render_page(args: argparse.Namespace) -> CommandResult:
     return CommandResult(payload=payload, message=f"Rendered page target: {render_target}")
 
 
-def command_render_readable_concept(args: argparse.Namespace) -> CommandResult:
-    delegated_args = argparse.Namespace(**vars(args))
-    delegated_args.render_target = "readable_concept"
-    return command_render_page(delegated_args)
-
-
 def command_semantic_batch(args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     ensure_workspace_schema_supported(target)
@@ -15956,6 +15798,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
     query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
+    query_parser.add_argument(
+        "--intent",
+        choices=QUERY_INTENT_CHOICES,
+        help="Explicit query intent. Overrides lightweight automatic detection.",
+    )
     query_parser.add_argument("--json", action="store_true", help="Output JSON.")
     query_parser.set_defaults(handler=command_query)
 
@@ -15980,6 +15827,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     answer_query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
     answer_query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
+    answer_query_parser.add_argument(
+        "--intent",
+        choices=QUERY_INTENT_CHOICES,
+        help="Explicit query intent. Overrides lightweight automatic detection.",
+    )
     answer_query_parser.add_argument("--json", action="store_true", help="Output JSON.")
     answer_query_parser.set_defaults(handler=command_answer_query)
 
@@ -16000,18 +15852,6 @@ def build_parser() -> argparse.ArgumentParser:
     render_page_selector_group.add_argument("--claim-id", help="Render the page that references this claim.")
     render_page_parser.add_argument("--json", action="store_true", help="Output JSON.")
     render_page_parser.set_defaults(handler=command_render_page)
-
-    render_readable_concept_parser = subparsers.add_parser(
-        "render-readable-concept",
-        help="Rebuild and inspect readable concept page(s).",
-    )
-    render_readable_concept_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    render_selector_group = render_readable_concept_parser.add_mutually_exclusive_group()
-    render_selector_group.add_argument("--page-id", help="Specific readable concept page_id to render.")
-    render_selector_group.add_argument("--canonical-id", help="Specific canonical_id to render.")
-    render_selector_group.add_argument("--claim-id", help="Render the readable concept page that references this claim.")
-    render_readable_concept_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    render_readable_concept_parser.set_defaults(handler=command_render_readable_concept)
 
     semantic_batch_parser = subparsers.add_parser(
         "semantic-batch",

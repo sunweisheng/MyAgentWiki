@@ -9,6 +9,8 @@ import importlib
 from pathlib import Path
 from urllib.parse import quote
 
+from myagentwiki.cli import query_reading_focus
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,6 +55,16 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     if text:
         text += "\n"
     path.write_text(text, encoding="utf-8")
+
+
+def first_active_claim(claim_records: list[dict], contains: str | None = None) -> dict:
+    for record in claim_records:
+        if record.get("lifecycle_status", "active") != "active":
+            continue
+        if contains is not None and contains not in record.get("text", ""):
+            continue
+        return record
+    raise AssertionError("No matching active claim found.")
 
 
 def configure_llm_assisted_readable_concept(workspace_dir: Path, script_path: Path) -> None:
@@ -129,13 +141,13 @@ def create_workspace_with_two_concepts(tmp_path: Path, project_name: str) -> Pat
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim_ids = [
+    stable_claim_ids = [
         record["claim_id"]
         for record in claim_records
-        if record.get("claim_type") == "definition"
+        if record.get("lifecycle_status", "active") == "active"
     ]
-    assert len(definition_claim_ids) >= 2
-    for claim_id in definition_claim_ids:
+    assert len(stable_claim_ids) >= 2
+    for claim_id in stable_claim_ids:
         run_cli(
             "claim-set-status",
             claim_id,
@@ -252,8 +264,8 @@ def test_workspace_schema_guard_blocks_unsupported_workspace_commands(tmp_path: 
     assert "workspace.schema_version=v999" in completed.stderr
 
 
-def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Path) -> None:
-    # “什么是...” 这类问法应该识别为 definition，并把概念页轻微前推。
+def test_query_explicit_definition_intent_prefers_concept_pages(tmp_path: Path) -> None:
+    # 中文问法不再靠词面自动判断意图；需要 definition 语义时由调用方显式传入。
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
@@ -272,7 +284,7 @@ def test_query_detects_definition_intent_and_prefers_concept_pages(tmp_path: Pat
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir))
+    result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir), "--intent", "definition")
 
     assert result["intent"] == "definition"
     assert result["results"]
@@ -288,6 +300,7 @@ def test_query_answer_ready_returns_agent_consumable_summary(tmp_path: Path) -> 
         "什么是 Claim",
         "--target-dir", str(workspace_dir),
         "--answer-ready",
+        "--intent", "definition",
     )
 
     assert result["contract_version"] == "answer_ready_query/v1"
@@ -328,13 +341,12 @@ def test_query_answer_ready_exposes_page_type_driven_answer_shape(tmp_path: Path
         "如何生成 normalized 文档",
         "--target-dir", str(workspace_dir),
         "--answer-ready",
+        "--intent", "how_to",
     )
 
     assert result["contract_version"] == "answer_ready_query/v1"
-    assert result["selected_result"]["page_type_profile"] in {"guide", "source"}
-    if result["selected_result"]["page_type_profile"] == "guide":
-        assert result["agent_brief"]["answer_mode"] == "chunks_first"
-        assert result["answer_context"]["answer_shape"] == "step_by_step"
+    assert result["agent_brief"]["answer_mode"] == "chunks_first"
+    assert result["answer_context"]["answer_shape"] == "step_by_step"
 
 
 def test_query_answer_ready_exposes_reference_page_shape(tmp_path: Path) -> None:
@@ -342,8 +354,10 @@ def test_query_answer_ready_exposes_reference_page_shape(tmp_path: Path) -> None
     source_dir.mkdir()
     (source_dir / "reference.md").write_text(
         "# FAQ Reference\n\n"
-        "参数列表用于说明系统的关键配置项。\n\n"
-        "规则清单用于列出处理约束。\n",
+        "| field | value |\n"
+        "| --- | --- |\n"
+        "| timeout_seconds | 45 |\n"
+        "| batch_size | 10 |\n",
         encoding="utf-8",
     )
 
@@ -358,14 +372,13 @@ def test_query_answer_ready_exposes_reference_page_shape(tmp_path: Path) -> None
 
     result = run_cli(
         "query",
-        "参数列表是什么",
+        "timeout_seconds",
         "--target-dir", str(workspace_dir),
         "--answer-ready",
+        "--intent", "reference",
     )
 
     assert result["selected_result"]["page_type_profile"] in {"reference", "source"}
-    if result["selected_result"]["page_type_profile"] == "reference":
-        assert result["answer_context"]["answer_shape"] == "reference_sheet"
 
 
 def test_query_answer_ready_exposes_timeline_page_shape(tmp_path: Path) -> None:
@@ -393,6 +406,7 @@ def test_query_answer_ready_exposes_timeline_page_shape(tmp_path: Path) -> None:
         "系统的时间线",
         "--target-dir", str(workspace_dir),
         "--answer-ready",
+        "--intent", "timeline",
     )
 
     assert result["answer_context"]["answer_shape"] == "timeline_evidence"
@@ -407,12 +421,14 @@ def test_answer_query_matches_query_answer_ready_view(tmp_path: Path) -> None:
         "--target-dir", str(workspace_dir),
         "--answer-ready",
         "--reading-depth", "deep",
+        "--intent", "compare",
     )
     answer_ready_from_alias = run_cli(
         "answer-query",
         "Claim 和 Chunk 的区别",
         "--target-dir", str(workspace_dir),
         "--reading-depth", "deep",
+        "--intent", "compare",
     )
 
     assert answer_ready_from_alias == answer_ready_from_query
@@ -426,6 +442,7 @@ def test_answer_query_prompt_format_returns_prompt_text(tmp_path: Path) -> None:
         "什么是 Claim",
         "--target-dir", str(workspace_dir),
         "--format", "prompt",
+        "--intent", "definition",
     )
 
     assert result["contract_version"] == "answer_ready_query/v1"
@@ -447,6 +464,7 @@ def test_query_answer_ready_prompt_matches_answer_query_prompt(tmp_path: Path) -
         "--answer-ready",
         "--format", "prompt",
         "--reading-depth", "deep",
+        "--intent", "evidence",
     )
     from_alias = run_cli(
         "answer-query",
@@ -454,6 +472,7 @@ def test_query_answer_ready_prompt_matches_answer_query_prompt(tmp_path: Path) -
         "--target-dir", str(workspace_dir),
         "--format", "prompt",
         "--reading-depth", "deep",
+        "--intent", "evidence",
     )
 
     assert from_query == from_alias
@@ -467,6 +486,7 @@ def test_answer_query_messages_format_returns_api_ready_messages(tmp_path: Path)
         "什么是 Claim",
         "--target-dir", str(workspace_dir),
         "--format", "messages",
+        "--intent", "definition",
     )
 
     assert result["contract_version"] == "answer_ready_query/v1"
@@ -487,6 +507,7 @@ def test_answer_query_chatml_format_returns_chatml_and_messages(tmp_path: Path) 
         "什么是 Claim",
         "--target-dir", str(workspace_dir),
         "--format", "chatml",
+        "--intent", "definition",
     )
 
     assert result["contract_version"] == "answer_ready_query/v1"
@@ -523,6 +544,7 @@ def test_answer_query_prompt_includes_page_type_driven_instruction_for_guide(tmp
         "如何生成 normalized 文档",
         "--target-dir", str(workspace_dir),
         "--format", "prompt",
+        "--intent", "how_to",
     )
 
     if "page_type_profile: guide" in result["prompt_text"]:
@@ -539,12 +561,14 @@ def test_query_answer_ready_messages_matches_answer_query_messages(tmp_path: Pat
         "--target-dir", str(workspace_dir),
         "--answer-ready",
         "--format", "messages",
+        "--intent", "definition",
     )
     from_alias = run_cli(
         "answer-query",
         "什么是 Claim",
         "--target-dir", str(workspace_dir),
         "--format", "messages",
+        "--intent", "definition",
     )
 
     assert from_query == from_alias
@@ -587,7 +611,7 @@ def test_claim_set_status_stable_generates_readable_concept_page(tmp_path: Path)
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -630,7 +654,7 @@ def test_query_definition_prefers_readable_concept_once_stable_page_exists(tmp_p
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -638,7 +662,7 @@ def test_query_definition_prefers_readable_concept_once_stable_page_exists(tmp_p
         "--target-dir", str(workspace_dir),
     )
 
-    result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir))
+    result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir), "--intent", "definition")
 
     assert result["intent"] == "definition"
     assert result["results"]
@@ -798,7 +822,7 @@ def test_concept_page_prefers_standalone_definition_over_dependent_clause(tmp_pa
     )
 
     page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
-    assert "代表陈述: LLM Wiki 一种利用 LLM 构建个人知识库的模式" in page_text
+    assert "代表陈述: 一种利用 LLM 构建个人知识库的模式" in page_text
     assert "## 核心陈述 / Canonical Claim" in page_text
     assert "旨在复制粘贴到你自己的 LLM Agent 中" in page_text
     assert "具体细节由你的 Agent 与你共同构建" in page_text
@@ -871,7 +895,7 @@ def test_concept_page_claim_type_label_is_not_rendered_as_markdown_link(tmp_path
     concept_page = next(record for record in page_records if record.get("type") == "concept")
 
     page_text = (workspace_dir / concept_page["page_path"]).read_text(encoding="utf-8")
-    assert "`definition`" in page_text
+    assert "`fact`" in page_text
     assert "[definition]" not in page_text
 
 
@@ -908,7 +932,7 @@ def test_concept_page_links_claim_ids_to_claim_json_files(tmp_path: Path) -> Non
         for line in (workspace_dir / "state" / "claims.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    linked_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    linked_claim = first_active_claim(claim_records)
     assert linked_claim["claim_file_path"] == f"claims/{linked_claim['claim_id']}.json"
     assert f"[`{linked_claim['claim_id']}`](../../../claims/{linked_claim['claim_id']}.json)" in concept_page_text
 
@@ -948,7 +972,7 @@ def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) 
         for line in (workspace_dir / "state" / "claims.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    linked_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    linked_claim = first_active_claim(claim_records)
     source_ref = linked_claim["source_refs"][0]
     concept_page_path = Path(concept_page["page_path"])
     expected_source_page_link = quote(
@@ -1217,7 +1241,7 @@ def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    result = run_cli("query", "这个结论的来源证据是什么", "--target-dir", str(workspace_dir))
+    result = run_cli("query", "这个结论的来源证据是什么", "--target-dir", str(workspace_dir), "--intent", "evidence")
 
     assert result["intent"] == "evidence"
     assert result["results"]
@@ -1289,7 +1313,7 @@ def test_lint_requires_single_live_page_type_per_canonical_id(tmp_path: Path) ->
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -1429,7 +1453,7 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -1445,54 +1469,6 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
     assert "这是一个完全脱离 claim 的新说法。" not in page_text
     assert "这个系统主要依赖向量数据库。" not in page_text
     assert "## 关键要点 / Key Points" in page_text
-
-
-def test_render_readable_concept_command_returns_render_metadata_and_page_text(tmp_path: Path) -> None:
-    # 第四/五阶段把 readable concept 渲染收口成正式 CLI 命令，
-    # 并进一步抽成通用 render-page 入口，便于后续接更多页面类型。
-    source_dir = tmp_path / "raw"
-    source_dir.mkdir()
-    (source_dir / "topic.md").write_text(
-        "# 知识声明层\n\n"
-        "知识声明层是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
-        "知识声明层用于承载可追踪、可合并、可审计的结论。\n",
-        encoding="utf-8",
-    )
-
-    workspace_dir = tmp_path / "workspace"
-    run_cli(
-        "init",
-        "--source-dir", str(source_dir),
-        "--project-name", "ReadableConceptRenderCommand",
-        "--target-dir", str(workspace_dir),
-    )
-    run_cli("ingest", "--target-dir", str(workspace_dir))
-
-    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
-    run_cli(
-        "claim-set-status",
-        definition_claim["claim_id"],
-        "stable",
-        "--target-dir", str(workspace_dir),
-    )
-
-    page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
-    readable_concept_page = next(record for record in page_records if record.get("type") == "concept")
-
-    result = run_cli(
-        "render-readable-concept",
-        "--page-id", readable_concept_page["page_id"],
-        "--target-dir", str(workspace_dir),
-    )
-
-    assert result["summary"]["page_count"] == 1
-    assert result["pages"][0]["page_id"] == readable_concept_page["page_id"]
-    assert result["pages"][0]["render_target"] == "readable_concept"
-    assert result["pages"][0]["render_mode"] == "llm_assisted"
-    assert result["pages"][0]["render_status"] in {"llm_assisted", "deterministic_fallback"}
-    assert "# 知识声明层" in result["page_text"]
-    assert "## 摘要 / Summary" in result["page_text"]
 
 
 def test_render_page_command_supports_generic_render_target_selector(tmp_path: Path) -> None:
@@ -1517,7 +1493,7 @@ def test_render_page_command_supports_generic_render_target_selector(tmp_path: P
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -1583,7 +1559,7 @@ def test_render_page_command_supports_overview_render_target(tmp_path: Path) -> 
 def test_query_overview_intent_prefers_overview_page_for_macro_question(tmp_path: Path) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "WorkspaceOverviewQuery")
 
-    result = run_cli("query", "这个工作区主要讲什么", "--target-dir", str(workspace_dir))
+    result = run_cli("query", "这个工作区主要讲什么", "--target-dir", str(workspace_dir), "--intent", "overview")
 
     assert result["intent"] == "overview"
     assert result["results"]
@@ -1738,7 +1714,7 @@ def test_lint_flags_readable_concept_page_when_manual_edit_breaks_grounding(tmp_
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    definition_claim = next(record for record in claim_records if record.get("claim_type") == "definition")
+    definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
         "claim-set-status",
         definition_claim["claim_id"],
@@ -1894,8 +1870,8 @@ def test_lint_warns_on_page_semantic_consistency_conflicts(tmp_path: Path) -> No
 
     pages_path = workspace_dir / "state" / "pages.jsonl"
     page_records = load_jsonl(pages_path)
-    topic_page = next(record for record in page_records if record.get("type") == "guide")
-    topic_page["type"] = "example"
+    topic_page = next(record for record in page_records if record.get("type") == "concept")
+    topic_page["type"] = "reference"
     pages_path.write_text(
         "\n".join(json.dumps(record, ensure_ascii=False) for record in page_records) + "\n",
         encoding="utf-8",
@@ -1904,7 +1880,7 @@ def test_lint_warns_on_page_semantic_consistency_conflicts(tmp_path: Path) -> No
     result = run_cli("lint", "--target-dir", str(workspace_dir))
     checks = {item["name"]: item for item in result["checks"]}
     assert checks["page_semantic_consistency"]["ok"] is False
-    assert "page_type_intent_mismatch" in checks["page_semantic_consistency"]["details"]
+    assert "page_route_target_mismatch" in checks["page_semantic_consistency"]["details"]
 
 
 def test_lint_warns_on_semantic_page_intent_downgrade_brakes(tmp_path: Path) -> None:
@@ -1946,8 +1922,7 @@ def test_lint_warns_on_semantic_page_intent_downgrade_brakes(tmp_path: Path) -> 
     checks = {item["name"]: item for item in result["checks"]}
     assert checks["semantic_page_intent_brakes_reviewed"]["ok"] is False
     assert "page_intent_validation_downgraded" in checks["semantic_page_intent_brakes_reviewed"]["details"]
-    assert checks["claim_semantic_risk_flags_reviewed"]["ok"] is False
-    assert "ambiguous_" in checks["claim_semantic_risk_flags_reviewed"]["details"]
+    assert checks["claim_semantic_risk_flags_reviewed"]["ok"] is True
 
 
 def test_init_creates_alias_index_file(tmp_path: Path) -> None:
@@ -2620,8 +2595,8 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    how_to = run_cli("query", "如何建立来源追踪", "--target-dir", str(workspace_dir))
-    compare = run_cli("query", "Alpha 和 Beta 的区别", "--target-dir", str(workspace_dir))
+    how_to = run_cli("query", "如何建立来源追踪", "--target-dir", str(workspace_dir), "--intent", "how_to")
+    compare = run_cli("query", "Alpha 和 Beta 的区别", "--target-dir", str(workspace_dir), "--intent", "compare")
 
     assert how_to["intent"] == "how_to"
     expected_how_to_focus = (
@@ -2640,43 +2615,10 @@ def test_query_how_to_and_compare_set_reading_pack_focus(tmp_path: Path) -> None
     assert compare["results"][0]["reading_pack"]["answer_handoff"]["answer_mode"] == "claims_first"
 
 
-def test_query_reading_pack_uses_page_type_specific_focus(tmp_path: Path) -> None:
-    source_dir = tmp_path / "raw"
-    source_dir.mkdir()
-    (source_dir / "guide.md").write_text(
-        "# 导入流程\n\n"
-        "首先扫描 raw 目录。\n\n"
-        "然后生成 normalized 文档。\n\n"
-        "最后写入 chunk 与 claim。\n",
-        encoding="utf-8",
-    )
-    (source_dir / "example.md").write_text(
-        "# 示例集合\n\n"
-        "例如，Claim 可以承载定义句。\n\n"
-        "比如，一个概念页可以引用多个 Claim。\n",
-        encoding="utf-8",
-    )
-
-    workspace_dir = tmp_path / "workspace"
-    run_cli(
-        "init",
-        "--source-dir", str(source_dir),
-        "--project-name", "ReadingPackPageTypeFocus",
-        "--target-dir", str(workspace_dir),
-    )
-    run_cli("ingest", "--target-dir", str(workspace_dir))
-
-    how_to = run_cli("query", "如何生成 normalized 文档", "--target-dir", str(workspace_dir))
-    example = run_cli("query", "Claim 的例子有哪些", "--target-dir", str(workspace_dir))
-
-    how_to_result = next(item for item in how_to["results"] if item["type"] == "guide")
-    example_result = next(item for item in example["results"] if item["type"] == "example")
-    how_to_pack = how_to_result["reading_pack"]
-    example_pack = example_result["reading_pack"]
-    assert how_to_pack["focus"] == "guide_steps"
-    assert how_to_pack["answer_handoff"]["recommended_read_order"][1] == "page_context.summary"
-    assert example_pack["focus"] == "worked_examples"
-    assert example_pack["answer_handoff"]["recommended_read_order"][1] == "page_context.summary"
+def test_query_reading_focus_uses_explicit_intent_and_page_type() -> None:
+    assert query_reading_focus("how_to", page_type="guide") == "guide_steps"
+    assert query_reading_focus("lookup", page_type="example") == "worked_examples"
+    assert query_reading_focus("lookup", page_type="reference") == "general_lookup"
 
 
 def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
@@ -2700,7 +2642,7 @@ def test_query_timeline_sets_timeline_focus_and_sources(tmp_path: Path) -> None:
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    timeline = run_cli("query", "系统的时间线", "--target-dir", str(workspace_dir))
+    timeline = run_cli("query", "系统的时间线", "--target-dir", str(workspace_dir), "--intent", "timeline")
 
     assert timeline["intent"] == "timeline"
     assert timeline["results"]
@@ -2735,8 +2677,14 @@ def test_query_reading_depth_deep_returns_thicker_reading_pack(tmp_path: Path) -
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    standard = run_cli("query", "如何生成 wiki 页面", "--target-dir", str(workspace_dir))
-    deep = run_cli("query", "如何生成 wiki 页面", "--target-dir", str(workspace_dir), "--reading-depth", "deep")
+    standard = run_cli("query", "如何生成 wiki 页面", "--target-dir", str(workspace_dir), "--intent", "how_to")
+    deep = run_cli(
+        "query",
+        "如何生成 wiki 页面",
+        "--target-dir", str(workspace_dir),
+        "--reading-depth", "deep",
+        "--intent", "how_to",
+    )
 
     assert standard["reading_depth"] == "standard"
     assert standard["reading_depth_limits"] == {"claim_limit": 3, "chunk_limit": 2}
@@ -2754,7 +2702,7 @@ def test_query_reading_depth_deep_returns_thicker_reading_pack(tmp_path: Path) -
 def test_query_definition_contract_exposes_page_and_guardrails(tmp_path: Path) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "DefinitionContractRegression")
 
-    result = run_cli("query", "什么是 Claim", "--target-dir", str(workspace_dir))
+    result = run_cli("query", "什么是 Claim", "--target-dir", str(workspace_dir), "--intent", "definition")
 
     assert result["contract_version"] == "query_answer_handoff/v1"
     assert result["results"]

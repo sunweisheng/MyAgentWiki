@@ -133,7 +133,7 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert ingest_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
     assert ingest_result["workspace_summary"]["raw_dir"] == str(source_dir.resolve())
 
-    query_result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir))
+    query_result = run_cli("query", "什么是知识声明层", "--target-dir", str(workspace_dir), "--intent", "definition")
     assert query_result["intent"] == "definition"
     assert query_result["results"]
     assert query_result["workspace_summary"]["workspace_dir"] == str(workspace_dir.resolve())
@@ -230,7 +230,8 @@ def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
         '    strategy: "agent_assisted"\n'
         '    command:\n'
         f'      - "{sys.executable}"\n'
-        f'      - "{REPO_ROOT / "scripts" / "agent_assisted_review_hook.py"}"\n'
+        '      - "-m"\n'
+        '      - "myagentwiki.agent_hook"\n'
         '    timeout_seconds: 20\n'
         '    min_confidence: 0.9\n',
     )

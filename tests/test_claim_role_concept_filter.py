@@ -33,7 +33,7 @@ def load_jsonl(path: Path) -> list[dict]:
     ]
 
 
-def test_claim_role_blocks_procedure_and_example_from_concept_generation(tmp_path: Path) -> None:
+def test_claim_role_does_not_route_chinese_procedure_or_example_words(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "workflow.md").write_text(
@@ -61,16 +61,17 @@ def test_claim_role_blocks_procedure_and_example_from_concept_generation(tmp_pat
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     assert claim_records
     roles = {record.get("knowledge_role") for record in claim_records}
-    assert "procedure" in roles or "example" in roles
+    assert "procedure" not in roles
+    assert "example" not in roles
 
     concept_pages = [
         record for record in load_jsonl(workspace_dir / "state" / "pages.jsonl")
         if record.get("type") == "concept" and not record.get("removed")
     ]
-    assert concept_pages == []
+    assert concept_pages
 
 
-def test_claim_role_can_promote_short_definition_with_quality_clearance(tmp_path: Path) -> None:
+def test_claim_role_does_not_promote_short_chinese_definition_marker(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "short_definition.md").write_text(
@@ -95,7 +96,8 @@ def test_claim_role_can_promote_short_definition_with_quality_clearance(tmp_path
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     target_claim = next(record for record in claim_records if record.get("text") == "用于保留回链")
     assert target_claim.get("quality_decision_source") == "semantic_batch"
-    assert target_claim.get("knowledge_role") == "definition"
+    assert target_claim.get("knowledge_role") == "fact"
+    assert target_claim.get("page_intent_hints") == ["topic"]
 
 
 def test_claim_role_does_not_promote_ambiguous_chinese_markers(tmp_path: Path) -> None:
@@ -142,8 +144,8 @@ def test_claim_role_does_not_promote_ambiguous_chinese_markers(tmp_path: Path) -
         record for record in semantic_records
         if record.get("task_type") == "claim_role"
     ]
-    assert any("ambiguous_case_keyword" in record.get("risk_flags", []) for record in role_records)
-    assert any("ambiguous_reference_keyword" in record.get("risk_flags", []) for record in role_records)
+    assert not any("ambiguous_case_keyword" in record.get("risk_flags", []) for record in role_records)
+    assert not any("ambiguous_reference_keyword" in record.get("risk_flags", []) for record in role_records)
 
 
 def test_claim_role_uses_structure_evidence_for_reference(tmp_path: Path) -> None:

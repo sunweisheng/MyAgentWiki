@@ -78,15 +78,11 @@ def test_ingest_builds_structure_evidence_and_knowledge_units(tmp_path: Path) ->
     )
     assert attached_block["local_heading"] == "支付和支出渠道问题处理"
     assert "高频或典型故障案例" in attached_block["text"]
-    assert attached_block["content_tags"] == ["cases", "procedural_language"]
+    assert attached_block["content_tags"] == []
     assert {
         (feature["tag"], feature["category"], feature["strength"])
         for feature in attached_block["semantic_features"]
-    } >= {
-        ("cases", "text_pattern", "weak"),
-        ("procedural_language", "text_pattern", "medium"),
-        ("local_heading_body", "structure", "medium"),
-    }
+    } >= {("local_heading_body", "structure", "medium")}
     assert len(attached_block["structure_block_ids"]) == 2
 
     metadata_block = next(
@@ -107,7 +103,7 @@ def test_ingest_builds_structure_evidence_and_knowledge_units(tmp_path: Path) ->
     attached_ku = ku_by_evidence_id[attached_block["evidence_block_id"]]
     assert attached_ku["unit_kind"] == "statement"
     assert attached_ku["local_heading"] == "支付和支出渠道问题处理"
-    assert attached_ku["semantic_projection"]["content_tags"] == ["cases", "procedural_language"]
+    assert attached_ku["semantic_projection"]["content_tags"] == []
     assert any(
         feature["tag"] == "local_heading_body"
         for feature in attached_ku["semantic_projection"]["semantic_features"]

@@ -264,8 +264,8 @@ def test_semantic_batch_items_include_structure_context(tmp_path: Path) -> None:
     assert structure_context["local_headings"] == ["渠道故障案例复盘"]
     assert structure_context["unit_kind_counts"] == {"statement": 1}
     assert structure_context["evidence_block_kind_counts"] == {"list_item_with_body": 1}
-    assert structure_context["content_tag_counts"] == {"cases": 1, "procedural_language": 1}
-    assert structure_context["semantic_feature_counts"]["cases"] >= 1
+    assert structure_context["content_tag_counts"] == {}
+    assert "cases" not in structure_context["semantic_feature_counts"]
     assert structure_context["semantic_feature_counts"]["local_heading_body"] >= 1
     assert structure_context["semantic_feature_strength_counts"]["medium"] >= 1
     assert structure_context["knowledge_unit_ids"]
@@ -277,7 +277,7 @@ def test_semantic_batch_items_include_structure_context(tmp_path: Path) -> None:
         if target_item["claim_id"] in item.get("claim_ids", [])
     )
     group_context = grouped_item["group_context"]
-    assert group_context["content_tag_counts"] == {"cases": 1, "procedural_language": 1}
+    assert group_context["content_tag_counts"] == {}
     assert group_context["semantic_feature_counts"]["local_heading_body"] >= 1
     assert group_context["unit_kind_counts"] == {"statement": 1}
     assert group_context["evidence_block_kind_counts"] == {"list_item_with_body": 1}
@@ -343,10 +343,10 @@ def test_semantic_batch_claim_candidate_quality_writes_short_claim_decisions(tmp
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     assert any(record.get("quality_decision_source") == "semantic_batch" for record in claim_records)
-    assert any(record.get("quality_safe_auto_ready") is True for record in claim_records if record.get("text") == "保留回链")
+    assert not any(record.get("quality_safe_auto_ready") is True for record in claim_records if record.get("text") == "保留回链")
     quality_claim = next(record for record in claim_records if record.get("text") == "保留回链")
     assert quality_claim["semantic_decision_ids"]
-    assert quality_claim["semantic_projection"]["quality_safe_auto_ready"] is True
+    assert quality_claim["semantic_projection"]["quality_safe_auto_ready"] is not True
     assert quality_claim["semantic_projection"]["quality_label"] == quality_claim["quality_label"]
 
 
@@ -437,4 +437,5 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
 
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     checks = {item["name"]: item for item in lint_result["checks"]}
-    assert checks["page_semantic_consistency"]["ok"] is True
+    assert checks["page_semantic_consistency"]["ok"] is False
+    assert "topic_page_semantically_thin:procedure" in checks["page_semantic_consistency"]["details"]
