@@ -254,7 +254,7 @@ flowchart TD
 用户运行 `init` 后生成的工作区负责承载：
 
 - sibling `raw/` 原始资料目录引用
-- `normalized / structure_blocks / evidence_blocks / knowledge_units / chunks / claims` 证据层产物
+- `normalized / structure_blocks / evidence_blocks / knowledge_units / chunks / claims` 证据层产物；其中 `structure_blocks / evidence_blocks / knowledge_units` 是逻辑层名称，当前实际落盘在 `state/*.jsonl`
 - `semantic/` 或等价语义账本目录
 - `wiki / indexes` 展示层产物
 - `state / reviews / reports / logs` 状态与控制层
@@ -307,6 +307,14 @@ flowchart TD
 - `config/`：工作区配置
 - `reports/lint/`：巡检报告目录
 
+说明：
+
+- 当前没有顶层 `structure_blocks/`、`evidence_blocks/`、`knowledge_units/` 目录
+- MarkdownStructureIR / StructureBlock 实际落盘为 `state/structure_blocks.jsonl`
+- EvidenceBlock 实际落盘为 `state/evidence_blocks.jsonl`
+- KnowledgeUnit 实际落盘为 `state/knowledge_units.jsonl`
+- 这三类对象是机器消费的结构化账本，默认由 CLI 从 `normalized/*.md` 重新生成，不建议人工直接编辑
+
 ### 工作区分层与写入边界
 
 #### 1. 原始资料层
@@ -320,10 +328,13 @@ flowchart TD
 #### 3. 证据编译层
 
 - `normalized/`：标准化文档目录，保存统一格式的文档中间表示
+- `state/structure_blocks.jsonl`：MarkdownStructureIR / StructureBlock 账本，保存 Markdown 结构树与位置映射
+- `state/evidence_blocks.jsonl`：EvidenceBlock 账本，保存可回链、可引用、可组合的最小证据原子
+- `state/knowledge_units.jsonl`：KnowledgeUnit 账本，保存从 EvidenceBlock 中识别出的候选知识对象
 - `chunks/`：上下文容器目录，保存可检索、可引用、可回链的粗粒度片段；它辅助检索、摘要、相邻上下文和增量处理，但不作为最小证据原子
 - `claims/`：声明展开目录，保存单条 Claim 的人工可读展开文件
 
-这三层不是“临时文件夹”，而是系统主真相的一部分。
+这些产物不是“临时文件”，而是系统主真相的一部分。区别在于：`normalized/`、`chunks/`、`claims/` 当前有展开目录；StructureBlock、EvidenceBlock、KnowledgeUnit 当前以 `state/*.jsonl` 结构化账本保存。
 
 #### 4. 语义分析层
 
@@ -442,6 +453,65 @@ flowchart TD
 - Markdown 本身已经携带大量知识结构，不能在 claim 抽取前被过早压平成纯文本
 - 标题、列表项、表格行、引用块和代码块的语义不能只靠换行和关键词恢复
 - 后续 Evidence Block、Knowledge Unit、Claim、页面和 reading pack 都应能回到结构块
+
+### Metadata（结构元信息）
+
+Metadata 表示从原文结构中直接读出的结构化字段。它不是独立的证据链节点，而是附着在 StructureBlock、EvidenceBlock、KnowledgeUnit、Claim 或 Page 上的结构化属性。
+
+典型 metadata 包括：
+
+- 字段行，例如 `负责人：人员A`、`状态：运行中`
+- 表格列值，例如 `字段=负责人`、`值=人员A`
+- 日期、人数、标签、来源、状态、版本、部门、角色等明确结构字段
+
+Metadata 与主证据链的关系是：
+
+```text
+MarkdownStructureIR / StructureBlock
+  识别原文里“这是一个字段行 / 表格行 / 标题 / 列表项”
+
+EvidenceBlock
+  固化这条字段证据的原文、位置、结构字段和 metadata
+
+KnowledgeUnit
+  从 EvidenceBlock 中识别候选知识对象，可继承或规范化 metadata
+
+Claim
+  只有当某个 metadata 对长期追踪、检索或问答有价值时，才提升为稳定事实声明
+```
+
+例如：
+
+```text
+StructureBlock 4
+type: metadata_line
+text: 负责人：人员A
+line: 12
+
+EvidenceBlock B
+block_kind: metadata_line
+text: 负责人：人员A
+metadata: {"负责人": "人员A"}
+source: ops.md:12
+
+KnowledgeUnit B
+unit_kind: metadata_fact
+text: 平台运营组负责人是人员A
+metadata: {"负责人": "人员A"}
+evidence_block_ids: [B]
+
+Claim B
+claim_type: metadata_fact
+text: 平台运营组负责人是人员A
+evidence_block_ids: [B]
+```
+
+关键约束：
+
+- metadata 不能凭空生成，必须能回到 StructureBlock 或 EvidenceBlock
+- metadata 可以只保留为结构字段，不一定生成 Claim
+- 对用户检索、问答、排序、筛选有价值的 metadata，可以生成 KnowledgeUnit，再按规则提升为 Claim
+- metadata 的事实权威来自 EvidenceBlock，而不是页面文本或 LLM 自由补全
 
 ### EvidenceBlock（证据块）
 
@@ -1135,6 +1205,8 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 1. 结构字段进入 Evidence Block / Knowledge Unit 的 `metadata`
 2. 用户可能查询的结构事实可生成带上下文的 Claim
 
+换句话说，metadata 先作为结构化字段保真落账；只有当它需要参与长期事实追踪、检索、问答或页面展示时，才进一步生成 KnowledgeUnit 或 Claim。
+
 例如 Markdown 中出现：
 
 ```text
@@ -1178,6 +1250,33 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 - 规则抽取出来的 Claim 主要落在 `draft / needs_review`
 - `stable` 已进入受控自动流程，通过 `review-auto` 中的提稳子步骤按可追踪性、冲突状态与文本完整度收口
 - `disputed` 仍更多依赖后续人工或 Agent 深化治理
+
+#### Claim 自动提稳的当前判定口径
+
+`review-auto` 中的 stable promotion 不应理解为“LLM 觉得可以就直接提稳”。当前实现先走脚本层 `safe_auto` 规则；只有在规则未放行、且工作区显式配置了 agent-assisted stable promotion hook 时，才读取外部 hook 的 `decision / confidence`。
+
+脚本层 `safe_auto` 自动提稳必须同时满足：
+
+- Claim 仍是 live / active，且当前 `status=draft`
+- Claim 有 `source_ids` 和 `source_refs`，能回到来源证据
+- Claim 没有挂在未处理的 review 上
+- Claim 没有 `duplicate_candidates`
+- Claim 没有 `conflict_group`
+- 文本不是明显噪声
+- 文本不是问句
+- `quality_label` 不是 `noise / fragment / title_shell`
+- 短文本灰区必须有 `quality_safe_auto_ready=true`
+- 非短文本灰区继续检查 `claim_can_stand_alone`
+
+“文本不是明显噪声”当前是规则判断，不依赖 LLM。它主要拦截空文本、纯链接、文件路径味过重的文本、`speaker:` / `time:` / `turn_id` 这类对话或日志字段、说话人前缀、单独 ISO 日期、Markdown 表格分隔线，以及自然字符少于 4 个的碎片。
+
+“文本不是依赖前文的残句”当前有检查入口，但实现中的依赖前缀列表暂为空。因此这一项在主脚本中主要是预留钩子，当前并不会系统性拦截“因此 / 所以 / 这个 / 上述”这类前文依赖表达。实际兜底更多来自噪声判断、问句判断、短文本质量判断、review / duplicate / conflict 门槛，以及 hook 的保守判断。
+
+短文本灰区的当前定义是：清洗后自然字符少于 10 个，且不属于噪声。自然字符数大于等于 10 个时，不进入短文本灰区，也不要求 `quality_safe_auto_ready=true`；它会继续走普通的独立性、冲突、重复和审核状态检查。
+
+`quality_safe_auto_ready=true` 的含义是：对于短文本灰区，语义质量判断明确认为它虽然短，但可以安全进入自动提稳。当前包内保守 hook 对短 claim 很谨慎：问句、冒号结尾、问号结尾会标为 `fragment`；自然字符小于等于 4 个会标为 `title_shell`；其他短文本通常保留为 `standalone`，但仍要求 review，不默认给 `safe_auto_ready=true`。
+
+`decision=promote` 且 `confidence >= min_confidence` 的白话含义是：外部 hook 明确建议“可以提稳”，并且它给出的把握程度达到配置里的最低置信度门槛。这个 hook 不直接写状态；脚本只在返回值达标后，才把 Claim 的 `status` 改成 `stable`。
 
 ### Claim 类型与知识角色
 
@@ -1465,7 +1564,7 @@ LLM 输出应包含可解释原因，例如：
 `ingest -> review-auto -> stable promotion -> page rebuild -> query-ready artifacts`
 
 也就是说，`ingest` 结束并不总意味着“所有后续收口都已完成”，但默认模板会继续把高把握自动步骤串起来。
-其中 `stable promotion` 是否发生，取决于 hook 判定是否返回 `decision=promote`；`page rebuild` 是否进一步产出可读 `concept / overview`，还取决于 stable claim 数量、页型路由结果与页面生成条件。
+其中 `stable promotion` 是否发生，先取决于脚本层 `safe_auto` 规则是否放行；如果未放行且配置了 agent-assisted hook，则再取决于 hook 是否返回 `decision=promote` 且置信度达标。`page rebuild` 是否进一步产出可读 `concept / overview`，还取决于 stable claim 数量、页型路由结果与页面生成条件。
 
 ### 必须进入审核队列的场景
 
@@ -1519,9 +1618,10 @@ LLM 输出应包含可解释原因，例如：
 同时，系统还支持受控的 `stable promotion`：
 
 - 默认 `safe_auto` 只要求 claim 仍可追踪、没有开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声；单一来源也可以被提升为 `stable`
-- 对短 claim，`safe_auto` 不再直接依赖固定字符数门槛，而应优先读取短句质量语义结论；没有明确放行时继续保守停留在 `draft/needs_review`
+- 对短 claim，`safe_auto` 不再简单按长度一刀切。当前实现把自然字符少于 10 个且非噪声的文本视为短文本灰区；只有 `quality_safe_auto_ready=true` 时才允许自动提稳
+- 自然字符大于等于 10 个的 Claim 不进入短文本灰区，不要求 `quality_safe_auto_ready=true`，但仍必须通过可追踪性、开放 review、重复、冲突、噪声、问句和质量标签检查
 - 多来源支撑仍然是强正向信号，但不再作为默认提稳门槛
-- 只有在 hook 返回 `decision=promote` 且置信度达标时，才提升为 `stable`
+- 如果脚本层 `safe_auto` 没有放行，只有在 agent-assisted hook 返回 `decision=promote` 且置信度达标时，才提升为 `stable`
 - 未达标时保持原状，不做“顺手提稳”
 
 ### 恢复机制
