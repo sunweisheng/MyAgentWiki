@@ -97,10 +97,10 @@ LLM 输出的每个候选对象都必须携带回链依据，例如 `evidence_bl
 
 ```text
 - 平台运营组
-  负责人：许颖超
+  负责人：人员A
 ```
 
-LLM 可以帮助形成“平台运营组负责人是许颖超”这类有结构来源的候选事实；但不能进一步写成“许颖超负责平台整体运营管理”，除非 Evidence Block 中已有等价表达。
+LLM 可以帮助形成“平台运营组负责人是人员A”这类有结构来源的候选事实；但不能进一步写成“人员A负责平台整体运营管理”，除非 Evidence Block 中已有等价表达。
 
 ### 3. 语义层必须独立成账本
 
@@ -295,7 +295,7 @@ flowchart TD
 - `../raw/`：与工作区平级的原始资料目录
 - `../assets/`：与工作区平级的下载型派生素材目录
 - `normalized/`：标准化文档层
-- `chunks/`：证据切块层
+- `chunks/`：检索、摘要、相邻上下文和增量处理容器层
 - `claims/`：声明展开文件
 - `semantic/`：语义分析结果、批量缓存和中间产物
 - `wiki/`：知识页面
@@ -320,7 +320,7 @@ flowchart TD
 #### 3. 证据编译层
 
 - `normalized/`：标准化文档目录，保存统一格式的文档中间表示
-- `chunks/`：证据切块目录，保存可检索、可引用、可回链的证据单元
+- `chunks/`：上下文容器目录，保存可检索、可引用、可回链的粗粒度片段；它辅助检索、摘要、相邻上下文和增量处理，但不作为最小证据原子
 - `claims/`：声明展开目录，保存单条 Claim 的人工可读展开文件
 
 这三层不是“临时文件夹”，而是系统主真相的一部分。
@@ -447,6 +447,12 @@ flowchart TD
 
 表示可引用、可回链、可组合的最小证据单元。
 
+为了避免把 Evidence Block、Knowledge Unit 和 Claim 混成一层，可以先用下面这个心智模型理解：
+
+- Evidence Block 保留“原文证据是什么、在哪里、结构如何”
+- Knowledge Unit 表达“系统从这份证据中识别出了什么候选知识对象”
+- Claim 只是 Knowledge Unit 中适合长期事实追踪的稳定子集
+
 最小字段：
 
 - `evidence_block_id`：证据块唯一标识
@@ -521,6 +527,7 @@ flowchart TD
 - `token_estimate`：Token 估算数
 - `summary`：切块摘要
 - `text`：切块正文
+- `evidence_block_ids`：该 chunk 覆盖的 Evidence Block ID 列表
 - `previous_chunk`：前一切块 ID
 - `next_chunk`：后一切块 ID
 - `overlap_from_previous`：与前一切块的重叠内容
@@ -536,6 +543,19 @@ flowchart TD
 - `chunk_kind / topicworthiness_hint` 让后续流程区分结构壳、主题段、步骤段、总结段等不同角色
 - `section_path_parts / section_title / parent_section_path / heading_level` 让标题树不再只剩下一条扁平字符串，后续 claim、concept page、query 排序和 answer-ready 都可以继续消费父子层级关系
 - Chunk 应引用其覆盖的 Evidence Blocks；Claim / Knowledge Unit 的精确回链优先走 Evidence Block，再回到 Chunk 和 Source
+
+后续使用位置：
+
+- `query`：用于召回相关上下文片段，并解释页面、Claim 或来源为什么命中
+- `reading_pack`：返回 `matched_chunks`，让 Agent 能在 Claim / Evidence Block 之外继续读取前后文
+- `answer-ready`：给上层回答器提供可读上下文摘要、章节路径和必要的前后 chunk 线索
+- 来源摘要页：列出某个来源下的 chunk，方便人工从来源页继续下钻
+- 概念页或其他可读页面的 `Source Evidence`：提供上下文入口，而不是替代 Evidence Block 成为精确证据
+- 增量 ingest：判断一段上下文窗口是否变化，降低整篇文档重算的需要
+- `lint` 与覆盖率检查：检查 `chunk_id` 唯一性、前后邻接、覆盖关系和断链风险
+- 调试与审计：当 Knowledge Unit 或 Claim 看起来可疑时，回到覆盖它的 chunk 观察更大的上下文窗口
+
+因此可以把边界固定为：Claim / Knowledge Unit 是否成立看 Evidence Block；是否需要更完整上下文、检索解释或阅读窗口时看 Chunk。
 
 ### Claim（知识声明）
 
@@ -954,6 +974,51 @@ normalized Markdown 之后的第一任务不是立刻切 claim，而是先把 Ma
 - 代码块默认不进入普通 Claim 抽取，但可作为 `code_example` Evidence Block 被示例页或来源视图消费
 - 过短块不再仅按字符数过滤；先判断它是结构壳、metadata、局部标题还是完整短事实
 
+### MarkdownStructureIR、EvidenceBlock 与 Chunk 的关系
+
+这三者分别承担不同职责：
+
+- MarkdownStructureIR / StructureBlock 负责保留“原文结构长什么样”
+- EvidenceBlock 负责确定“哪些结构可以作为可回链证据”
+- Chunk 负责组织“检索、摘要和阅读时使用哪段上下文窗口”
+
+它们的默认生成关系是：
+
+```text
+normalized Markdown
+  -> MarkdownStructureIR / StructureBlocks
+  -> EvidenceBlocks
+  -> KnowledgeUnits
+  -> Claims
+
+EvidenceBlocks
+  -> Chunks
+```
+
+更具体地说：
+
+- 一个 StructureBlock 表示一个 Markdown 原始结构，例如标题、段落、列表项、表格行、引用块或代码块
+- 一个 EvidenceBlock 可以由一个或多个 StructureBlock 组合而成，例如“列表项标题 + 下方正文”
+- 一个 Chunk 通常由一组相邻或同上下文范围内的 EvidenceBlocks 组成
+- KnowledgeUnit / Claim 的证据依据是 EvidenceBlock ID，而不是 StructureBlock ID 或 Chunk ID
+- StructureBlock 负责位置和结构保真，EvidenceBlock 负责证据原子，Chunk 负责上下文窗口
+
+例如：
+
+```text
+StructureBlock 1: heading 平台运营组
+StructureBlock 2: list_item 支付问题处理
+StructureBlock 3: paragraph 对高频故障进行复盘，提炼标准化流程
+StructureBlock 4: metadata_line 负责人：人员A
+
+EvidenceBlock A -> structure_block_ids: [2, 3]
+EvidenceBlock B -> structure_block_ids: [4]
+
+Chunk 1 -> evidence_block_ids: [A, B]
+```
+
+这表示：标题结构可作为 EvidenceBlock A / B 的章节上下文；EvidenceBlock A 和 B 是后续 KnowledgeUnit 的证据依据；Chunk 1 只是把 A 和 B 放进同一个可检索、可阅读的上下文容器。
+
 ### Chunk 与 Evidence Block 的关系
 
 Chunk 仍保留为检索、摘要和批处理容器，但它应由 Evidence Blocks 组合而成。
@@ -964,6 +1029,29 @@ Chunk 仍保留为检索、摘要和批处理容器，但它应由 Evidence Bloc
 - Chunk 是一组相邻 Evidence Blocks 的容器
 - Knowledge Unit 从 Evidence Block 抽取，而不是直接从压平后的 Chunk 文本抽取
 - reading pack 可同时返回 chunk 摘要和命中的 Evidence Blocks
+
+更准确地说，Chunk、Evidence Block、Knowledge Unit 是两种关系叠在一起：
+
+1. Chunk 对 Evidence Block 是“上下文覆盖关系”
+2. Knowledge Unit 对 Evidence Block 是“证据支撑关系”
+
+例如：
+
+```text
+Chunk 1 -> contains EvidenceBlock A, B, C
+Chunk 2 -> contains EvidenceBlock D, E, F
+
+KnowledgeUnit X -> supported_by EvidenceBlock C, D
+```
+
+这表示 KnowledgeUnit X 的证据跨越了两个 chunk，但不能说 X 由 chunk 直接支撑。更准确的说法是：
+
+- KnowledgeUnit X 由 EvidenceBlock C 和 EvidenceBlock D 支撑
+- EvidenceBlock C 位于 Chunk 1 覆盖范围内
+- EvidenceBlock D 位于 Chunk 2 覆盖范围内
+- 因此 X 可以间接映射到 Chunk 1 和 Chunk 2，用于补充上下文、阅读前后文和解释检索命中
+
+所以实现和文档都应避免把 `chunk_id` 当作 Knowledge Unit / Claim 的精确证据依据。精确证据依据应是 `evidence_block_ids`；`chunk_id` 只是帮助系统回到更大的上下文窗口。
 
 ### 允许被文档分析覆盖的策略
 
@@ -1052,7 +1140,7 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 ```text
 ### 平台运营组
 
-负责人：许颖超
+负责人：人员A
 小组人数：4人
 ```
 
@@ -1062,7 +1150,7 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 {
   "section_title": "平台运营组",
   "metadata": {
-    "负责人": "许颖超",
+    "负责人": "人员A",
     "小组人数": "4人"
   }
 }
@@ -1071,7 +1159,7 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 并可生成可检索事实：
 
 ```text
-平台运营组负责人是许颖超
+平台运营组负责人是人员A
 平台运营组小组人数为4人
 ```
 
@@ -1657,7 +1745,7 @@ content_tags:
 
 - `query_intent`：查询意图
 - 匹配 `claims`：命中的声明列表
-- 匹配 `chunks`：命中的证据切块列表
+- 匹配 `chunks`：命中的上下文容器列表，用于补足检索上下文、章节路径和前后邻接信息
 - 相关来源摘要
 - `section_path`：章节路径
 - `previous_chunk`：前一切块

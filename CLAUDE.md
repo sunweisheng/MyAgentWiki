@@ -16,7 +16,7 @@
 - 审核时，Agent 应先整理问题、风险和建议，再用白话向用户解释可选处理方式
 - 遇到长时间运行的脚本时，Claude Code 不要因为暂时没有新输出就随意中断；优先等待脚本继续推进，并以阶段性进度汇报代替打断
 - 若脚本仍在运行，默认每隔 60 秒向用户简短同步一次现状即可；只有看到明确失败、明显卡死，或用户要求停止时，才考虑中止
-- 涉及 `normalized/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/` 的生成或收敛流程时，更要避免中途强制打断，以降低数据不一致风险
+- 涉及 `normalized/`、`structure_blocks/`、`evidence_blocks/`、`knowledge_units/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/` 的生成或收敛流程时，更要避免中途强制打断，以降低数据不一致风险
 
 ## 用户工程初始化约定 / Workspace Initialization
 

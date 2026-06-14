@@ -18,9 +18,9 @@
 
 1. `doctor`：确认 Python、Git、依赖包、可选系统工具状态
 2. `bootstrap`：安装 Python 依赖
-3. `ingest`：更新 `raw -> normalized -> chunks -> claims -> wiki`
+3. `ingest`：更新 `source -> normalized -> structure_block -> evidence_block -> knowledge_unit -> claim / metadata -> page` 主证据链，并同步维护 chunk 检索容器
 4. `lint`：检查状态一致性、页面索引、alias/canonical 风险
-5. `query`：先查候选页，再决定是否继续回读 claim/chunk/source
+5. `query`：先查候选页，再决定是否继续回读 claim、knowledge_unit、evidence_block、chunk 和 source
 6. `review-list / review-apply`：处理冲突、重复、近重复等高风险项
 
 ## 长时间任务执行约定 / Long-Running Task Rules
@@ -30,7 +30,7 @@
 - 只有在出现明确证据时才考虑中止或改道，例如：进程已报错退出、连续较长时间完全无输出且无资源变化、用户明确要求停止、或继续运行会明显扩大数据不一致风险
 - 若任务执行时间较长，Agent 应定期向用户报告进度，而不是通过频繁打断脚本来确认状态；默认每隔 60 秒同步一次，除非用户另有要求，或脚本刚输出了更有价值的阶段性结果
 - 进度汇报应尽量使用外部可观察信息，例如已完成的阶段、最近一条日志、当前仍在运行的命令、下一步预计动作；在无法确认内部进度时，应明确说明“仍在处理，暂未看到新的阶段输出”
-- 若任务可能修改 `normalized/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/` 等衍生数据，Agent 应尽量避免在中间状态强制中止，以降低账本与索引不一致的风险
+- 若任务可能修改 `normalized/`、`structure_blocks/`、`evidence_blocks/`、`knowledge_units/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/` 等衍生数据，Agent 应尽量避免在中间状态强制中止，以降低账本与索引不一致的风险
 
 ## 查询与读取约定 / Query and Reading Rules
 
@@ -56,7 +56,7 @@
 - `assets/` 视为与工作区平级的派生附件目录，不属于独立导入源；只有当 `normalized metadata` 明确回链到 `asset_path` 时，Agent 才按需读取对应附件
 - 当用户已明确提供 `raw/` 路径，或当前工作区已经记录 sibling `raw/` 路径时，Agent 的默认文件检查范围也应限制在该 `raw/` 内；不要为了“确认导入范围”先枚举它的父目录、其他兄弟目录或整库内容
 - 当用户还没有明确给出 `raw/` 路径时，Agent 也不要主动探测附近已有工作区、兄弟目录或父目录来替用户猜测来源；默认只基于用户当前点名的目录或当前工作区已有配置继续，并在需要改目录结构时先明确说明假设
-- 自动写入主要落在 `normalized/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/`
+- 自动写入主要落在 `normalized/`、`structure_blocks/`、`evidence_blocks/`、`knowledge_units/`、`chunks/`、`claims/`、`wiki/`、`indexes/`、`state/`
 - 若需要修改工作区模板或状态规则，应优先改仓库源码和模板，再重新生成或重跑
 
 ## 当前已落地规则 / Current V1 Rules

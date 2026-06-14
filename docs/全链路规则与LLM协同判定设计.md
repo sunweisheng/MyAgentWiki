@@ -154,7 +154,7 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 
 ### grounded 输出是硬约束，不是风格偏好
 
-LLM 只能在已有 `normalized / chunks / claims / pages / reviews` 证据上做：
+LLM 只能在已有 `normalized / structure_blocks / evidence_blocks / knowledge_units / chunks / claims / pages / reviews` 上做 grounded 操作；其中 Evidence Block 是最小证据原子，chunk 只作为检索和上下文容器：
 
 - 分类
 - 选择

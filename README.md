@@ -14,7 +14,8 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（
 
 - `raw`：工作区外部 sibling 原始资料目录，只读保留
 - `normalized`：标准化后的文档中间表示
-- `chunks`：切块后的证据单元
+- `structure_blocks / evidence_blocks / knowledge_units`：结构化证据与候选知识对象层
+- `chunks`：检索、摘要、相邻上下文和增量处理用的粗粒度容器
 - `claims`：独立知识声明层
 - `semantic decisions`：语义决策层，保存结构化语义判断
 - `wiki`：最终对人可读、可链接、可维护的知识页面
@@ -34,7 +35,7 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（
 
 如果只看主链路，可以先把系统理解成：
 
-`raw -> normalized -> chunks -> claims -> semantic decisions -> reviews / stable promotion -> wiki / indexes / reading_pack / answer-ready`
+`source -> normalized -> structure_block -> evidence_block -> knowledge_unit -> claim / metadata -> semantic decisions -> reviews / stable promotion -> page / indexes / reading_pack / answer-ready`
 
 同时，项目的运行定位是：
 
@@ -49,7 +50,8 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 原始资料保留不动
 - 标准化层负责把不同格式整理成稳定输入
-- Chunk 和 Claim 层负责证据追踪与复用
+- Evidence Block、Knowledge Unit 和 Claim 层负责精确证据追踪与复用
+- Chunk 层负责检索召回、摘要、相邻上下文和增量处理，不再作为最小证据原子
 - 语义决策层负责补充脚本难以稳定给出的结构角色和页面意图
 - Wiki 页面、索引、阅读包和回答交接载荷负责把证据组织成可消费视图
 - Git 负责本地版本管理与回滚
@@ -57,7 +59,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 这让系统可以做到：
 
 - Wiki 结论可追踪到具体 Claim
-- Claim 可追踪到具体 Chunk 和 Source
+- Claim 可追踪到 Knowledge Unit、Evidence Block 和 Source，并可按需回到匹配 Chunk 补足上下文
 - 页面、审核单和语义决策之间可以互相回查
 - 同一 Claim 可反查被哪些 Wiki 页面引用
 - 冲突、重复、覆盖等高风险更新进入审核队列
@@ -77,7 +79,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 当前版本重点是把骨架、规则和主闭环打稳，已经完成：
 
 - Python `3.12+` CLI 基础入口
-- `raw -> normalized -> chunks -> claims -> wiki` 主链路打通
+- `source -> normalized -> structure_block -> evidence_block -> knowledge_unit -> claim / metadata -> page` 主证据链打通，并保留 chunk 作为检索和增量处理容器
 - Word、Excel、PDF、Markdown、图片五类输入的标准化优先级
 - Claim 声明层
 - BM25 多字段检索与页面权重设计
@@ -131,7 +133,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 面向 Agent 的核心约束是：
 
 - 固定流程优先执行 CLI
-- 证据追踪优先走 `wiki -> claim -> chunk -> source`
+- 证据追踪优先走 `page -> claim -> knowledge_unit -> evidence_block -> source`，必要时再读取匹配 chunk 补足上下文
 - review / state 恢复优先走 `review-list / review-apply`
 
 ### 在 Codex 中安装
@@ -625,17 +627,17 @@ MyAgentWiki/
   - 已实现工作区初始化、模板生成、状态文件创建、Git 基线提交
   - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md` / `CLAUDE.md`、以及 query/agent 基础配置
 - `myagentwiki ingest`
-  - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、最小 chunk 流程、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
+  - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、Structure IR / Evidence Block / Knowledge Unit 编译、chunk 上下文容器生成、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
   - 扫描 `raw/` 时当前会统一跳过所有 `.` 开头的文件和目录，例如 `.DS_Store`、`.obsidian/` 及其子内容，不把这些隐藏项纳入 ingest
   - 当前 Markdown 标准化会尝试下载内嵌的远程图片，并把下载结果落到工作区外部 sibling `assets/` 目录；图片存储路径按 `source_id / image_index` 组织，便于后续回链
   - 远程图片下载会先严格校验证书；若命中证书校验失败，脚本会默认只对 Markdown 图片下载自动重试一次不校验证书的受控回退；如需关闭该行为，可显式传入 `--disable-insecure-download-retry`
   - 当前规则式 Claim 草稿抽取采用“整句优先，子句只作候选补充”的策略：先保留完整句，再只把可独立理解的子句作为补充候选，避免把逗号后的半句话直接推进到 Claim 层
-  - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`Alice:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
+  - 当前 Claim 抽取会主动过滤一批明显不适合作为知识声明的噪声，例如 HTML 注释里的 `turn_id / speaker / time` 元信息、`说话人A:` 这类对话发言前缀，以及纯日期标题；同时会对 `旨在`、`具体细节`、`这是一份思路文件` 这类从句或元描述降权，避免它们抢占代表陈述
   - 当正文抽不出可用 Claim、但章节标题本身是 `YYYY-MM-DD` 这样的完整日期时，系统会补一条日期型 Claim，保留时间线入口页，避免日期标题完全消失
   - 当前已经实现来源视图页与可读概念页，并会同步生成对应页面、`state/pages.jsonl`、`wiki/index.md` 与 `wiki/log.md`
   - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类短语会优先于说明性长句
   - 当前概念页展示层直接展示选出的代表 Claim，不再靠中文“是 / 用于”等词面把短语强行改写成定义句
-  - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、证据 chunk 和次级 ID，方便顺着 `wiki -> claim -> chunk -> source` 继续下钻
+  - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、匹配 chunk 和次级 ID，方便顺着 `page -> claim -> knowledge_unit -> evidence_block -> source` 主证据链继续下钻，并按需读取 chunk 上下文
   - 当前概念页生成已加入四层收口规则：先用强规则过滤明显坏标题，再做标题质量评分；灰区候选才会交给 Agent hook 做受限判别；最终 `lint` 会把低质量概念标题显式报成 warning
   - 强规则当前会优先拦截 `示例`、`总结`、单字中文标题、问句壳标题这类明显更像结构节点而不是概念名的候选，减少“章节标题被误生成为概念页”
   - 标题质量评分会综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号，避免继续单纯依赖 `section_path` 最后一段命名
@@ -655,13 +657,13 @@ MyAgentWiki/
   - 当前会综合 `title`、`aliases`、`summary`、`headings`、`body`、`claim_text`、`source_refs` 打分，并叠加页面类型权重与页面状态权重
   - 当前已接入第一版 query normalization、alias 扩展、canonical 命中回传，以及英文轻量意图识别；中文等自然语言意图建议由调用方显式传入 `--intent`
   - alias/title/canonical 精确命中会参与排序加权；显式 `definition / evidence / how_to / timeline / compare / overview` 等意图会对阅读路径和页面类型做轻微调权
-  - `evidence` 类问题会更偏向 `source-summary`，并在阅读包里优先保留可回链的 claim/chunk 证据线索
-  - `compare / timeline / how_to` 也会在阅读包中返回不同 focus，帮助 Agent 判断优先读声明、时间线证据还是步骤性 chunk
+  - `evidence` 类问题会更偏向 `source-summary`，并在阅读包里优先保留可回链的 claim、knowledge_unit、evidence_block、source 线索，同时保留匹配 chunk 作为上下文入口
+  - `compare / timeline / how_to` 也会在阅读包中返回不同 focus，帮助 Agent 判断优先读声明、时间线证据还是步骤性上下文
   - `timeline` 类问题会额外返回按来源分组的 `timeline_sources`
   - 当前支持 `--reading-depth standard|deep`
   - `deep` 模式会在保持 deterministic 的前提下返回更厚的 `reading_pack`，并额外给出按来源聚合的 `source_trail`
   - 当前输出候选页面、得分解释、命中字段与命中 token，并返回阅读包 `reading_pack`
-  - `reading_pack` 当前包含匹配的 `claims`、`chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；`deep` 模式下还会附带 `source_trail`
+  - `reading_pack` 当前包含匹配的 `claims`、`matched_chunks`、来源摘要，以及 `section_path`、`previous_chunk`、`next_chunk` 等下钻线索；其中 Claim 会保留 `knowledge_unit_ids / evidence_block_ids / source_refs`，`matched_chunks` 负责补足检索上下文，`deep` 模式下还会附带 `source_trail`
   - 标题树相关信息已经不再只保留为扁平 `section_path`：
     - chunk 和 claim source refs 当前都会保留 `section_path_parts / section_title / parent_section_path / heading_level`
     - concept 聚合、命名和别名已开始消费这套层级字段，避免“同名叶子标题但父节点不同”的内容被压平成同一主题
@@ -736,9 +738,9 @@ MyAgentWiki/
 2. 准备自己的 `raw/` 原始知识目录，放在目标工作区同级
 3. 运行 `init`，创建 Wiki 工程并复用或创建 sibling `raw/`
 4. 使用 Agent 执行 `ingest`
-5. 检查 `normalized/`、`chunks/`、`claims/`、`wiki/` 和 `state/*.jsonl` 结果，重点关注 `state/error_log.jsonl`、`state/reviews.jsonl`、`state/pages.jsonl`
+5. 检查 `normalized/`、`chunks/`、`claims/`、`wiki/` 和 `state/*.jsonl` 结果，重点关注 `state/structure_blocks.jsonl`、`state/evidence_blocks.jsonl`、`state/knowledge_units.jsonl`、`state/error_log.jsonl`、`state/reviews.jsonl`、`state/pages.jsonl`
 6. 使用 `lint` 和 review 机制维护知识库健康
-7. 使用 `query` 先查候选页面，再决定是否继续读取 claim、chunk 和 source
+7. 使用 `query` 先查候选页面，再决定是否继续读取 claim、knowledge_unit、evidence_block、source 和匹配 chunk 上下文
 
 ## 工作流验证 / Workflow Validation
 
@@ -766,9 +768,11 @@ python scripts/validate_workflow.py --keep-workspace
 执行一次 `myagentwiki ingest` 之后，当前版本通常会生成这些内容：
 
 - `normalized/*.md`
-  - 标准化后的文本结果，保留来源元数据，供后续切块和抽取使用
+  - 标准化后的文本结果，保留来源元数据，供后续 Structure IR、Evidence Block、Knowledge Unit、chunk 和 Claim 生成使用
+- `state/structure_blocks.jsonl`、`state/evidence_blocks.jsonl`、`state/knowledge_units.jsonl`
+  - 结构化证据账本和知识单元账本，是 Claim 精确回链的主证据层
 - `chunks/*.jsonl`
-  - 按来源拆分的切块结果，每条记录带 `chunk_id`、前后邻接关系和来源信息
+  - 按来源拆分的上下文容器，每条记录带 `chunk_id`、前后邻接关系和来源信息，主要服务检索、摘要、相邻上下文和增量处理
 - `claims/*.json`
   - 按 Claim 单文件保存的知识声明草稿，便于后续审核与回链
 - `wiki/sources/*.md`
@@ -777,14 +781,14 @@ python scripts/validate_workflow.py --keep-workspace
 - `wiki/concepts/*.md`
   - 基于 Claim 聚合出的概念候选页，作为后续综述页、主题页的起点
   - 当前已加入一层轻量命名清洗，优先使用 `section_path` 和短主题短语生成更像 Wiki 的页面名
-  - 当前概念页里的 `Source Pages / Source Evidence` 会分别展示来源摘要页入口、原始来源文件入口、覆盖范围，以及按条列出的证据切块链接
+  - 当前概念页里的 `Source Pages / Source Evidence` 会分别展示来源摘要页入口、原始来源文件入口、覆盖范围，以及按条列出的匹配 chunk 链接
   - 页面文件名若包含空格等特殊字符，目录页与页面间链接会自动使用 URL 编码后的相对路径
 - `wiki/overview/index.md`
   - 工作区级综述入口页，默认在有多个稳定可读概念页时自动生成
   - 当前支持 grounded 的 `llm_assisted` 摘要、主题导览和推荐阅读路径改写
   - 当 overview 改写成功时，会额外生成折叠式 `Rewrite Traceability` 区块，展示改写句与回绑页面
 - `state/*.jsonl`
-  - 全局索引与状态账本，包括 `sources`、`normalized`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
+  - 全局索引与状态账本，包括 `sources`、`normalized`、`structure_blocks`、`evidence_blocks`、`knowledge_units`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
   - 其中 `state/pages.jsonl` 会保留已被自动移除页面的历史记录，便于追踪页面演化；但 `removed` 页面不会继续进入在线检索与页面索引
 - `indexes/search_pages.jsonl`
   - query 使用的页面检索派生索引，保存字段文本、tokens 和基础页面元数据
@@ -801,12 +805,12 @@ python scripts/validate_workflow.py --keep-workspace
 当前这版最重要的是把“可追踪链路”先打通：
 
 - Wiki 页面可以回指到 Claim
-- Claim 可以回指到 Chunk 与 Source
+- Claim 可以回指到 Knowledge Unit、Evidence Block 与 Source，并按需回到匹配 Chunk 补上下文
 - review 记录可以反查受影响的候选页面
 - 页面索引会进入 `state/pages.jsonl`
 - 冲突和重复风险会进入 `reviews/` 与 `state/reviews.jsonl`
 - 查询会优先命中高价值页面类型，并给出字段级打分解释
-- 查询结果已经可以附带第一版 claim/chunk/source 阅读包，方便 Agent 继续证据阅读
+- 查询结果已经可以附带 claim、matched chunk、source 阅读包；其中主证据追踪以 Claim、Knowledge Unit、Evidence Block 和 Source 为准，matched chunk 负责补上下文
 - `deep` 查询模式当前还能返回按来源收束的 `source_trail`，帮助 Agent 用更大的上下文窗口继续追证据，但仍保持 deterministic first
 - query 已接入持久化页面检索索引，索引存在时优先读取 `indexes/search_pages.jsonl`
 - query 已接入 alias registry，alias 命中时会回传 canonical 目标

@@ -1,6 +1,6 @@
 ---
 name: myagentwiki
-description: Use this skill when working inside a MyAgentWiki workspace, or when the user wants to initialize, ingest, query, lint, review, or maintain a local LLM Wiki driven by Codex or Claude Code. It provides the CLI-first workflow, traceability rules, review handling rules, and reading strategy for wiki pages, claims, chunks, and sources.
+description: Use this skill when working inside a MyAgentWiki workspace, or when the user wants to initialize, ingest, query, lint, review, or maintain a local LLM Wiki driven by Codex or Claude Code. It provides the CLI-first workflow, traceability rules, review handling rules, and reading strategy for wiki pages, claims, knowledge units, evidence blocks, chunks, and sources.
 ---
 
 # MyAgentWiki Skill
@@ -14,7 +14,7 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 - 用户要初始化新的 MyAgentWiki 知识库工作区
 - 用户要执行 `doctor / bootstrap / ingest / query / lint`
 - 用户要处理 `review-list / review-apply`
-- 用户要追踪 `wiki -> claim -> chunk -> source` 证据链
+- 用户要追踪 `page -> claim -> knowledge_unit -> evidence_block -> source` 主证据链，或需要按需回读匹配 chunk 补上下文
 - 用户要在 Codex 或 Claude Code 中把原始知识目录整理成可维护的本地 Wiki
 
 ## 核心规则 / Core Rules
@@ -46,7 +46,7 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 
 - 先读候选页面、命中字段、排序解释
 - 再看 `reading_pack.claims`
-- 需要证据时继续读 `reading_pack.chunks` 与 `reading_pack.timeline_sources`
+- 需要证据时继续读 `reading_pack.claims` 里的 `knowledge_unit_ids / evidence_block_ids / source_refs`，并按需读取 `reading_pack.matched_chunks` 与 `reading_pack.timeline_sources` 补足上下文
 - 涉及 alias / canonical 命中时，优先阅读规范页面
 - 若目标是把结果直接交给上层回答器，优先使用 `answer-query` 或 `query --answer-ready`
 - 若 `reading_pack.answer_guardrails.can_answer_from_summary_only` 为 `false`，不要只停在摘要层
