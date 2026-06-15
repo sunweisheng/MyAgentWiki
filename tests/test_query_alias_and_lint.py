@@ -9,7 +9,10 @@ import importlib
 from pathlib import Path
 from urllib.parse import quote
 
-from myagentwiki.cli import query_reading_focus
+from myagentwiki.cli import (
+    build_workspace_overview_key_theme_rows,
+    query_reading_focus,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1533,6 +1536,7 @@ def test_stable_multi_concept_workspace_generates_overview_page(tmp_path: Path) 
     assert "## 工作区综述 / Workspace Overview" in page_text
     assert "## 主题导览 / Theme Map" in page_text
     assert "## 推荐阅读路径 / Suggested Reading Path" in page_text
+    assert "## 全部主题 / All Themes" in page_text
     assert "## 来源覆盖 / Source Coverage" in page_text
     assert "来源页:" in page_text
     assert "Claim" in page_text
@@ -1671,6 +1675,60 @@ def test_lint_accepts_generated_overview_page_render_metadata(tmp_path: Path) ->
     assert checks["overview_render_metadata_present"]["ok"] is True
     assert checks["overview_pages_grounded"]["ok"] is True
     assert checks["alias_conflicts_absent"]["ok"] is True
+
+
+def test_workspace_overview_theme_map_prefers_representative_breadth_and_lists_all_themes() -> None:
+    concept_pages = [
+        {
+            "page_id": "page_broad",
+            "title": "岗位职责 / 开发部",
+            "claim_ids": ["c1", "c2", "c3"],
+            "source_refs": [{"source_id": "src_a"}],
+            "review_ids": [],
+            "summary": "开发部概览。",
+        },
+        {
+            "page_id": "page_family_a",
+            "title": "岗位职责 / 综合运营部 / 固定资产组",
+            "claim_ids": [f"ca{i}" for i in range(1, 10)],
+            "source_refs": [{"source_id": "src_a"}],
+            "review_ids": [],
+            "summary": "固定资产组职责。",
+        },
+        {
+            "page_id": "page_family_b",
+            "title": "岗位职责 / 综合运营部 / 城市运营组",
+            "claim_ids": [f"cb{i}" for i in range(1, 8)],
+            "source_refs": [{"source_id": "src_a"}],
+            "review_ids": [],
+            "summary": "城市运营组职责。",
+        },
+        {
+            "page_id": "page_other",
+            "title": "我们的定位与使命",
+            "claim_ids": ["cx1", "cx2"],
+            "source_refs": [{"source_id": "src_a"}],
+            "review_ids": [],
+            "summary": "定位与使命概览。",
+        },
+    ]
+    claim_records_by_id = {
+        claim_id: {"claim_id": claim_id, "claim_type": "fact"}
+        for page in concept_pages
+        for claim_id in page["claim_ids"]
+    }
+
+    rows = build_workspace_overview_key_theme_rows(
+        concept_pages=concept_pages,
+        claim_records_by_id=claim_records_by_id,
+        limit=3,
+    )
+
+    selected_titles = [item["page_record"]["title"] for item in rows]
+    assert "岗位职责 / 开发部" in selected_titles
+    assert len(selected_titles) == 3
+    assert selected_titles.count("岗位职责 / 综合运营部 / 固定资产组") + selected_titles.count("岗位职责 / 综合运营部 / 城市运营组") == 1
+    assert any(title in selected_titles for title in ["我们的定位与使命", "岗位职责 / 开发部"])
 
 
 def test_lint_flags_overview_page_when_manual_edit_breaks_grounding(tmp_path: Path) -> None:

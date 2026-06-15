@@ -7771,6 +7771,51 @@ def concept_page_overview_rank_key(page_record: dict, claim_records_by_id: dict[
     )
 
 
+def overview_title_parts(page_record: dict) -> list[str]:
+    title = str(page_record.get("title", "")).strip()
+    if not title:
+        return []
+    return [part.strip() for part in title.split("/") if part.strip()]
+
+
+def overview_theme_family_key(page_record: dict) -> str:
+    parts = overview_title_parts(page_record)
+    if len(parts) >= 2:
+        return " / ".join(parts[:2]).lower()
+    if parts:
+        return parts[0].lower()
+    return str(page_record.get("page_id", "")).strip().lower()
+
+
+def overview_theme_representativeness_score(
+    page_record: dict,
+    claim_records_by_id: dict[str, dict],
+) -> tuple[int, int, int, int, str]:
+    claim_records = collect_page_claim_records(page_record, claim_records_by_id)
+    claim_type_counts = count_claim_types(claim_records)
+    foundational_signal = sum(
+        claim_type_counts.get(claim_type, 0)
+        for claim_type in {"definition", "fact"}
+    )
+    operational_signal = sum(
+        claim_type_counts.get(claim_type, 0)
+        for claim_type in {"procedure", "warning", "comparison", "causal", "evaluation"}
+    )
+    title_parts = overview_title_parts(page_record)
+    source_ref_count = len(page_record.get("source_refs", []))
+    claim_count = len(page_record.get("claim_ids", []))
+    # 更少的标题层级更像工作区入口主题；coverage 仍然保留为强信号。
+    hierarchy_breadth = -len(title_parts) if title_parts else 0
+    semantic_breadth = max(foundational_signal, operational_signal)
+    return (
+        hierarchy_breadth,
+        source_ref_count,
+        semantic_breadth,
+        claim_count,
+        page_record.get("title", "").lower(),
+    )
+
+
 def summarize_concept_page_for_overview(page_record: dict) -> str:
     sentence = extract_first_sentence(page_record.get("summary", ""))
     if sentence:
@@ -7781,15 +7826,35 @@ def summarize_concept_page_for_overview(page_record: dict) -> str:
 def build_workspace_overview_key_theme_rows(
     concept_pages: list[dict],
     claim_records_by_id: dict[str, dict],
-    limit: int = 6,
+    limit: int = 10,
 ) -> list[dict]:
     rows: list[dict] = []
     ranked_pages = sorted(
         concept_pages,
-        key=lambda item: concept_page_overview_rank_key(item, claim_records_by_id),
+        key=lambda item: overview_theme_representativeness_score(item, claim_records_by_id),
         reverse=True,
     )
-    for page_record in ranked_pages[:limit]:
+    selected_pages: list[dict] = []
+    used_family_keys: set[str] = set()
+
+    for page_record in ranked_pages:
+        if len(selected_pages) >= limit:
+            break
+        family_key = overview_theme_family_key(page_record)
+        if family_key in used_family_keys:
+            continue
+        selected_pages.append(page_record)
+        used_family_keys.add(family_key)
+
+    if len(selected_pages) < limit:
+        for page_record in ranked_pages:
+            if len(selected_pages) >= limit:
+                break
+            if any(item.get("page_id") == page_record.get("page_id") for item in selected_pages):
+                continue
+            selected_pages.append(page_record)
+
+    for page_record in selected_pages:
         claim_records = collect_page_claim_records(page_record, claim_records_by_id)
         claim_type_counts = count_claim_types(claim_records)
         foundational_signal = sum(
@@ -9150,7 +9215,7 @@ def build_workspace_overview_page(
     key_theme_rows = build_workspace_overview_key_theme_rows(
         concept_pages=concept_pages,
         claim_records_by_id=claim_records_by_id,
-        limit=6,
+        limit=10,
     )
     source_coverage_rows = build_workspace_source_coverage_rows(
         concept_pages=concept_pages,
@@ -9267,6 +9332,17 @@ def build_workspace_overview_page(
                 key=lambda item: (item["source_count"], item["claim_count"], item["review_count"]),
             )["page_record"]
             lines.append(f"- 如果你想追证据覆盖面，优先从 {format_page_label(page_rel_path, densest_page)} 往下钻。")
+
+    lines.extend([
+        "",
+        "## 全部主题 / All Themes",
+        "",
+    ])
+    for concept_page in sorted(concept_pages, key=lambda item: item.get("title", "").lower()):
+        lines.append(
+            f"- {format_page_label(page_rel_path, concept_page)} | {summarize_concept_page_for_overview(concept_page)} "
+            f"(claims={len(concept_page.get('claim_ids', []))}, sources={len(concept_page.get('source_refs', []))})"
+        )
 
     if render_status == "llm_assisted":
         lines.extend([

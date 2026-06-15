@@ -21,21 +21,23 @@
 
 `MyAgentWiki` 的定位不是“传统脚本流水线上补几处大模型（LLM）调用”，而是一个证据优先的语义编译器（evidence-first semantic compiler）。
 
-它的核心任务，是把用户的原始资料持续编译成三层产物：
+它的核心任务，是把用户的原始资料持续编译成一条主编译链，并按需派生一条侧向的上下文投影链：
 
-1. 证据层：`normalized/`、Markdown 结构中间表示、证据块（Evidence Blocks）、知识单元（Knowledge Units）、`claims/`
-2. 语义层：语义决策（semantic decisions）、知识角色（knowledge roles）、页面意图（page intents）
-3. 展示层：`wiki/`、`indexes/`、阅读包（reading_pack）、回答交接载荷（answer-ready payload）
+1. 主证据编译层：`normalized/`、Markdown 结构中间表示、证据块（Evidence Blocks）、知识单元（Knowledge Units）、`claims/`
+2. 主语义决策层：语义决策（semantic decisions）、知识角色（knowledge roles）、页面意图（page intents）
+3. 主展示输出层：`wiki/`、`indexes/`
+4. 可选上下文投影链：`chunks/`、阅读包（reading_pack）、回答交接载荷（answer-ready payload）
 
-因此，系统主线不应再理解为“把文件切成句子，再把句子拼成页面”，而应改成下面这条结构优先的编译链：
+因此，系统主线不应再理解为“把文件切成句子，再把句子拼成页面”，而应改成下面这条结构优先的主编译链：
 
 1. `raw -> normalized Markdown`：把异构来源统一成 Markdown 表达
 2. `normalized Markdown -> Markdown Structure IR`：解析标题、段落、列表、表格、引用、代码块、行号和父子关系
 3. `Markdown Structure IR -> Evidence Blocks`：形成可回链、可引用、可组合的原文结构块
 4. `Evidence Blocks -> Knowledge Units`：从结构块中抽取候选知识对象，保留局部标题、上下文和结构元信息
-5. `Knowledge Units -> claims / metadata / semantic decisions`：把事实声明、结构字段和语义判断分层落账
-6. `semantic decisions -> reviews / stable promotion / page routing`：把无法安全自动收口的部分送入审核，把高把握对象送入后续页面重建
-7. `pages / indexes / reading_pack / answer-ready`：把证据和语义结果编译成面向人和面向上层 Agent 的不同视图
+5. `Knowledge Units -> claims / metadata`：把事实声明和结构字段分层落账
+6. `Knowledge Units / claims -> semantic decisions`：把知识对象上的语义判断独立落账
+7. `semantic decisions -> reviews / stable promotion / page routing -> pages / indexes`：把无法安全自动收口的部分送入审核，把高把握对象送入后续页面重建
+8. `Evidence Blocks / pages -> optional chunks / reading_pack / answer-ready`：按需派生检索、阅读和回答交接所需的上下文投影
 
 系统的关键能力包括：
 
@@ -153,7 +155,9 @@ flowchart TD
     F --> G["语义决策（semantic decisions）"]
     G --> H["审核与提稳（reviews / stable promotion）"]
     H --> I["页面与索引（wiki / indexes）"]
+    D --> P["可选上下文投影（chunks）"]
     I --> J["阅读包（reading_pack）"]
+    P --> J
     J --> K["回答交接（answer-ready）"]
 
     G --> L["语义账本（semantic ledger）"]
@@ -177,6 +181,23 @@ flowchart TD
 
 `chunk` 仍可作为检索和增量处理的粗粒度容器，但它不应再承担“最小证据单元”的全部职责。真正的证据原子应是 Evidence Block，默认来源于 Markdown Structure IR 中的段落、列表项、表格行、引用块、标题和相邻正文组合。
 
+### 上下文投影链（Context Projection Chain）
+
+上下文投影链回答的是：“系统要把哪些上下文窗口交给检索、阅读和回答器消费？”
+
+这条链不是主证据链的一部分，而是侧向派生的可选投影：
+
+`evidence_block / page hit -> chunk -> reading_pack -> answer-ready`
+
+它解决的是：
+
+- 检索时应该返回哪段上下文窗口
+- 阅读时前后文如何组织
+- 回答交接时还需要附带哪些章节路径、相邻片段和来源入口
+- 增量更新时哪些上下文容器可以局部重建
+
+因此，`chunk` 不属于“知识是否成立”的主真相链；它属于“这些知识怎样被检索、阅读和消费”的上下文投影链。当前实现默认保留这条投影链，但系统概念上应把它视为可选派生产物，而不是主证据对象。
+
 ### 语义补充链（Semantic Supplement Chain）
 
 语义补充链回答的是：“系统为什么把这份证据组织成这种知识结构？”
@@ -187,7 +208,7 @@ flowchart TD
 
 它解释的是：
 
-- 为什么这个 chunk 没有被当成主题候选
+- 为什么某段上下文投影需要保留或合并
 - 为什么这个 Evidence Block 被组合成某个 Knowledge Unit
 - 为什么这条 Knowledge Unit / Claim 被判断为步骤、示例、结构元信息或结构壳
 - 为什么一组稳定 Knowledge Unit / Claim 会被路由成 `concept / guide / topic / reference`
@@ -207,7 +228,7 @@ flowchart TD
 - 回到页面摘要
 - 回到关键 Claim
 - 回到对应 Knowledge Unit 和 Evidence Block
-- 回到匹配 Chunk
+- 回到匹配 Chunk（如果当前实现启用了上下文投影）
 - 回到来源摘要或原始来源入口
 
 ### 权威源与写入责任矩阵
@@ -218,7 +239,7 @@ flowchart TD
 | NormalizedDocument | 统一文档表示 | `normalized/*.md` + `state/normalized.jsonl` | CLI | 可由 `raw` 重新生成 |
 | MarkdownStructureIR | Markdown 结构树与位置映射 | `state/structure_blocks.jsonl` 或等价结构账本 | CLI | 可由 `normalized` 重新生成 |
 | EvidenceBlock | 最小可回链证据块 | `state/evidence_blocks.jsonl` 或等价证据账本 | CLI | 可由结构 IR 重新生成 |
-| Chunk | 检索和增量处理容器 | `state/chunks.jsonl` | CLI | 可由 `normalized` / Evidence Blocks 重新生成 |
+| Chunk | 可选上下文投影容器 | `state/chunks.jsonl` | CLI | 可由 `normalized` / Evidence Blocks 重新生成 |
 | KnowledgeUnit | 候选知识对象 | `state/knowledge_units.jsonl` 或等价知识单元账本 | CLI；LLM 只能提交候选 | 可重建，但需保留决策链 |
 | Claim | 稳定知识声明层 | `claims/*.json` + `state/claims.jsonl` | CLI，必要时人工编辑后走恢复 | 可重建，但需保留历史态 |
 | SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl` | CLI 写入；Agent hook / LLM 提交候选 | 可按输入重跑 |
@@ -254,7 +275,8 @@ flowchart TD
 用户运行 `init` 后生成的工作区负责承载：
 
 - sibling `raw/` 原始资料目录引用
-- `normalized / structure_blocks / evidence_blocks / knowledge_units / chunks / claims` 证据层产物；其中 `structure_blocks / evidence_blocks / knowledge_units` 是逻辑层名称，当前实际落盘在 `state/*.jsonl`
+- `normalized / structure_blocks / evidence_blocks / knowledge_units / claims` 主证据编译产物；其中 `structure_blocks / evidence_blocks / knowledge_units` 是逻辑层名称，当前实际落盘在 `state/*.jsonl`
+- `chunks` 等可选上下文投影产物，用于检索、阅读和回答交接
 - `semantic/` 或等价语义账本目录
 - `wiki / indexes` 展示层产物
 - `state / reviews / reports / logs` 状态与控制层
@@ -295,7 +317,7 @@ flowchart TD
 - `../raw/`：与工作区平级的原始资料目录
 - `../assets/`：与工作区平级的下载型派生素材目录
 - `normalized/`：标准化文档层
-- `chunks/`：检索、摘要、相邻上下文和增量处理容器层
+- `chunks/`：可选上下文投影层，用于检索、摘要、相邻上下文和增量处理
 - `claims/`：声明展开文件
 - `semantic/`：语义分析结果、批量缓存和中间产物
 - `wiki/`：知识页面
@@ -331,26 +353,31 @@ flowchart TD
 - `state/structure_blocks.jsonl`：MarkdownStructureIR / StructureBlock 账本，保存 Markdown 结构树与位置映射
 - `state/evidence_blocks.jsonl`：EvidenceBlock 账本，保存可回链、可引用、可组合的最小证据原子
 - `state/knowledge_units.jsonl`：KnowledgeUnit 账本，保存从 EvidenceBlock 中识别出的候选知识对象
-- `chunks/`：上下文容器目录，保存可检索、可引用、可回链的粗粒度片段；它辅助检索、摘要、相邻上下文和增量处理，但不作为最小证据原子
 - `claims/`：声明展开目录，保存单条 Claim 的人工可读展开文件
 
-这些产物不是“临时文件”，而是系统主真相的一部分。区别在于：`normalized/`、`chunks/`、`claims/` 当前有展开目录；StructureBlock、EvidenceBlock、KnowledgeUnit 当前以 `state/*.jsonl` 结构化账本保存。
+这些产物不是“临时文件”，而是系统主编译链的落地产物。区别在于：`normalized/`、`claims/` 当前有展开目录；StructureBlock、EvidenceBlock、KnowledgeUnit 当前以 `state/*.jsonl` 结构化账本保存。
 
-#### 4. 语义分析层
+#### 4. 上下文投影层
+
+- `chunks/`：上下文容器目录，保存可检索、可引用、可回链的粗粒度片段；它辅助检索、摘要、相邻上下文和增量处理，但不作为最小证据原子
+
+这层不是主证据链的一部分，而是从 EvidenceBlock 和页面命中结果侧向派生出的消费投影。它默认保留，方便 query、reading_pack、answer-ready 和增量 ingest 复用，但概念上始终可由证据层重新派生。
+
+#### 5. 语义分析层
 
 - `semantic/`：语义分析结果、批量缓存和中间产物目录
 - `state/semantic_*.jsonl`：语义决策账本文件，用于记录结构化语义判断历史
 
 保存文档结构判定、Claim 角色判定、页面意图判定、批处理缓存和语义决策历史。
 
-#### 5. 知识呈现层
+#### 6. 知识呈现层
 
 - `wiki/`：知识页面目录，保存面向人阅读的页面视图
 - `indexes/`：索引目录，保存搜索索引、别名索引和阅读辅助索引
 
 这层面向人阅读，也服务 query、reading_pack 和 answer-ready。
 
-#### 6. 状态与控制层
+#### 7. 状态与控制层
 
 - `state/`：结构化账本目录，保存对象身份、生命周期、跨文件关系和恢复线索
 - `reviews/`：审核展开目录，保存单条 review 的人工可读展开文件
@@ -575,9 +602,9 @@ evidence_block_ids: [B]
 - 只有适合长期事实追踪的 Knowledge Unit 才提升或编译成 Claim
 - `content_tags / knowledge_role / page_intent` 等语义判断的权威来源是 SemanticDecision，Knowledge Unit 中最多保存投影或回链
 
-### Chunk（证据切块）
+### Chunk（上下文切块 / 可选上下文投影）
 
-表示从标准化文档和 Evidence Blocks 组织出的检索、摘要和增量处理容器。
+表示从标准化文档和 Evidence Blocks 组织出的检索、摘要和增量处理容器。它是可选上下文投影，不属于主证据链上的证据原子。
 
 最小字段：
 
@@ -609,6 +636,7 @@ evidence_block_ids: [B]
 设计原因：
 
 - Chunk 承担检索、摘要、增量更新和批处理上下文职责，但不再是唯一的最小证据单元
+- Chunk 的存在是为了复用阅读和检索窗口，而不是判定知识是否成立
 - `previous_chunk / next_chunk` 用来补足上下文，而不是直接复制 overlap 文本
 - `chunk_kind / topicworthiness_hint` 让后续流程区分结构壳、主题段、步骤段、总结段等不同角色
 - `section_path_parts / section_title / parent_section_path / heading_level` 让标题树不再只剩下一条扁平字符串，后续 claim、concept page、query 排序和 answer-ready 都可以继续消费父子层级关系
@@ -1062,7 +1090,7 @@ normalized Markdown
   -> Claims
 
 EvidenceBlocks
-  -> Chunks
+  -> Chunks (optional projection)
 ```
 
 更具体地说：
@@ -1091,7 +1119,7 @@ Chunk 1 -> evidence_block_ids: [A, B]
 
 ### Chunk 与 Evidence Block 的关系
 
-Chunk 仍保留为检索、摘要和批处理容器，但它应由 Evidence Blocks 组合而成。
+Chunk 仍保留为检索、摘要和批处理容器，但它应由 Evidence Blocks 组合而成，并被视为可选上下文投影。
 
 默认关系：
 
@@ -1678,10 +1706,20 @@ LLM 输出应包含可解释原因，例如：
 - 概念页：定义、核心机制、边界条件、相关概念、来源
 - 指南页：目标、前置条件、步骤、变体、注意事项、来源
 - 示例页：场景、输入、过程、结果、可迁移点、来源
-- 主题页 / 综述页：问题空间、关键子主题、证据入口、相关页面、来源
+- 主题页：问题空间、关键子主题、证据入口、相关页面、来源
+- 综述页：工作区综述摘要、Theme Map 精选主题入口、Suggested Reading Path、All Themes 全量主题补全、来源覆盖
 - 职责页 / 角色页：对象身份、结构元信息、职责范围、协作关系、来源
 - 参考页：术语表、规则表、参数清单、来源
 - 来源摘要页：原文概览、核心观点、可下钻证据、与现有页面的联系 / 冲突、后续建议
+
+当前 `overview` 的实现原则是：
+
+- `Theme Map` 不是简单全量目录，也不是只看 Claim 数量的前几项
+- 它优先承担“精选入口”职责，默认最多展示 10 个主题
+- 精选排序优先考虑概念代表性、覆盖面和主题多样性，再用 Claim 数量等信号打破平局
+- 为避免精选入口遗漏全局范围，综述页后半部分会固定补一个 `All Themes` 区块，列出当前全部稳定可读主题
+
+因此，`overview` 应理解为“精选入口 + 全量补全”的双层结构，而不是纯目录页，也不是只展示极少数主题的缩略摘要页。
 
 ### 页面路由原则
 
@@ -1827,7 +1865,7 @@ content_tags:
 
 - 当前问题属于什么意图
 - 当前最优命中页是什么
-- 还需要继续读哪些 Claim / Chunk / Source
+- 还需要继续读哪些 Claim / Evidence Block / Chunk / Source
 - 哪些风险意味着不能直接作答
 
 ### Query 输出契约
@@ -1845,7 +1883,7 @@ content_tags:
 
 - `query_intent`：查询意图
 - 匹配 `claims`：命中的声明列表
-- 匹配 `chunks`：命中的上下文容器列表，用于补足检索上下文、章节路径和前后邻接信息
+- 匹配 `chunks`：命中的上下文容器列表；如果当前实现启用了上下文投影，则用它补足检索上下文、章节路径和前后邻接信息
 - 相关来源摘要
 - `section_path`：章节路径
 - `previous_chunk`：前一切块
