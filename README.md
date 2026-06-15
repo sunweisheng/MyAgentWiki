@@ -832,6 +832,14 @@ python scripts/validate_workflow.py --keep-workspace
 
 当前仓库重点已经从“先打通主链路”转为“保持主闭环稳定，并继续把结构层、语义层、页面层和可追溯性收口得更清楚”。
 
+版本发布约定：
+
+- 日常开发和普通 `push` 默认不升级版本号
+- 只有准备正式发布时，才统一更新 `pyproject.toml` 中的版本号并创建对应 Git tag / GitHub Release
+- 向后兼容的 bugfix 使用 patch 版本，例如 `2.0.1`
+- 向后兼容的新能力使用 minor 版本，例如 `2.1.0`
+- 阶段性重构或不兼容变更使用 major 版本，例如 `3.0.0`
+
 接下来适合继续推进的方向包括：
 
 - Markdown Structure IR、Evidence Block、Knowledge Unit 与 Claim 的覆盖率报告继续增强
