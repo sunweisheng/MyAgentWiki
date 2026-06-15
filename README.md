@@ -222,6 +222,8 @@ New-Item -ItemType Junction `
 
 - [docs/index.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/index.md)
   - 文档总入口，包含主设计、运行说明、排障文档和项目资料导航
+- [RELEASING.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/RELEASING.md)
+  - 仓库正式发版流程、版本策略和发布后检查清单
 - [docs/MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前唯一的主详细设计文档
   - 按处理流程展开系统定位、目录边界、数据模型、证据链、语义链、审核恢复链，以及 `reading_pack / answer-ready` 契约
@@ -821,12 +823,13 @@ python scripts/validate_workflow.py --keep-workspace
 如果你想快速理解项目，建议阅读顺序如下：
 
 1. `README.md`
-2. `docs/MyAgentWiki系统详细设计.md`
-3. `docs/全链路规则与LLM协同判定设计.md`
-4. `docs/全链路重构实现计划.md`
-5. `docs/runtime-deps.md`
-6. `docs/project-materials/` 中的学习与工程记录
-7. `docs/troubleshooting.md`
+2. `RELEASING.md`
+3. `docs/MyAgentWiki系统详细设计.md`
+4. `docs/全链路规则与LLM协同判定设计.md`
+5. `docs/全链路重构实现计划.md`
+6. `docs/runtime-deps.md`
+7. `docs/project-materials/` 中的学习与工程记录
+8. `docs/troubleshooting.md`
 
 ## 开发说明
 

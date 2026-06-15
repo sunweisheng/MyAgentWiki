@@ -11,6 +11,9 @@
 
 ## 核心文档
 
+- [RELEASING.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/RELEASING.md)
+  - 仓库正式发版流程、版本号策略、推荐命令和发布后检查清单。
+
 - [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前唯一的主详细设计文档，适合先理解系统定位、处理流程、目录边界、数据模型、证据链、语义链、审核恢复链，以及 `reading_pack / answer-ready` 的交接契约。
   - 文档结构已经按处理流程重排，适合作为后续读代码、看实现和继续收口设计时的主入口。
@@ -48,13 +51,14 @@
 
 ## 建议阅读顺序
 
-1. [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
-2. [全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
-3. [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
-4. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
-5. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
-6. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
-7. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
+1. [RELEASING.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/RELEASING.md)
+2. [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
+3. [全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
+4. [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
+5. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
+6. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
+7. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
+8. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
 
 ## 边界说明
 
