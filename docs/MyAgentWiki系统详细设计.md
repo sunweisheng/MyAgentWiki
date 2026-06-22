@@ -247,6 +247,7 @@ flowchart TD
 | WikiPage | 面向人阅读的视图 | `wiki/**/*.md` + `state/pages.jsonl` | CLI 写骨架；LLM 只做受控改写候选 | 可重建，但需遵守生命周期 |
 | Search Index | 排序与快速检索 | `indexes/search_pages.jsonl` | CLI | 可重建 |
 | Alias Registry | 别名扩展与规范名治理 | `indexes/aliases.json` + 覆盖层 | CLI / review-apply | 可重建，但人工覆盖需保留 |
+| Page Links Index | 页面间显式与派生关联索引 | `indexes/page_links.json` + `state/pages.jsonl` 关联字段 | CLI | 可重建 |
 | Reading Pack | 查询交接上下文 | `query` 输出 | CLI | 可按 query 重算 |
 | Answer-Ready Payload | 回答器消费层 | `answer-query` 或 `query --answer-ready` 输出 | CLI | 可按 query 重算 |
 
@@ -1888,17 +1889,28 @@ content_tags:
 - `section_path`：章节路径
 - `previous_chunk`：前一切块
 - `next_chunk`：后一切块
+- `linked_pages`：当前命中页之外，按页面关联规则扩展得到的相关页面简表
 
 当前实现补充：
 
 - `query` 已显式返回 `contract_version: query_answer_handoff/v1`
 - 支持 `reading_depth`
+- `query` / `answer-query` 支持 `--link-expansion off|auto|deep`
 - `deep` 模式会返回更厚的 `reading_pack` 和 `source_trail`
+- 工作区会生成 `indexes/page_links.json`
+- `state/pages.jsonl` 中的 live 页面会补充：
+  - `outgoing_page_ids`
+  - `incoming_page_ids`
+  - `related_page_ids`
 - `retrieval_context` 不只返回命中字段和排序原因，也会显式返回层级解释：
   - `hierarchy_hits`：命中的层级 token
   - `hierarchy_paths`：被当作主要锚点的章节路径
   - `hierarchy_anchor_reason`：机器可读原因，例如 `matched_parent_and_leaf`
   - `hierarchy_anchor_reason_text`：人类可读说明，例如“同时命中了父级路径和叶子标题，因此更偏向这个层级分支。”
+- `retrieval_context` 还会返回页面关联扩展信息：
+  - `link_expansion_used`
+  - `link_expansion_reason`
+  - `linked_page_paths`
 - hierarchy 解释已进入统一的 `ranking_reasons`，也就是说“父级+叶子同时命中”已经是正式排序解释的一部分，而不只是附加调试信息
 
 ### Query -> Answer Handoff Contract
@@ -1938,6 +1950,16 @@ content_tags:
 这两块的意义，是把“回答前的阅读纪律”固化下来，而不是交给每个上层 Agent 临场猜测。
 
 当前 `retrieval_context` 除了 `focus / matched_fields / ranking_reasons` 外，还承担“为什么偏向这个章节树路径”的解释职责。也就是说，检索层不仅告诉回答器“命中了哪一页”，还会告诉它“这是因为命中了父级章节、叶子标题，还是两者同时命中”。
+
+当前实现还允许检索层按页面关联继续扩展少量相关页：
+
+- 优先级大致为：
+  - 同 canonical family
+  - 显式页面内链
+  - incoming link
+  - 共享来源派生的 related pages
+- 默认只扩展少量页面，避免阅读包无界膨胀
+- 弱关联扩展命中时，可通过 `answer_guardrails.risk_flags` 提醒上层回答器不要把关联页当成同等强度证据
 
 ### Answer-Ready Output Layer
 

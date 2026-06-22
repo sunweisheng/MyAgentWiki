@@ -32,6 +32,15 @@
 - [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
   - 初始化、依赖安装、ingest、query、review、lint 相关问题的排查入口。
 
+## 测试与实验场
+
+- [../tests/README.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/README.md)
+  - 仓库测试目录说明，包含 CLI、标准化、review、query/lint 与 E2E 测试范围。
+
+- [../tests/fixtures/user_project_lab/README.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/fixtures/user_project_lab/README.md)
+  - 用户工程测试实验场入口，说明 fixture 定义、runtime 目录和运行命令。
+  - 这套实验场会在本地生成完整 `raw/`、`assets/`、`workspace/`、`reports/`，但不会把运行结果提交到 Git。
+
 ## 项目资料
 
 - [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)

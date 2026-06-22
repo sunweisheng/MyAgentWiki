@@ -97,11 +97,36 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 - `python3 -m myagentwiki doctor --json`
   - 必需依赖检查通过
 
+当前仓库还包含一套“真实用户工程形态”的本地测试实验场：
+
+- `python3 scripts/run_user_workspace_lab.py --clean --scenario baseline`
+  - 在 `tests/runtime/user_project_lab/` 下本地生成 `raw/`、`assets/`、`workspace/`、`reports/`
+  - 覆盖 `init -> ingest -> query -> review-list -> lint` 主闭环
+  - 覆盖原始资料更新 / 新增、Markdown 表格与本地图片混排、中文为主少量英文混编、页面关联扩展读取
+- 这套实验场的定义文件保留在 `tests/fixtures/user_project_lab/`
+- 运行时产生的完整派生数据与结果数据只保留在本地 runtime 目录，不提交到 Git
+
 当前 CLI 输出还有一条额外约定：
 
 - `init / ingest / lint / query / answer-query / review-list / review-apply` 的 JSON 输出会统一带 `workspace_summary`
 - `workspace_summary` 当前至少包含工作区绝对路径、入口页路径、lint 报告路径；涉及外部原始资料区的命令还会带 `raw_dir`
 - 纯文本模式也会显式打印这些绝对路径，避免 UI 或上层 Agent 只显示目录名时造成“好像跑错目录”的误解
+
+当前 query / answer-ready 输出还新增了一层页面关联扩展约定：
+
+- 工作区会生成 `indexes/page_links.json`
+- `state/pages.jsonl` 中的 live 页面会补充：
+  - `outgoing_page_ids`
+  - `incoming_page_ids`
+  - `related_page_ids`
+- `query` / `answer-query` 支持 `--link-expansion off|auto|deep`
+- `reading_pack` 会补充：
+  - `linked_pages`
+  - `retrieval_context.link_expansion_used`
+  - `retrieval_context.link_expansion_reason`
+  - `retrieval_context.linked_page_paths`
+
+这层扩展不是替代 `alias / canonical / hierarchy / source_refs`，而是在这些已有证据链之上补充“页面之间还应该继续读什么”。
 
 当前系统不把这些当成必须前提：
 

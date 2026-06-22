@@ -1,0 +1,109 @@
+{
+  "project_name": "UserProjectLab",
+  "queries": [
+    {
+      "name": "definition_claim",
+      "text": "什么是 Claim",
+      "intent": "definition"
+    },
+    {
+      "name": "howto_review",
+      "text": "如何处理 review 冲突",
+      "intent": "how_to"
+    },
+    {
+      "name": "timeline_release",
+      "text": "系统的发布时间线",
+      "intent": "timeline"
+    },
+    {
+      "name": "backlink_lookup",
+      "text": "来源追踪和页面关联怎么配合",
+      "intent": "lookup"
+    }
+  ],
+  "documents": [
+    {
+      "path": "notes/claim-basics.md",
+      "kind": "markdown"
+    },
+    {
+      "path": "process/review-workflow.md",
+      "kind": "markdown"
+    },
+    {
+      "path": "reference/state-fields.docx",
+      "kind": "docx"
+    },
+    {
+      "path": "timeline/release-milestones.pdf",
+      "kind": "pdf"
+    },
+    {
+      "path": "tables/source-coverage.xlsx",
+      "kind": "xlsx"
+    },
+    {
+      "path": "images/claim-traceability.png",
+      "kind": "image"
+    },
+    {
+      "path": "images/page-links-overview.png",
+      "kind": "image"
+    },
+    {
+      "path": "notes/embedded-image-and-table.md",
+      "kind": "markdown"
+    },
+    {
+      "path": "conflicts/alias-alpha.md",
+      "kind": "markdown"
+    },
+    {
+      "path": "conflicts/alias-beta.md",
+      "kind": "markdown"
+    },
+    {
+      "path": "bilingual/query-expansion.md",
+      "kind": "markdown"
+    }
+  ],
+  "scenarios": {
+    "baseline": {
+      "mutations": []
+    },
+    "update_raw": {
+      "mutations": [
+        "update_claim_basics"
+      ]
+    },
+    "add_raw": {
+      "mutations": [
+        "add_new_source"
+      ]
+    },
+    "delete_raw": {
+      "mutations": [
+        "delete_query_expansion"
+      ]
+    },
+    "update_embedded_image": {
+      "mutations": [
+        "replace_embedded_image"
+      ]
+    },
+    "update_table_content": {
+      "mutations": [
+        "update_embedded_table"
+      ]
+    },
+    "add_conflict_source": {
+      "mutations": [
+        "add_conflict_source"
+      ]
+    },
+    "backlink_query": {
+      "mutations": []
+    }
+  }
+}

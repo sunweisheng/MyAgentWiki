@@ -82,7 +82,9 @@ QUERY_READING_DEPTH_LIMITS = {
         "chunk_limit": 5,
     },
 }
+QUERY_LINK_EXPANSION_CHOICES = ("off", "auto", "deep")
 ALIAS_INDEX_REL_PATH = Path("indexes") / "aliases.json"
+PAGE_LINKS_INDEX_REL_PATH = Path("indexes") / "page_links.json"
 PAGE_ALIAS_OVERRIDES_REL_PATH = Path("state") / "page_alias_overrides.json"
 PAGE_ALIAS_OVERRIDES_LOCK_REL_PATH = Path("state") / ".page_alias_overrides.lock"
 STRUCTURE_BLOCKS_REL_PATH = Path("state") / "structure_blocks.jsonl"
@@ -196,6 +198,7 @@ QUERY_HEADING_BLACKLIST = {
 SEARCH_PAGES_INDEX_REL_PATH = Path("indexes") / "search_pages.jsonl"
 SEARCH_PAGES_INDEX_VERSION = "search_pages_v2"
 ALIAS_INDEX_VERSION = "aliases_v1"
+PAGE_LINKS_INDEX_VERSION = "page_links_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
@@ -2327,6 +2330,11 @@ def alias_index_path(target: Path) -> Path:
     return target / ALIAS_INDEX_REL_PATH
 
 
+def page_links_index_path(target: Path) -> Path:
+    # 页面链接索引记录 page -> page 的显式与派生关联，用于 query 扩展读取。
+    return target / PAGE_LINKS_INDEX_REL_PATH
+
+
 def page_alias_overrides_path(target: Path) -> Path:
     # 人工对页面 alias 的修订单独存一层覆盖，避免被后续自动页面重建直接抹掉。
     return target / PAGE_ALIAS_OVERRIDES_REL_PATH
@@ -2723,6 +2731,170 @@ def write_alias_index(target: Path, page_records: list[dict]) -> dict:
     )
     write_json(alias_index_path(target), alias_index)
     return alias_index
+
+
+def extract_page_markdown_links(page_text: str) -> list[str]:
+    links: list[str] = []
+    for match in re.finditer(r"(?<!!)\[[^\]]+\]\(([^)]+)\)", page_text):
+        target = match.group(1).strip()
+        if not target:
+            continue
+        target = target.split()[0].strip()
+        if target and target not in links:
+            links.append(target)
+    return links
+
+
+def canonical_family_id(canonical_id: str | None) -> str | None:
+    cleaned = str(canonical_id or "").strip()
+    if not cleaned or ":" not in cleaned:
+        return cleaned or None
+    return cleaned.split(":", 1)[1] or None
+
+
+def build_page_links_index(target: Path, page_records: list[dict]) -> dict:
+    live_pages = filter_live_page_records(page_records)
+    live_pages_by_id = {record.get("page_id"): record for record in live_pages if record.get("page_id")}
+    path_to_page_id = {
+        str(Path(record.get("page_path", ""))).strip(): record.get("page_id")
+        for record in live_pages
+        if record.get("page_id") and record.get("page_path")
+    }
+    canonical_family_to_page_ids: dict[str, list[str]] = {}
+    page_entries: dict[str, dict] = {}
+
+    for record in live_pages:
+        canonical_family = canonical_family_id(record.get("canonical_id"))
+        if canonical_family:
+            canonical_family_to_page_ids.setdefault(canonical_family, []).append(record["page_id"])
+
+    page_ids_by_source_id: dict[str, list[str]] = {}
+    for record in live_pages:
+        for source_ref in record.get("source_refs", []):
+            source_id = source_ref.get("source_id")
+            if not source_id:
+                continue
+            page_ids_by_source_id.setdefault(source_id, []).append(record["page_id"])
+
+    for record in live_pages:
+        page_id = record["page_id"]
+        page_path = record.get("page_path", "")
+        outgoing_page_ids: list[str] = []
+        outgoing_links: list[dict] = []
+        page_file = target / page_path
+        if page_path and page_file.exists():
+            page_text = page_file.read_text(encoding="utf-8")
+            for link_target in extract_page_markdown_links(page_text):
+                normalized_target = unquote(link_target).strip()
+                if not normalized_target or normalized_target.startswith(("http://", "https://", "mailto:")):
+                    continue
+                target_path = (Path(page_path).parent / normalized_target).resolve()
+                matched_page_id = None
+                for candidate_path, candidate_page_id in path_to_page_id.items():
+                    candidate_resolved = (target / candidate_path).resolve()
+                    if candidate_resolved == target_path:
+                        matched_page_id = candidate_page_id
+                        break
+                if not matched_page_id or matched_page_id == page_id:
+                    continue
+                if matched_page_id not in outgoing_page_ids:
+                    outgoing_page_ids.append(matched_page_id)
+                    outgoing_links.append({
+                        "target_page_id": matched_page_id,
+                        "target_page_path": live_pages_by_id[matched_page_id].get("page_path", ""),
+                        "target_title": live_pages_by_id[matched_page_id].get("title", ""),
+                        "reason": "markdown_link",
+                    })
+        page_entries[page_id] = {
+            "page_id": page_id,
+            "canonical_id": record.get("canonical_id"),
+            "canonical_family_id": canonical_family_id(record.get("canonical_id")),
+            "page_path": page_path,
+            "title": record.get("title", ""),
+            "type": record.get("type", ""),
+            "status": record.get("status", ""),
+            "outgoing_page_ids": outgoing_page_ids,
+            "outgoing_links": outgoing_links,
+            "incoming_page_ids": [],
+            "incoming_links": [],
+            "linked_canonical_ids": sorted({
+                live_pages_by_id[target_page_id].get("canonical_id")
+                for target_page_id in outgoing_page_ids
+                if live_pages_by_id.get(target_page_id, {}).get("canonical_id")
+            }),
+            "related_page_ids": [],
+        }
+
+    for page_id, entry in page_entries.items():
+        for outgoing_page_id in entry["outgoing_page_ids"]:
+            incoming_entry = page_entries.get(outgoing_page_id)
+            if incoming_entry is None:
+                continue
+            if page_id not in incoming_entry["incoming_page_ids"]:
+                incoming_entry["incoming_page_ids"].append(page_id)
+                incoming_entry["incoming_links"].append({
+                    "source_page_id": page_id,
+                    "source_page_path": entry.get("page_path", ""),
+                    "source_title": entry.get("title", ""),
+                    "reason": "markdown_link",
+                })
+
+    for page_id, entry in page_entries.items():
+        related_page_ids: list[str] = []
+        family_id = entry.get("canonical_family_id")
+        if family_id:
+            for candidate_page_id in canonical_family_to_page_ids.get(family_id, []):
+                if candidate_page_id != page_id and candidate_page_id not in related_page_ids:
+                    related_page_ids.append(candidate_page_id)
+        source_overlap_ids: list[str] = []
+        source_ids = [
+            source_ref.get("source_id")
+            for source_ref in live_pages_by_id.get(page_id, {}).get("source_refs", [])
+            if source_ref.get("source_id")
+        ]
+        for source_id in source_ids:
+            for candidate_page_id in page_ids_by_source_id.get(source_id, []):
+                if candidate_page_id != page_id and candidate_page_id not in source_overlap_ids:
+                    source_overlap_ids.append(candidate_page_id)
+        for candidate_page_id in source_overlap_ids:
+            if candidate_page_id not in related_page_ids:
+                related_page_ids.append(candidate_page_id)
+        for candidate_page_id in entry.get("outgoing_page_ids", []):
+            if candidate_page_id not in related_page_ids:
+                related_page_ids.append(candidate_page_id)
+        for candidate_page_id in entry.get("incoming_page_ids", []):
+            if candidate_page_id not in related_page_ids:
+                related_page_ids.append(candidate_page_id)
+        entry["incoming_page_ids"] = sorted(entry.get("incoming_page_ids", []))
+        entry["outgoing_page_ids"] = sorted(entry.get("outgoing_page_ids", []))
+        entry["related_page_ids"] = related_page_ids[:8]
+
+    return {
+        "index_version": PAGE_LINKS_INDEX_VERSION,
+        "updated_at": utc_now_iso(),
+        "page_count": len(page_entries),
+        "pages": page_entries,
+    }
+
+
+def write_page_links_index(target: Path, page_records: list[dict]) -> dict:
+    page_links_index = build_page_links_index(target, page_records)
+    write_json(page_links_index_path(target), page_links_index)
+    return page_links_index
+
+
+def load_page_links_index(target: Path) -> dict:
+    path = page_links_index_path(target)
+    if not path.exists():
+        return {
+            "index_version": PAGE_LINKS_INDEX_VERSION,
+            "updated_at": None,
+            "page_count": 0,
+            "pages": {},
+        }
+    payload = load_json(path)
+    payload.setdefault("pages", {})
+    return payload
 
 
 def apply_page_alias_overrides(target: Path, page_record: dict) -> dict:
@@ -5633,6 +5805,9 @@ def ensure_page_lifecycle_defaults(page_record: dict) -> dict:
     page_record.setdefault("archived_at", None)
     page_record.setdefault("semantic_decision_ids", [])
     page_record.setdefault("page_route", {})
+    page_record.setdefault("outgoing_page_ids", [])
+    page_record.setdefault("incoming_page_ids", [])
+    page_record.setdefault("related_page_ids", [])
     page_record["lifecycle_status"] = page_lifecycle_status_for_record(page_record)
     return page_record
 
@@ -10149,6 +10324,9 @@ def build_search_index_record(document: dict) -> dict:
         "claim_ids": page_record.get("claim_ids", []),
         "review_ids": page_record.get("review_ids", []),
         "source_refs": page_record.get("source_refs", []),
+        "outgoing_page_ids": page_record.get("outgoing_page_ids", []),
+        "incoming_page_ids": page_record.get("incoming_page_ids", []),
+        "related_page_ids": page_record.get("related_page_ids", []),
         "field_texts": field_texts,
     }
     document_signature = hashlib.sha256(
@@ -10166,6 +10344,9 @@ def build_search_index_record(document: dict) -> dict:
         "claim_ids": page_record.get("claim_ids", []),
         "review_ids": page_record.get("review_ids", []),
         "source_refs": page_record.get("source_refs", []),
+        "outgoing_page_ids": page_record.get("outgoing_page_ids", []),
+        "incoming_page_ids": page_record.get("incoming_page_ids", []),
+        "related_page_ids": page_record.get("related_page_ids", []),
         "field_texts": field_texts,
         "field_tokens": field_tokens,
         # 把页面签名一并写进索引，后续 ingest 就可以先看页面有没有变，
@@ -10262,6 +10443,9 @@ def index_records_to_query_documents(index_records: list[dict]) -> list[dict]:
             "claim_ids": record.get("claim_ids", []),
             "review_ids": record.get("review_ids", []),
             "source_refs": record.get("source_refs", []),
+            "outgoing_page_ids": record.get("outgoing_page_ids", []),
+            "incoming_page_ids": record.get("incoming_page_ids", []),
+            "related_page_ids": record.get("related_page_ids", []),
         }
         documents.append({
             "page_record": page_record,
@@ -10649,6 +10833,89 @@ def build_answer_handoff(query_intent: str, answer_guardrails: dict, page_type: 
     }
 
 
+def summarize_linked_page(page_record: dict, reason: str) -> dict:
+    return {
+        "page_id": page_record.get("page_id"),
+        "title": page_record.get("title", ""),
+        "page_path": page_record.get("page_path", ""),
+        "type": page_record.get("type", ""),
+        "status": page_record.get("status", ""),
+        "canonical_id": page_record.get("canonical_id"),
+        "summary": page_record.get("summary", ""),
+        "reason": reason,
+    }
+
+
+def expand_related_pages_for_query_result(
+    result: dict,
+    page_records_by_id: dict[str, dict],
+    page_links_index: dict,
+    link_expansion: str,
+) -> tuple[list[dict], dict]:
+    if link_expansion == "off":
+        return [], {
+            "link_expansion_used": False,
+            "link_expansion_reason": None,
+            "linked_page_paths": [],
+        }
+
+    page_links = page_links_index.get("pages", {})
+    entry = page_links.get(result.get("page_id"), {})
+    if not entry:
+        return [], {
+            "link_expansion_used": False,
+            "link_expansion_reason": None,
+            "linked_page_paths": [],
+        }
+
+    limit = 3 if link_expansion == "auto" else 5
+    linked_pages: list[dict] = []
+    linked_page_paths: list[str] = []
+    added_page_ids: set[str] = set()
+
+    same_family_ids = []
+    canonical_family = entry.get("canonical_family_id")
+    if canonical_family:
+        for candidate_page_id, candidate_entry in page_links.items():
+            if candidate_page_id == result.get("page_id"):
+                continue
+            if candidate_entry.get("canonical_family_id") == canonical_family:
+                same_family_ids.append(candidate_page_id)
+
+    candidate_groups = [
+        ("same_canonical_family", same_family_ids),
+        ("outgoing_link", entry.get("outgoing_page_ids", [])),
+        ("incoming_link", entry.get("incoming_page_ids", [])),
+        ("related_page", entry.get("related_page_ids", [])),
+    ]
+
+    first_reason = None
+    for reason, candidate_page_ids in candidate_groups:
+        for candidate_page_id in candidate_page_ids:
+            if candidate_page_id in added_page_ids:
+                continue
+            candidate_page = page_records_by_id.get(candidate_page_id)
+            if candidate_page is None or not is_live_page_record(candidate_page):
+                continue
+            linked_pages.append(summarize_linked_page(candidate_page, reason))
+            linked_page_paths.append(candidate_page.get("page_path", ""))
+            added_page_ids.add(candidate_page_id)
+            if first_reason is None:
+                first_reason = reason
+            if len(linked_pages) >= limit:
+                return linked_pages, {
+                    "link_expansion_used": True,
+                    "link_expansion_reason": first_reason,
+                    "linked_page_paths": linked_page_paths,
+                }
+
+    return linked_pages, {
+        "link_expansion_used": bool(linked_pages),
+        "link_expansion_reason": first_reason,
+        "linked_page_paths": linked_page_paths,
+    }
+
+
 def build_result_reading_pack(
     result: dict,
     query_text: str,
@@ -10656,9 +10923,12 @@ def build_result_reading_pack(
     query_tokens: list[str],
     claim_records_by_id: dict[str, dict],
     chunk_records_by_id: dict[str, dict],
+    page_records_by_id: dict[str, dict],
+    page_links_index: dict,
     claim_limit: int,
     chunk_limit: int,
     query_intent: str,
+    link_expansion: str,
 ) -> dict:
     # 阅读包是 query V1 的关键补强：
     # 先返回“为什么命中这页”，再给最相关的 claims/chunks/sources，方便 Agent 继续读。
@@ -10735,6 +11005,12 @@ def build_result_reading_pack(
     page_type = result.get("type", "")
     focus = query_reading_focus(query_intent, page_type=page_type)
     hierarchy_explanation = build_hierarchy_match_explanation(result, trimmed_chunks)
+    linked_pages, link_expansion_context = expand_related_pages_for_query_result(
+        result=result,
+        page_records_by_id=page_records_by_id,
+        page_links_index=page_links_index,
+        link_expansion=link_expansion,
+    )
     ranking_reasons = []
     if result.get("exact_match_reasons"):
         ranking_reasons.extend(result["exact_match_reasons"])
@@ -10753,6 +11029,10 @@ def build_result_reading_pack(
         timeline_sources=timeline_sources,
         source_trail=source_trail,
     )
+    risk_flags = answer_guardrails.get("risk_flags", [])
+    if linked_pages and link_expansion_context.get("link_expansion_reason") in {"incoming_link"}:
+        if "weak_link_expansion" not in risk_flags:
+            risk_flags.append("weak_link_expansion")
     answer_handoff = build_answer_handoff(
         query_intent=query_intent,
         answer_guardrails=answer_guardrails,
@@ -10768,6 +11048,7 @@ def build_result_reading_pack(
         "matched_chunks": trimmed_chunks,
         "source_trail": source_trail,
         "timeline_sources": timeline_sources,
+        "linked_pages": linked_pages,
         "review_ids": result.get("review_ids", []),
         "focus": focus,
         "query": {
@@ -10796,12 +11077,16 @@ def build_result_reading_pack(
             "hierarchy_paths": hierarchy_explanation["matched_paths"],
             "hierarchy_anchor_reason": hierarchy_explanation["anchor_reason"],
             "hierarchy_anchor_reason_text": hierarchy_explanation["anchor_reason_text"],
+            "link_expansion_used": link_expansion_context.get("link_expansion_used", False),
+            "link_expansion_reason": link_expansion_context.get("link_expansion_reason"),
+            "linked_page_paths": link_expansion_context.get("linked_page_paths", []),
         },
         "evidence_context": {
             "matched_claims": trimmed_claims,
             "matched_chunks": trimmed_chunks,
             "timeline_sources": timeline_sources,
             "source_trail": source_trail,
+            "linked_pages": linked_pages,
         },
         "answer_guardrails": answer_guardrails,
         "answer_handoff": answer_handoff,
@@ -11275,6 +11560,7 @@ def build_query_payload(
     chunk_limit: int,
     reading_depth: str = "standard",
     intent: str | None = None,
+    link_expansion: str = "auto",
 ) -> dict:
     # query 当前走“现算现查”策略：
     # 直接读取 state/pages.jsonl + claims + wiki 页面，避免先做一层复杂索引器。
@@ -11287,8 +11573,14 @@ def build_query_payload(
     claim_records = [ensure_claim_lifecycle_defaults(record) for record in (load_jsonl(claims_path) if claims_path.exists() else [])]
     live_claim_records = filter_live_claim_records(claim_records)
     claim_records_by_id = {record["claim_id"]: record for record in live_claim_records}
+    page_records_by_id = {
+        record["page_id"]: record
+        for record in page_records
+        if record.get("page_id")
+    }
     chunk_records_by_id = load_chunks_by_id(target)
     alias_index = load_alias_index(target)
+    page_links_index = load_page_links_index(target)
     normalized_query_payload = expand_query_with_alias_registry(query_text, alias_index)
 
     normalized_query = normalized_query_payload["normalized_query"]
@@ -11378,9 +11670,12 @@ def build_query_payload(
             query_tokens=query_tokens,
             claim_records_by_id=claim_records_by_id,
             chunk_records_by_id=chunk_records_by_id,
+            page_records_by_id=page_records_by_id,
+            page_links_index=page_links_index,
             claim_limit=claim_limit,
             chunk_limit=chunk_limit,
             query_intent=query_intent,
+            link_expansion=link_expansion,
         )
         scored_results.append(result_record)
 
@@ -11395,6 +11690,7 @@ def build_query_payload(
         "query_tokens": query_tokens,
         "intent": query_intent,
         "reading_depth": reading_depth,
+        "link_expansion": link_expansion,
         "alias_hits": normalized_query_payload["alias_hits"],
         "canonical_targets": normalized_query_payload["canonical_targets"],
         "weights": {
@@ -11425,6 +11721,9 @@ def command_query(args: argparse.Namespace) -> CommandResult:
     reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
     if reading_depth not in QUERY_READING_DEPTH_LIMITS:
         reading_depth = "standard"
+    link_expansion = str(getattr(args, "link_expansion", "auto") or "auto").strip().lower()
+    if link_expansion not in QUERY_LINK_EXPANSION_CHOICES:
+        link_expansion = "auto"
     depth_limits = QUERY_READING_DEPTH_LIMITS[reading_depth]
     claim_limit = args.claim_limit if getattr(args, "claim_limit", None) is not None else depth_limits["claim_limit"]
     chunk_limit = args.chunk_limit if getattr(args, "chunk_limit", None) is not None else depth_limits["chunk_limit"]
@@ -11436,6 +11735,7 @@ def command_query(args: argparse.Namespace) -> CommandResult:
         chunk_limit=chunk_limit,
         reading_depth=reading_depth,
         intent=getattr(args, "intent", None),
+        link_expansion=link_expansion,
     )
     if getattr(args, "answer_ready", False):
         answer_ready_payload = build_answer_ready_payload(payload)
@@ -11632,6 +11932,9 @@ def command_answer_query(args: argparse.Namespace) -> CommandResult:
     reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
     if reading_depth not in QUERY_READING_DEPTH_LIMITS:
         reading_depth = "standard"
+    link_expansion = str(getattr(args, "link_expansion", "auto") or "auto").strip().lower()
+    if link_expansion not in QUERY_LINK_EXPANSION_CHOICES:
+        link_expansion = "auto"
     depth_limits = QUERY_READING_DEPTH_LIMITS[reading_depth]
     claim_limit = args.claim_limit if getattr(args, "claim_limit", None) is not None else depth_limits["claim_limit"]
     chunk_limit = args.chunk_limit if getattr(args, "chunk_limit", None) is not None else depth_limits["chunk_limit"]
@@ -11643,6 +11946,7 @@ def command_answer_query(args: argparse.Namespace) -> CommandResult:
         chunk_limit=chunk_limit,
         reading_depth=reading_depth,
         intent=getattr(args, "intent", None),
+        link_expansion=link_expansion,
     )
     answer_ready_payload = build_answer_ready_payload(query_payload)
     answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
@@ -13109,6 +13413,15 @@ def rebuild_review_affected_pages(
     for review_record in review_state_records:
         write_review_file(target, review_record)
 
+    write_jsonl(pages_path, list(page_records_by_id.values()))
+    page_links_index = write_page_links_index(target, list(page_records_by_id.values()))
+    for page_id, link_entry in page_links_index.get("pages", {}).items():
+        page_record = page_records_by_id.get(page_id)
+        if page_record is None:
+            continue
+        page_record["outgoing_page_ids"] = link_entry.get("outgoing_page_ids", [])
+        page_record["incoming_page_ids"] = link_entry.get("incoming_page_ids", [])
+        page_record["related_page_ids"] = link_entry.get("related_page_ids", [])
     write_jsonl(pages_path, list(page_records_by_id.values()))
     rebuild_wiki_index(target, list(page_records_by_id.values()))
     write_alias_index(target, list(page_records_by_id.values()))
@@ -15033,6 +15346,15 @@ def command_ingest(args: argparse.Namespace) -> CommandResult:
     # pages.jsonl 这里保留完整页面账本：
     # 在线页面继续参与 query/index，removed 页面则作为历史痕迹留存。
     write_jsonl(pages_path, list(page_records_by_id.values()))
+    page_links_index = write_page_links_index(target, list(page_records_by_id.values()))
+    for page_id, link_entry in page_links_index.get("pages", {}).items():
+        page_record = page_records_by_id.get(page_id)
+        if page_record is None:
+            continue
+        page_record["outgoing_page_ids"] = link_entry.get("outgoing_page_ids", [])
+        page_record["incoming_page_ids"] = link_entry.get("incoming_page_ids", [])
+        page_record["related_page_ids"] = link_entry.get("related_page_ids", [])
+    write_jsonl(pages_path, list(page_records_by_id.values()))
 
     all_claim_records = list(claims_by_id.values())
     page_records_for_index = list(page_records_by_id.values())
@@ -15879,6 +16201,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=QUERY_INTENT_CHOICES,
         help="Explicit query intent. Overrides lightweight automatic detection.",
     )
+    query_parser.add_argument(
+        "--link-expansion",
+        choices=QUERY_LINK_EXPANSION_CHOICES,
+        default="auto",
+        help="Control whether query reading_pack expands to linked pages.",
+    )
     query_parser.add_argument("--json", action="store_true", help="Output JSON.")
     query_parser.set_defaults(handler=command_query)
 
@@ -15907,6 +16235,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--intent",
         choices=QUERY_INTENT_CHOICES,
         help="Explicit query intent. Overrides lightweight automatic detection.",
+    )
+    answer_query_parser.add_argument(
+        "--link-expansion",
+        choices=QUERY_LINK_EXPANSION_CHOICES,
+        default="auto",
+        help="Control whether query reading_pack expands to linked pages.",
     )
     answer_query_parser.add_argument("--json", action="store_true", help="Output JSON.")
     answer_query_parser.set_defaults(handler=command_answer_query)
