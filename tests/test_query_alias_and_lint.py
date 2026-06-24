@@ -999,6 +999,98 @@ def test_concept_page_links_source_pages_raw_sources_and_chunks(tmp_path: Path) 
     assert f"[`{source_ref['chunk_id']}`]({expected_chunk_link})" in concept_page_text
 
 
+def test_reference_page_frontmatter_includes_semantic_tag_projection(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Query Routing\n\n"
+        "Query Routing 是一种用于按页面类型选择检索入口的机制。\n\n"
+        "Query Routing 通过规则表汇总字段、权重与目标页类型。\n\n"
+        "| field | value |\n"
+        "| --- | --- |\n"
+        "| timeout_seconds | 45 |\n"
+        "| batch_size | 10 |\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "ReferenceFrontmatterSemanticProjection",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    reference_page = next(record for record in page_records if record.get("type") == "reference")
+    assert "content_tags" in reference_page
+    assert "semantic_feature_tags" in reference_page
+    assert reference_page["content_tags"] == []
+    assert "metadata_fact" in reference_page["semantic_feature_tags"]
+    assert "reference_structure" in reference_page["semantic_feature_tags"]
+    assert "rules" in reference_page["semantic_feature_tags"]
+
+    page_text = (workspace_dir / reference_page["page_path"]).read_text(encoding="utf-8")
+    assert "semantic_feature_tags:" in page_text
+    assert '  - "metadata_fact"' in page_text
+    assert '  - "reference_structure"' in page_text
+    assert '  - "rules"' in page_text
+
+
+def test_source_summary_page_frontmatter_includes_semantic_tag_projection(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text(
+        "# Source Summary\n\n"
+        "Source Summary 用于承载来源入口页。\n\n"
+        "| field | value |\n"
+        "| --- | --- |\n"
+        "| owner | wiki-team |\n"
+        "| timeout_seconds | 30 |\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "SourceSummaryFrontmatterSemanticProjection",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    source_page = next(record for record in page_records if record.get("type") == "source-summary")
+    assert source_page["render_target"] == "source_view"
+    assert "structure_projection" in source_page
+    assert "content_tags" in source_page
+    assert "semantic_feature_tags" in source_page
+    assert isinstance(source_page["content_tags"], list)
+    assert "metadata_fact" in source_page["semantic_feature_tags"]
+    assert "reference_structure" in source_page["semantic_feature_tags"]
+    assert "rules" in source_page["semantic_feature_tags"]
+
+    page_text = (workspace_dir / source_page["page_path"]).read_text(encoding="utf-8")
+    assert "## 来源入口视图 / Source Entry View" in page_text
+    assert "## 结构与证据入口 / Structure And Evidence Entry" in page_text
+    assert "## 可追踪 Claims / Traceable Claims" in page_text
+    assert "## 上下文切块 / Context Chunks" in page_text
+    assert "## 读取建议 / Reading Path" in page_text
+    assert "semantic_feature_tags:" in page_text
+    assert '  - "metadata_fact"' in page_text
+    assert '  - "reference_structure"' in page_text
+    assert '  - "rules"' in page_text
+
+
 def test_concept_grouping_preserves_section_hierarchy_context(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -1221,7 +1313,83 @@ def test_answer_query_prompt_and_messages_expose_hierarchy_anchor(tmp_path: Path
     assert "- hierarchy_anchor: 岗位职责 > 综合运营部 > 平台运营组" in messages_result["messages"][1]["content"]
     assert "- hierarchy_reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in messages_result["messages"][1]["content"]
     assert "- hierarchy_anchor: 岗位职责 > 综合运营部 > 平台运营组" in chatml_result["chatml_text"]
-    assert "- hierarchy_reason: 同时命中了父级路径和叶子标题，因此更偏向这个层级分支。" in chatml_result["chatml_text"]
+
+
+def test_duty_pages_route_under_duties_directory(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位职责\n\n"
+        "## 综合运营部\n\n"
+        "### 平台运营组\n\n"
+        "负责人：许颖超\n\n"
+        "平台运营组负责平台系统配置、代理商合同管理与运营规则落地。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "DutyIntentRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    duty_pages = [record for record in page_records if record.get("type") == "duty"]
+    assert duty_pages
+    duty_page = duty_pages[0]
+    assert "/duties/" in duty_page["page_path"]
+    assert duty_page["page_intent"] == "duty"
+    assert duty_page["page_route"]["route_target"] == "duty"
+    assert duty_page["page_route"]["metadata_key_counts"]
+    assert "semantic_feature_tags" in duty_page
+    assert "metadata_fact" in duty_page["semantic_feature_tags"]
+    assert "rules" in duty_page["semantic_feature_tags"]
+
+    page_text = (workspace_dir / duty_page["page_path"]).read_text(encoding="utf-8")
+    assert "semantic_feature_tags:" in page_text
+    assert '  - "rules"' in page_text
+    assert "## 结构元信息 / Structured Metadata" in page_text
+    assert "对象" in page_text
+
+
+def test_role_sections_also_route_to_duty_page_type(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "org.md").write_text(
+        "# 岗位角色\n\n"
+        "## 平台运营组角色\n\n"
+        "角色：平台运营组\n\n"
+        "平台运营组负责平台系统配置、代理商合同管理与运营规则落地。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "RoleIntentRegression",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    page_records = [
+        json.loads(line)
+        for line in (workspace_dir / "state" / "pages.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    duty_page = next(record for record in page_records if record.get("type") == "duty")
+    assert duty_page["page_intent"] == "duty"
+    assert "/duties/" in duty_page["page_path"]
+
+    page_text = (workspace_dir / duty_page["page_path"]).read_text(encoding="utf-8")
+    assert "## 结构元信息 / Structured Metadata" in page_text
 
 
 def test_query_evidence_intent_boosts_source_refs_field(tmp_path: Path) -> None:
@@ -1531,8 +1699,16 @@ def test_stable_multi_concept_workspace_generates_overview_page(tmp_path: Path) 
     assert overview_page["canonical_id"] == "overview:workspace"
     assert overview_page["page_path"] == "wiki/overview/index.md"
     assert len(overview_page["claim_ids"]) >= 2
+    assert "content_tags" in overview_page
+    assert "semantic_feature_tags" in overview_page
+    assert isinstance(overview_page["content_tags"], list)
+    assert isinstance(overview_page["semantic_feature_tags"], list)
 
     page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
+    if overview_page["content_tags"]:
+        assert "content_tags:" in page_text
+    if overview_page["semantic_feature_tags"]:
+        assert "semantic_feature_tags:" in page_text
     assert "## 工作区综述 / Workspace Overview" in page_text
     assert "## 主题导览 / Theme Map" in page_text
     assert "## 推荐阅读路径 / Suggested Reading Path" in page_text

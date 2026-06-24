@@ -41,6 +41,11 @@ def assert_routed_page_has_page_route_decision(workspace_dir: Path, page_record:
     assert semantic_decision_id
     assert semantic_decision_id in page_record.get("semantic_decision_ids", [])
     assert page_route.get("route_target") == page_record.get("type")
+    assert "supporting_unit_ids" in page_route
+    assert "supporting_evidence_block_ids" in page_route
+    assert "section_path_counts" in page_route
+    assert "metadata_key_counts" in page_route
+    assert "evidence_block_kind_counts" in page_route
 
     semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
     route_decision = next(
@@ -49,6 +54,8 @@ def assert_routed_page_has_page_route_decision(workspace_dir: Path, page_record:
     )
     assert route_decision["task_type"] == "page_route"
     assert route_decision["decision"]["route_target"] == page_record.get("type")
+    assert route_decision["decision"]["supporting_unit_ids"] == page_route["supporting_unit_ids"]
+    assert route_decision["decision"]["supporting_evidence_block_ids"] == page_route["supporting_evidence_block_ids"]
 
 
 def test_claim_semantic_readers_prefer_projection() -> None:

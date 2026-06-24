@@ -141,7 +141,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `2.0.0` 作为首个正式发布版本；旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.0.0` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -873,7 +873,7 @@ python scripts/validate_workflow.py --keep-workspace
 - Markdown Structure IR、Evidence Block、Knowledge Unit 与 Claim 的覆盖率报告继续增强
 - 语义决策账本与页面路由的 schema 校验继续收口
 - 更深入的 `stable / disputed` Claim 治理
-- `qa-note` 正式页面提升流程
+- `qa-note` 问答笔记能力的后续正式化路径
 - entity / overview 等更高层 Wiki 页面生成与统一页面族谱收口
 - 更细的 lint 子命令与结构化日志
 - Windows 真机回归验证

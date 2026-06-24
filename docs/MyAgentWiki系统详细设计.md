@@ -786,7 +786,7 @@ evidence_block_ids: [B]
 当前实现：
 
 - 当前设计只维护正式页面族谱，不保留早期页型兼容层
-- 页型体系直接以正式页面族谱为准，由 `concept / guide / example / topic / reference / timeline / overview / source-summary / qa-note` 等页型承担主流程
+- 页型体系直接以正式页面族谱为准，由 `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 等页型承担主流程
 - 系统未发布阶段不提供旧页型迁移层；CLI 只维护当前正式页型和当前工作区 schema
 
 ### 状态、生命周期与自动化等级
@@ -1477,7 +1477,7 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 
 当前实现已将 `page_intent` 改为 claim group 级判断。输入 payload 包含 `claim_semantics` 与 `group_context`，其中 `group_context` 汇总了角色分布、page intent hint 分布、结构块类型、内容标签、语义特征和章节路径。页面路由还会经过二次校验：
 
-- 单条 specialized hint 不足以生成 `guide / example / reference / timeline`
+- 单条 specialized hint 不足以生成 `guide / duty / example / reference / timeline`
 - specialized 页型需要组级角色、内容标签或结构证据支撑
 - 证据不足时降级为 `topic`，再由概念条件决定是否提升为 `concept`
 - 降级原因会写入 route reason，例如 `page_intent_validation_downgraded_*`
@@ -1685,18 +1685,22 @@ LLM 输出应包含可解释原因，例如：
 建议长期采用更清楚的页面族谱：
 
 - `concept`：概念页
-- `entity`：实体页
 - `guide`：指南页
+- `duty`：职责、角色或组织分工页
 - `example`：示例页
 - `topic`：主题页
-- `duty / role`：职责、角色或组织分工页
 - `overview`：综述页
 - `reference`：参考页
 - `timeline`：时间线页
-- `qa-note`：问答笔记页
 - `source-summary`：来源摘要页或来源入口页
 
 其中 `source-summary` 的正式角色应收缩为“来源入口页 / 来源视图”，而不是杂项内容回收站。
+
+补充说明：
+
+- `role` 当前不作为独立正式页型发布，而是并入 `duty` 页型处理
+- `qa-note` 当前仍属于后续可增强的问答笔记能力，不属于这一版正式主干页型
+- `entity` 仍属于后续可能补齐的更高层页面类型，不纳入当前正式页型承诺
 
 ### 模板为什么要跟 page intent 对齐
 
@@ -1834,14 +1838,13 @@ content_tags:
 
 - `overview: 1.25`：综述页默认优先级最高
 - `concept: 1.15`：概念页优先级较高
-- `entity: 1.10`：实体页优先级较高
+- `duty: 1.12`：职责与组织分工页优先级较高
 - `topic: 1.08`：主题页略高于中性页
 - `guide: 1.05`：指南页略高于中性页
 - `reference: 1.00`：参考页中性权重
 - `timeline: 1.00`：时间线页中性权重
 - `source-summary: 0.98`：来源页常规查询略后排，但证据查询可被意图加权提升
 - `example: 0.95`：示例页略后排
-- `qa: 0.95`：问答页略后排
 - `draft: 0.70`：草稿页明显后排
 
 页面状态权重：
@@ -2192,16 +2195,13 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `document_analysis / claim_candidate_quality / claim_role / page_intent / page_route` 五类语义批处理阶段
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
 - `agent_cli_hook` 已支持通过 Codex / Claude Code CLI 调用真实 LLM
-- `concept / guide / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
+- `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
 - 覆盖主闭环的端到端和关键回归测试
 
 ### 当前仍在继续重构和收口的部分
 
 - 结构覆盖率报告和漏抽 lint 的进一步补齐
-- `duty / role` 等更细页面族谱是否独立成正式页型
-- `content_tags / semantic_features` 是否稳定进入 page frontmatter
-- `source-summary` 从默认回收页收缩为来源入口视图
-- Claim 从“候选知识对象总称”收缩为 Knowledge Unit 的稳定事实子集
+- `content_tags / semantic_features` 是否在所有正式页型上继续保持稳定写入
 - 更细粒度的日志系统
 - 更完整的跨平台实机验证矩阵
 

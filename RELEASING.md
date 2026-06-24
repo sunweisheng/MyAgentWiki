@@ -26,10 +26,10 @@
 ```bash
 git status --short
 git add pyproject.toml README.md docs
-git commit -m "release: cut 2.0.1"
-git tag -a v2.0.1 -m "MyAgentWiki 2.0.1"
+git commit -m "release: cut 3.0.0"
+git tag -a v3.0.0 -m "MyAgentWiki 3.0.0"
 git push origin main
-git push origin v2.0.1
+git push origin v3.0.0
 ```
 
 如果是在 GitHub 网页端创建 Release，建议：

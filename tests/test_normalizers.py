@@ -75,7 +75,7 @@ def test_convert_image_to_markdown_without_tesseract_keeps_metadata_only(tmp_pat
         + b"\x00\x00\x00\x00"
     )
 
-    with mock.patch("myagentwiki.cli.command_exists", return_value=False):
+    with mock.patch("myagentwiki.cli.runtime_services.command_exists", return_value=False):
         markdown, metadata = convert_image_to_markdown(raw_path)
 
     assert "# diagram" in markdown
@@ -100,8 +100,8 @@ def test_convert_image_to_markdown_with_ocr_text_includes_ocr_section(tmp_path: 
     )
 
     fake_completed = mock.Mock(returncode=0, stdout="知识库需要来源追踪和审核闭环", stderr="")
-    with mock.patch("myagentwiki.cli.command_exists", return_value=True), mock.patch(
-        "myagentwiki.cli.subprocess.run",
+    with mock.patch("myagentwiki.cli.runtime_services.command_exists", return_value=True), mock.patch(
+        "myagentwiki.cli.runtime_services.subprocess.run",
         return_value=fake_completed,
     ):
         markdown, metadata = convert_image_to_markdown(raw_path)
@@ -131,8 +131,8 @@ def test_convert_image_to_markdown_uses_agent_assisted_fallback_when_ocr_missing
         + b"\x00\x00\x00\x00"
     )
 
-    with mock.patch("myagentwiki.cli.command_exists", return_value=False), mock.patch(
-        "myagentwiki.cli.run_json_automation_command",
+    with mock.patch("myagentwiki.cli.runtime_services.command_exists", return_value=False), mock.patch(
+        "myagentwiki.cli.runtime_services.run_json_automation_command",
         return_value={
             "confidence": 0.92,
             "reason": "mock_llm_image_understanding",
@@ -191,9 +191,9 @@ def test_enrich_markdown_with_embedded_images_downloads_remote_assets_and_embeds
             return None
 
     fake_completed = mock.Mock(returncode=0, stdout="图里有可读文本", stderr="")
-    with mock.patch("myagentwiki.cli.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
-        "myagentwiki.cli.command_exists", return_value=True
-    ), mock.patch("myagentwiki.cli.subprocess.run", return_value=fake_completed):
+    with mock.patch("myagentwiki.cli.runtime_services.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
+        "myagentwiki.cli.runtime_services.command_exists", return_value=True
+    ), mock.patch("myagentwiki.cli.runtime_services.subprocess.run", return_value=fake_completed):
         markdown, metadata = enrich_markdown_with_embedded_images(
             target=workspace_dir,
             source_record=source_record,
@@ -231,7 +231,7 @@ def test_enrich_markdown_with_embedded_images_fails_closed_on_certificate_verifi
     cert_error = urllib.error.URLError(
         ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain")
     )
-    with mock.patch("myagentwiki.cli.urllib.request.urlopen", side_effect=cert_error):
+    with mock.patch("myagentwiki.cli.runtime_services.urllib.request.urlopen", side_effect=cert_error):
         markdown, metadata = enrich_markdown_with_embedded_images(
             target=workspace_dir,
             source_record=source_record,
@@ -290,11 +290,11 @@ def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate
     )
     fake_completed = mock.Mock(returncode=0, stdout="图里有可读文本", stderr="")
     with mock.patch(
-        "myagentwiki.cli.urllib.request.urlopen",
+        "myagentwiki.cli.runtime_services.urllib.request.urlopen",
         side_effect=[cert_error, FakeResponse(fake_png)],
     ) as mocked_urlopen, mock.patch(
-        "myagentwiki.cli.command_exists", return_value=True
-    ), mock.patch("myagentwiki.cli.subprocess.run", return_value=fake_completed):
+        "myagentwiki.cli.runtime_services.command_exists", return_value=True
+    ), mock.patch("myagentwiki.cli.runtime_services.subprocess.run", return_value=fake_completed):
         markdown, metadata = enrich_markdown_with_embedded_images(
             target=workspace_dir,
             source_record=source_record,
@@ -348,10 +348,10 @@ def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tm
         def __exit__(self, exc_type, exc, tb) -> None:
             return None
 
-    with mock.patch("myagentwiki.cli.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
-        "myagentwiki.cli.command_exists", return_value=False
+    with mock.patch("myagentwiki.cli.runtime_services.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
+        "myagentwiki.cli.runtime_services.command_exists", return_value=False
     ), mock.patch(
-        "myagentwiki.cli.run_json_automation_command",
+        "myagentwiki.cli.runtime_services.run_json_automation_command",
         return_value={
             "confidence": 0.93,
             "reason": "mock_llm_image_understanding",

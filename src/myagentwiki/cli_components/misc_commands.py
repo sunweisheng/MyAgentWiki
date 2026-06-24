@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..app_services.claim_status_service import (
+    ClaimSetStatusRequest,
+    ClaimStatusServiceDeps,
+    run_claim_set_status_service,
+)
+from ..app_services.lint_service import LintRequest, LintServiceDeps, run_lint_service
+from ..app_services.render_service import RenderPageRequest, RenderPageServiceDeps, run_render_page_service
+from ..app_services.semantic_batch_service import (
+    SemanticBatchRequest,
+    SemanticBatchServiceDeps,
+    run_semantic_batch_service,
+)
+from .result import CommandResult
+
+
+@dataclass(frozen=True)
+class MiscCliDeps:
+    find_project_root: object
+    workspace_schema_guard_payload: object
+    load_simple_yaml: object
+    resolve_workspace_path: object
+    load_jsonl: object
+    load_semantic_decisions: object
+    ensure_claim_lifecycle_defaults: object
+    filter_live_claim_records: object
+    is_live_claim_record: object
+    ensure_review_lifecycle_defaults: object
+    filter_live_review_records: object
+    is_live_review_record: object
+    load_page_state_records: object
+    ensure_page_lifecycle_defaults: object
+    filter_live_page_records: object
+    is_live_page_record: object
+    claim_semantic_risk_issues: object
+    rendered_page_grounding_issues: object
+    concept_page_quality_issues: object
+    page_semantic_consistency_issues: object
+    page_intent_brake_issues: object
+    load_alias_index: object
+    alias_index_path: object
+    unresolved_alias_conflicts: object
+    load_search_pages_index: object
+    atomic_write_text: object
+    build_workspace_summary: object
+    render_workspace_summary_message: object
+    alias_index_rel_path: str
+    search_pages_index_rel_path: str
+    structure_blocks_rel_path: str
+    evidence_blocks_rel_path: str
+    knowledge_units_rel_path: str
+    semantic_decisions_rel_path: str
+    ensure_workspace_schema_supported: object
+    page_render_targets: object
+    load_claim_state_maps: object
+    load_review_state_maps: object
+    rebuild_review_affected_pages: object
+    live_pages_for_render_target: object
+    page_record_render_target: object
+    run_semantic_batch_task: object
+    is_actionable_review_record: object
+    utc_now_iso: object
+
+
+def build_misc_cli_deps(
+    *,
+    find_project_root: object,
+    workspace_schema_guard_payload: object,
+    load_simple_yaml: object,
+    resolve_workspace_path: object,
+    load_jsonl: object,
+    load_semantic_decisions: object,
+    ensure_claim_lifecycle_defaults: object,
+    filter_live_claim_records: object,
+    is_live_claim_record: object,
+    ensure_review_lifecycle_defaults: object,
+    filter_live_review_records: object,
+    is_live_review_record: object,
+    load_page_state_records: object,
+    ensure_page_lifecycle_defaults: object,
+    filter_live_page_records: object,
+    is_live_page_record: object,
+    claim_semantic_risk_issues: object,
+    rendered_page_grounding_issues: object,
+    concept_page_quality_issues: object,
+    page_semantic_consistency_issues: object,
+    page_intent_brake_issues: object,
+    load_alias_index: object,
+    alias_index_path: object,
+    unresolved_alias_conflicts: object,
+    load_search_pages_index: object,
+    atomic_write_text: object,
+    build_workspace_summary: object,
+    render_workspace_summary_message: object,
+    alias_index_rel_path: str,
+    search_pages_index_rel_path: str,
+    structure_blocks_rel_path: str,
+    evidence_blocks_rel_path: str,
+    knowledge_units_rel_path: str,
+    semantic_decisions_rel_path: str,
+    ensure_workspace_schema_supported: object,
+    page_render_targets: object,
+    load_claim_state_maps: object,
+    load_review_state_maps: object,
+    rebuild_review_affected_pages: object,
+    live_pages_for_render_target: object,
+    page_record_render_target: object,
+    run_semantic_batch_task: object,
+    is_actionable_review_record: object,
+    utc_now_iso: object,
+) -> MiscCliDeps:
+    return MiscCliDeps(
+        find_project_root=find_project_root,
+        workspace_schema_guard_payload=workspace_schema_guard_payload,
+        load_simple_yaml=load_simple_yaml,
+        resolve_workspace_path=resolve_workspace_path,
+        load_jsonl=load_jsonl,
+        load_semantic_decisions=load_semantic_decisions,
+        ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+        filter_live_claim_records=filter_live_claim_records,
+        is_live_claim_record=is_live_claim_record,
+        ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+        filter_live_review_records=filter_live_review_records,
+        is_live_review_record=is_live_review_record,
+        load_page_state_records=load_page_state_records,
+        ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+        filter_live_page_records=filter_live_page_records,
+        is_live_page_record=is_live_page_record,
+        claim_semantic_risk_issues=claim_semantic_risk_issues,
+        rendered_page_grounding_issues=rendered_page_grounding_issues,
+        concept_page_quality_issues=concept_page_quality_issues,
+        page_semantic_consistency_issues=page_semantic_consistency_issues,
+        page_intent_brake_issues=page_intent_brake_issues,
+        load_alias_index=load_alias_index,
+        alias_index_path=alias_index_path,
+        unresolved_alias_conflicts=unresolved_alias_conflicts,
+        load_search_pages_index=load_search_pages_index,
+        atomic_write_text=atomic_write_text,
+        build_workspace_summary=build_workspace_summary,
+        render_workspace_summary_message=render_workspace_summary_message,
+        alias_index_rel_path=alias_index_rel_path,
+        search_pages_index_rel_path=search_pages_index_rel_path,
+        structure_blocks_rel_path=structure_blocks_rel_path,
+        evidence_blocks_rel_path=evidence_blocks_rel_path,
+        knowledge_units_rel_path=knowledge_units_rel_path,
+        semantic_decisions_rel_path=semantic_decisions_rel_path,
+        ensure_workspace_schema_supported=ensure_workspace_schema_supported,
+        page_render_targets=page_render_targets,
+        load_claim_state_maps=load_claim_state_maps,
+        load_review_state_maps=load_review_state_maps,
+        rebuild_review_affected_pages=rebuild_review_affected_pages,
+        live_pages_for_render_target=live_pages_for_render_target,
+        page_record_render_target=page_record_render_target,
+        run_semantic_batch_task=run_semantic_batch_task,
+        is_actionable_review_record=is_actionable_review_record,
+        utc_now_iso=utc_now_iso,
+    )
+
+
+def command_lint(deps: MiscCliDeps, args: argparse.Namespace) -> CommandResult:
+    result = run_lint_service(
+        LintRequest(target_dir=args.target_dir),
+        deps=LintServiceDeps(
+            find_project_root=deps.find_project_root,
+            workspace_schema_guard_payload=deps.workspace_schema_guard_payload,
+            load_simple_yaml=deps.load_simple_yaml,
+            resolve_workspace_path=deps.resolve_workspace_path,
+            load_jsonl=deps.load_jsonl,
+            load_semantic_decisions=deps.load_semantic_decisions,
+            ensure_claim_lifecycle_defaults=deps.ensure_claim_lifecycle_defaults,
+            filter_live_claim_records=deps.filter_live_claim_records,
+            is_live_claim_record=deps.is_live_claim_record,
+            ensure_review_lifecycle_defaults=deps.ensure_review_lifecycle_defaults,
+            filter_live_review_records=deps.filter_live_review_records,
+            is_live_review_record=deps.is_live_review_record,
+            load_page_state_records=deps.load_page_state_records,
+            ensure_page_lifecycle_defaults=deps.ensure_page_lifecycle_defaults,
+            filter_live_page_records=deps.filter_live_page_records,
+            is_live_page_record=deps.is_live_page_record,
+            claim_semantic_risk_issues=deps.claim_semantic_risk_issues,
+            rendered_page_grounding_issues=deps.rendered_page_grounding_issues,
+            concept_page_quality_issues=deps.concept_page_quality_issues,
+            page_semantic_consistency_issues=deps.page_semantic_consistency_issues,
+            page_intent_brake_issues=deps.page_intent_brake_issues,
+            load_alias_index=deps.load_alias_index,
+            alias_index_path=deps.alias_index_path,
+            unresolved_alias_conflicts=deps.unresolved_alias_conflicts,
+            load_search_pages_index=deps.load_search_pages_index,
+            atomic_write_text=deps.atomic_write_text,
+            build_workspace_summary=deps.build_workspace_summary,
+            render_workspace_summary_message=deps.render_workspace_summary_message,
+            alias_index_rel_path=deps.alias_index_rel_path,
+            search_pages_index_rel_path=deps.search_pages_index_rel_path,
+            structure_blocks_rel_path=deps.structure_blocks_rel_path,
+            evidence_blocks_rel_path=deps.evidence_blocks_rel_path,
+            knowledge_units_rel_path=deps.knowledge_units_rel_path,
+            semantic_decisions_rel_path=deps.semantic_decisions_rel_path,
+        ),
+    )
+    return CommandResult(
+        exit_code=result.exit_code,
+        payload=result.payload,
+        message=result.message,
+    )
+
+
+def command_render_page(deps: MiscCliDeps, args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    result = run_render_page_service(
+        RenderPageRequest(
+            target=target,
+            render_target=args.render_target,
+            page_id=args.page_id,
+            canonical_id=args.canonical_id,
+            claim_id=args.claim_id,
+        ),
+        deps=RenderPageServiceDeps(
+            ensure_workspace_schema_supported=deps.ensure_workspace_schema_supported,
+            page_render_targets=deps.page_render_targets,
+            load_claim_state_maps=deps.load_claim_state_maps,
+            load_review_state_maps=deps.load_review_state_maps,
+            rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
+            load_page_state_records=deps.load_page_state_records,
+            live_pages_for_render_target=deps.live_pages_for_render_target,
+            page_record_render_target=deps.page_record_render_target,
+        ),
+    )
+    return CommandResult(payload=result.payload, message=result.message)
+
+
+def command_semantic_batch(deps: MiscCliDeps, args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    result = run_semantic_batch_service(
+        SemanticBatchRequest(
+            target=target,
+            task=args.task,
+            dry_run=bool(args.dry_run),
+        ),
+        deps=SemanticBatchServiceDeps(
+            ensure_workspace_schema_supported=deps.ensure_workspace_schema_supported,
+            run_semantic_batch_task=deps.run_semantic_batch_task,
+            render_workspace_summary_message=deps.render_workspace_summary_message,
+        ),
+    )
+    return CommandResult(payload=result.payload, message=result.message)
+
+
+def command_claim_set_status(deps: MiscCliDeps, args: argparse.Namespace) -> CommandResult:
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    result = run_claim_set_status_service(
+        ClaimSetStatusRequest(
+            target=target,
+            claim_id=args.claim_id,
+            status=args.status,
+        ),
+        deps=ClaimStatusServiceDeps(
+            ensure_workspace_schema_supported=deps.ensure_workspace_schema_supported,
+            load_claim_state_maps=deps.load_claim_state_maps,
+            load_review_state_maps=deps.load_review_state_maps,
+            is_actionable_review_record=deps.is_actionable_review_record,
+            utc_now_iso=deps.utc_now_iso,
+            rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
+        ),
+    )
+    return CommandResult(payload=result.payload, message=result.message)

@@ -142,13 +142,13 @@
 如果你看到的是这类现象：
 
 - 刚处理完一轮 review，`lint` 里的 warning 数量虽然下降了，但又冒出新的 `page_semantic_consistency`
-- 某组内容刚从 `concept` 改到 `guide / example / reference / timeline`，下一轮又像是被系统拉回旧页型
+- 某组内容刚从 `concept` 改到 `guide / duty / example / reference / timeline`，下一轮又像是被系统拉回旧页型
 - 没有新增 source 文件，但重新跑一次 `ingest` 后页面家族仍发生了变化
 
 优先这样判断：
 
 1. 先看 `state/claims.jsonl` 里对应 claim 的 `knowledge_role`、`page_intent_hints`、`concept_candidate_score` 是否刚被改写
-2. 再看 `state/pages.jsonl` 里同一组内容是否还残留旧的自动页面记录，或是否已正确切换到新的 `guide/example/topic/reference/timeline`
+2. 再看 `state/pages.jsonl` 里同一组内容是否还残留旧的自动页面记录，或是否已正确切换到新的 `guide/duty/example/topic/reference/timeline`
 3. 最后再跑一次 `lint --target-dir ...`，确认剩下的是“知识语义仍待选择”，还是“页面记录没有正确收口”
 
 怎么理解：

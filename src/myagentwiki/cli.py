@@ -3,9 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import importlib.util
 import os
-import shutil
 import subprocess
 import sys
 import hashlib
@@ -22,8 +20,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
-import ast
-import tomllib
 import tempfile
 import fcntl
 import mimetypes
@@ -35,6 +31,194 @@ from urllib.parse import unquote
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
+from .cli_parser import build_parser as build_cli_parser
+from .app_services.claim_status_service import (
+    ClaimSetStatusRequest,
+    ClaimStatusServiceDeps,
+    run_claim_set_status_service,
+)
+from .app_services.answer_ready_helpers import (
+    build_answer_ready_messages as build_answer_ready_messages_helper,
+    build_answer_ready_payload as build_answer_ready_payload_helper,
+    render_answer_ready_chatml as render_answer_ready_chatml_helper,
+    render_answer_ready_message as render_answer_ready_message_helper,
+    render_answer_ready_prompt as render_answer_ready_prompt_helper,
+)
+from .app_services.query_reading_helpers import (
+    alias_match_boost as alias_match_boost_helper,
+    build_answer_guardrails as build_answer_guardrails_helper,
+    build_answer_handoff as build_answer_handoff_helper,
+    build_chunk_reading_brief as build_chunk_reading_brief_helper,
+    build_result_reading_pack as build_result_reading_pack_helper,
+    build_hierarchy_match_explanation as build_hierarchy_match_explanation_helper,
+    build_scored_query_result as build_scored_query_result_helper,
+    build_source_brief as build_source_brief_helper,
+    build_source_trail as build_source_trail_helper,
+    build_timeline_sources as build_timeline_sources_helper,
+    compute_query_scoring_context as compute_query_scoring_context_helper,
+    detect_query_intent as detect_query_intent_helper,
+    expand_related_pages_for_query_result as expand_related_pages_for_query_result_helper,
+    expand_query_with_alias_registry as expand_query_with_alias_registry_helper,
+    normalize_query_text as normalize_query_text_helper,
+    prepare_query_runtime_context as prepare_query_runtime_context_helper,
+    query_intent_field_multiplier as query_intent_field_multiplier_helper,
+    query_intent_page_type_boost as query_intent_page_type_boost_helper,
+    query_reading_focus as query_reading_focus_helper,
+    score_chunk_for_query as score_chunk_for_query_helper,
+    score_claim_for_query as score_claim_for_query_helper,
+    select_top_matches as select_top_matches_helper,
+)
+from .app_services.query_service import build_query_payload_via_runtime as build_query_payload_via_runtime_helper
+from .app_services.page_semantic_helpers import (
+    append_frontmatter_list,
+    build_page_semantic_frontmatter_projection as build_page_semantic_frontmatter_projection_helper,
+    enrich_claim_records_with_structure_context as enrich_claim_records_with_structure_context_helper,
+    format_frontmatter_scalar,
+    prepare_page_semantic_context as prepare_page_semantic_context_helper,
+)
+from .app_services.page_render_helpers import (
+    build_readable_concept_summary_text as build_readable_concept_summary_text_helper,
+    build_concept_page_output as build_concept_page_output_helper,
+    build_intent_page_descriptor as build_intent_page_descriptor_helper,
+    build_intent_routed_page_output as build_intent_routed_page_output_helper,
+    build_workspace_overview_key_theme_rows as build_workspace_overview_key_theme_rows_helper,
+    build_workspace_overview_page_output as build_workspace_overview_page_output_helper,
+    build_workspace_overview_summary_text as build_workspace_overview_summary_text_helper,
+    build_workspace_source_coverage_rows as build_workspace_source_coverage_rows_helper,
+    finalize_concept_render_result as finalize_concept_render_result_helper,
+    finalize_workspace_overview_render_result as finalize_workspace_overview_render_result_helper,
+    prepare_concept_claim_selection as prepare_concept_claim_selection_helper,
+    prepare_concept_page_context as prepare_concept_page_context_helper,
+    prepare_concept_page_title as prepare_concept_page_title_helper,
+    prepare_concept_render_inputs as prepare_concept_render_inputs_helper,
+    prepare_workspace_overview_context as prepare_workspace_overview_context_helper,
+    prepare_workspace_overview_render_inputs as prepare_workspace_overview_render_inputs_helper,
+    summarize_concept_page_for_overview as summarize_concept_page_for_overview_helper,
+)
+from .app_services.lint_service import LintRequest, LintServiceDeps, run_lint_service
+from .app_services.render_service import RenderPageRequest, RenderPageServiceDeps, run_render_page_service
+from .app_services import runtime_services
+from .app_services.review_rebuild_service import (
+    ReviewRebuildPageContext,
+    ReviewRebuildPageDeps,
+    ReviewRebuildPersistContext,
+    ReviewRebuildPersistDeps,
+    run_review_rebuild_page_regeneration,
+    run_review_rebuild_persistence,
+)
+from .app_services.review_state_helpers import (
+    archive_live_claim as archive_live_claim_helper,
+    cleanup_superseded_record_files as cleanup_superseded_record_files_helper,
+    normalize_claim_review_flags as normalize_claim_review_flags_helper,
+    reload_claims_from_disk_for_review as reload_claims_from_disk_for_review_helper,
+    resolve_claim_record_for_action as resolve_claim_record_for_action_helper,
+    rewrite_open_reviews_for_claim_change as rewrite_open_reviews_for_claim_change_helper,
+    sync_claim_review_state_from_open_reviews as sync_claim_review_state_from_open_reviews_helper,
+)
+from .app_services.review_auto_helpers import (
+    build_review_auto_decision_payload as build_review_auto_decision_payload_helper,
+    build_review_auto_agent_handoff as build_review_auto_agent_handoff_helper,
+    build_review_auto_escalation_entry as build_review_auto_escalation_entry_helper,
+    build_review_auto_messages as build_review_auto_messages_helper,
+    build_stable_promotion_payload as build_stable_promotion_payload_helper,
+    claim_record_is_safe_auto_stable_candidate as claim_record_is_safe_auto_stable_candidate_helper,
+    maybe_get_agent_assisted_review_plan as maybe_get_agent_assisted_review_plan_helper,
+    maybe_get_agent_assisted_stable_promotion as maybe_get_agent_assisted_stable_promotion_helper,
+    normalize_review_auto_hook_plan as normalize_review_auto_hook_plan_helper,
+    propose_review_auto_action as propose_review_auto_action_helper,
+    render_review_auto_chatml as render_review_auto_chatml_helper,
+    render_review_auto_message as render_review_auto_message_helper,
+    render_review_auto_prompt as render_review_auto_prompt_helper,
+    review_action_plain_label as review_action_plain_label_helper,
+)
+from .app_services.review_action_helpers import (
+    ReviewActionDeps,
+    apply_review_action_via_helpers,
+)
+from .app_services.semantic_batch_service import (
+    SemanticBatchRequest,
+    SemanticBatchServiceDeps,
+    run_semantic_batch_service,
+)
+from .app_services.review_apply_service import ReviewApplyRequest, run_review_apply_service
+from .cli_components.doctor_bootstrap import register_doctor_bootstrap_subparsers
+from .cli_components import init_command as init_cli_component
+from .cli_components import ingest as ingest_cli_component
+from .cli_components import misc_commands as misc_cli_component
+from .cli_components import query_commands as query_cli_component
+from .cli_components import review_commands as review_cli_component
+from .cli_components.init_command import InitCliDeps, build_init_cli_deps as build_init_cli_component_deps
+from .cli_components.ingest import IngestCliDeps
+from .cli_components.misc_commands import MiscCliDeps, build_misc_cli_deps as build_misc_cli_component_deps
+from .cli_components.query_commands import QueryCliDeps
+from .cli_components.review_commands import ReviewCliDeps
+from .cli_components.result import CommandResult, print_result
+from .repositories.state_views import (
+    build_claim_state_maps_loader as repo_build_claim_state_maps_loader,
+    build_page_state_records_loader as repo_build_page_state_records_loader,
+    build_review_state_maps_loader as repo_build_review_state_maps_loader,
+    load_alias_index as repo_load_alias_index,
+    load_claim_state_maps as repo_load_claim_state_maps,
+    load_page_links_index as repo_load_page_links_index,
+    load_page_state_records as repo_load_page_state_records,
+    load_review_state_maps as repo_load_review_state_maps,
+    load_search_pages_index as repo_load_search_pages_index,
+    load_semantic_decisions as repo_load_semantic_decisions,
+)
+from .repositories.query_state import (
+    build_page_field_texts as repo_build_page_field_texts,
+    build_query_documents as repo_build_query_documents,
+    ensure_query_documents as repo_ensure_query_documents,
+    build_search_index_record as repo_build_search_index_record,
+    load_query_documents_from_search_index as repo_load_query_documents_from_search_index,
+    load_chunk_records_by_id as repo_load_chunk_records_by_id,
+    load_query_live_claim_records as repo_load_query_live_claim_records,
+    load_query_page_records as repo_load_query_page_records,
+    write_search_pages_index as repo_write_search_pages_index,
+)
+from .repositories.semantic_state import (
+    append_semantic_decision_records as repo_append_semantic_decision_records,
+    build_latest_semantic_decisions_by_fingerprint as repo_build_latest_semantic_decisions_by_fingerprint,
+    load_semantic_decisions as repo_load_semantic_decisions_records,
+)
+from .repositories.ingest_state import (
+    build_chunk_records_by_source_loader as repo_build_chunk_records_by_source_loader,
+    build_chunk_records_loader as repo_build_chunk_records_loader,
+    build_existing_chunked_by_source_loader as repo_build_existing_chunked_by_source_loader,
+    build_existing_claim_state_loader as repo_build_existing_claim_state_loader,
+    build_existing_pages_loader as repo_build_existing_pages_loader,
+    build_existing_review_state_loader as repo_build_existing_review_state_loader,
+    build_existing_sources_loader as repo_build_existing_sources_loader,
+    load_chunk_records as repo_load_chunk_records,
+    load_chunk_records_by_source as repo_load_chunk_records_by_source,
+    load_current_claim_records as repo_load_current_claim_records,
+    load_active_knowledge_units_by_source as repo_load_active_knowledge_units_by_source,
+    load_existing_chunked_by_source as repo_load_existing_chunked_by_source,
+    load_existing_claim_state as repo_load_existing_claim_state,
+    load_existing_pages as repo_load_existing_pages,
+    load_existing_normalized_by_source as repo_load_existing_normalized_by_source,
+    load_existing_review_state as repo_load_existing_review_state,
+    load_existing_sources as repo_load_existing_sources,
+    load_existing_structured_source_ids as repo_load_existing_structured_source_ids,
+    load_normalized_records as repo_load_normalized_records,
+    load_normalized_records_by_source as repo_load_normalized_records_by_source,
+    load_source_records as repo_load_source_records,
+)
+from .repositories.ingest_persistence import (
+    persist_claim_records as repo_persist_ingest_claim_records,
+    persist_ordered_claim_state as repo_persist_ingest_ordered_claim_state,
+    persist_ordered_review_state as repo_persist_ingest_ordered_review_state,
+    persist_page_records as repo_persist_page_records,
+    persist_review_records as repo_persist_ingest_review_records,
+)
+from .repositories.review_persistence import (
+    cleanup_review_related_record_files as repo_cleanup_review_related_record_files,
+    persist_claim_records as repo_persist_claim_records,
+    persist_ordered_claim_state as repo_persist_ordered_claim_state,
+    persist_ordered_review_state as repo_persist_ordered_review_state,
+    persist_review_records as repo_persist_review_records,
+)
+from .runtime_env import command_exists, find_project_root, load_simple_yaml
 from .semantic import (
     SemanticTaskConfig,
     build_semantic_decision_id,
@@ -45,28 +229,13 @@ from .semantic import (
     semantic_batches_dir,
 )
 
-try:
-    import docx
-except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
-    docx = None
+runtime_services = runtime_services
+convert_image_to_markdown = runtime_services.convert_image_to_markdown
+convert_legacy_doc_to_markdown = runtime_services.convert_legacy_doc_to_markdown
+convert_legacy_xls_to_markdown = runtime_services.convert_legacy_xls_to_markdown
+enrich_markdown_with_embedded_images = runtime_services.enrich_markdown_with_embedded_images
+normalize_source_record = runtime_services.normalize_source_record
 
-try:
-    import openpyxl
-except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
-    openpyxl = None
-
-try:
-    from pypdf import PdfReader
-except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
-    PdfReader = None
-
-try:
-    from PIL import Image
-except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
-    Image = None
-
-
-ROOT_MARKERS = ("pyproject.toml", ".git")
 DEFAULT_CHUNK_TARGET_TOKENS = 1000
 DEFAULT_CHUNK_MAX_TOKENS = 1600
 DEFAULT_CHUNK_MIN_TOKENS = 200
@@ -93,10 +262,6 @@ KNOWLEDGE_UNITS_REL_PATH = Path("state") / "knowledge_units.jsonl"
 SEMANTIC_DECISIONS_REL_PATH = Path("state") / "semantic_decisions.jsonl"
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 NEGATION_MARKERS = ("not ", "no ", "never ", "cannot ")
-PACKAGE_IMPORT_ALIASES = {
-    "python-docx": "docx",
-    "pillow": "PIL",
-}
 PAGE_RENDER_TARGETS = {
     "readable_concept": {
         "page_types": {"concept"},
@@ -105,6 +270,11 @@ PAGE_RENDER_TARGETS = {
     },
     "guide": {
         "page_types": {"guide"},
+        "rebuild_strategy": "review_affected_pages",
+        "grounding_checker": None,
+    },
+    "duty": {
+        "page_types": {"duty"},
         "rebuild_strategy": "review_affected_pages",
         "grounding_checker": None,
     },
@@ -157,14 +327,13 @@ QUERY_FIELD_WEIGHTS = {
 QUERY_PAGE_TYPE_WEIGHTS = {
     "overview": 1.25,
     "concept": 1.22,
+    "duty": 1.12,
     "topic": 1.08,
     "guide": 1.05,
     "example": 0.95,
     "reference": 1.04,
     "timeline": 1.02,
-    "entity": 1.10,
     "source-summary": 1.00,
-    "qa": 0.95,
     "draft": 0.70,
 }
 QUERY_PAGE_STATUS_WEIGHTS = {
@@ -279,113 +448,6 @@ CLAIM_DEPENDENT_PREFIXES = ()
 CLAIM_META_PREFIXES = ()
 
 
-@dataclass
-class CommandResult:
-    # 所有命令统一返回这一层结构，方便后面既能打印给人看，也能转成 JSON 给 Agent 消费。
-    exit_code: int = 0
-    payload: dict | None = None
-    message: str | None = None
-
-
-def find_project_root(start: Path | None = None) -> Path:
-    # 从当前文件或给定路径一路向上找项目根目录。
-    # 这里优先依赖 pyproject.toml 和 .git 这样的标记文件，避免把临时目录误判成项目根。
-    current = (start or Path(__file__)).resolve()
-    for path in [current, *current.parents]:
-        if all((path / marker).exists() or marker == ".git" and (path / marker).exists() for marker in ROOT_MARKERS):
-            return path
-    for path in [current, *current.parents]:
-        if (path / "pyproject.toml").exists():
-            return path
-    raise FileNotFoundError("Could not locate project root from current path.")
-
-
-def parse_yaml_scalar(raw: str):
-    # 当前项目里的 YAML 结构比较简单，这里做一个轻量标量解析器就够用了。
-    # 目标不是支持完整 YAML 语法，而是稳定读取我们自己维护的配置文件。
-    value = raw.strip()
-    if value == "":
-        return {}
-    if value in {"true", "false"}:
-        return value == "true"
-    if value in {"[]", "{}"}:
-        return ast.literal_eval(value)
-    if value.startswith(("[", "{", "'", '"')):
-        return ast.literal_eval(value)
-    return value
-
-
-def load_simple_yaml(path: Path) -> dict:
-    # 这里实现的是“够用版 YAML 读取器”：
-    # 只处理字典嵌套、简单标量、缩进列表，不引入额外依赖。
-    root: dict = {}
-    stack: list[tuple[int, object, dict | None, str | None]] = [(-1, root, None, None)]
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
-
-        # 通过缩进层级维护一个栈，逐步构造嵌套字典结构。
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        while len(stack) > 1 and indent <= stack[-1][0]:
-            stack.pop()
-
-        stripped = raw_line.strip()
-        current_indent, parent, owner, owner_key = stack[-1]
-
-        if stripped.startswith("- "):
-            if isinstance(parent, dict):
-                # 空字典节点如果下一层第一条就是 "- item"，就把它视为列表容器。
-                if parent == {} and owner is not None and owner_key is not None:
-                    parent = []
-                    owner[owner_key] = parent
-                    stack[-1] = (current_indent, parent, owner, owner_key)
-                else:
-                    raise ValueError(f"Invalid YAML list item placement in {path}: {raw_line}")
-            if not isinstance(parent, list):
-                raise ValueError(f"Invalid YAML list item placement in {path}: {raw_line}")
-            parent.append(parse_yaml_scalar(stripped[2:]))
-            continue
-
-        key, sep, rest = stripped.partition(":")
-        if not sep:
-            continue
-
-        if rest.strip() == "":
-            node: dict | list = {}
-            parent[key] = node
-            stack.append((indent, node, parent, key))
-        else:
-            parent[key] = parse_yaml_scalar(rest)
-
-    return root
-
-
-def load_runtime_manifest(root: Path) -> dict:
-    # runtime_manifest 是运行环境的统一来源，doctor/bootstrap 都会依赖它。
-    manifest_path = root / "config" / "runtime_manifest.yml"
-    return load_simple_yaml(manifest_path)
-
-
-def load_project_metadata(root: Path) -> dict:
-    # pyproject.toml 负责项目名、版本、依赖和 CLI 入口等元信息。
-    with (root / "pyproject.toml").open("rb") as fh:
-        return tomllib.load(fh)
-
-
-def print_result(result: CommandResult, as_json: bool = False) -> int:
-    # 所有命令统一走这里输出，避免每个命令自己决定打印格式。
-    if as_json:
-        print(json.dumps(result.payload or {}, ensure_ascii=False, indent=2))
-        return result.exit_code
-
-    if result.message:
-        print(result.message)
-    elif result.payload is not None:
-        print(json.dumps(result.payload, ensure_ascii=False, indent=2))
-    return result.exit_code
-
-
 def build_workspace_summary(target_dir: Path, raw_dir: Path | None = None) -> dict:
     # 给上层 Agent 和人类读者一份“可以直接复述”的路径摘要，避免只剩目录名。
     lint_report_path = target_dir / "reports" / "lint" / "lint_latest.md"
@@ -453,218 +515,6 @@ def render_workspace_summary_message(
     if extra_lines:
         lines.extend(line for line in extra_lines if line)
     return "\n".join(lines)
-
-
-def compare_python_version(spec: str) -> bool:
-    # 目前只需要支持 >= 这种最常见的版本约束，先不把比较器做复杂。
-    if not spec.startswith(">="):
-        return True
-    required = tuple(int(part) for part in spec[2:].split("."))
-    current = sys.version_info[: len(required)]
-    return current >= required
-
-
-def run_check_command(command: list[str]) -> tuple[bool, str]:
-    # doctor 检查系统工具时统一走这个函数。
-    # 成功时返回命令输出，失败时返回异常信息，尽量保留可诊断线索。
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        output = (completed.stdout or completed.stderr).strip()
-        return True, output
-    except (OSError, subprocess.CalledProcessError) as exc:
-        return False, str(exc)
-
-
-def command_exists(name: str) -> bool:
-    # 有些增强能力只需要知道系统命令是否在 PATH 中，不必真的跑一遍。
-    return shutil.which(name) is not None
-
-
-def normalize_package_name(name: str) -> str:
-    # Python 包名和 import 名有时会用 - / _ 混用，这里先做最常见的归一化。
-    if name in PACKAGE_IMPORT_ALIASES:
-        return PACKAGE_IMPORT_ALIASES[name]
-    return name.replace("-", "_")
-
-
-def check_python_package_installed(name: str) -> bool:
-    # 通过 importlib 检测包是否可导入，避免直接 import 触发副作用。
-    return importlib.util.find_spec(normalize_package_name(name)) is not None
-
-
-def collect_python_package_report(manifest: dict) -> dict:
-    # 把 Python 包依赖拆成 required / optional 两层，doctor 输出时会更容易读。
-    required_packages = manifest.get("python_packages", {}).get("required", [])
-    optional_groups = manifest.get("python_packages", {}).get("optional", {})
-
-    required_report = {
-        package: {"ok": check_python_package_installed(package)}
-        for package in required_packages
-    }
-    optional_report = {
-        group: {
-            package: {"ok": check_python_package_installed(package)}
-            for package in packages
-        }
-        for group, packages in optional_groups.items()
-    }
-    return {
-        "required": required_report,
-        "optional": optional_report,
-    }
-
-
-def build_doctor_payload(root: Path) -> dict:
-    # doctor 的核心逻辑集中在这里：
-    # 读取项目元信息、读取运行时清单、检查 Python / git / 可选系统工具 / Python 包。
-    manifest = load_runtime_manifest(root)
-    project_meta = load_project_metadata(root)
-
-    python_spec = manifest["runtime"]["python"]["version"]
-    python_ok = compare_python_version(python_spec)
-    git_command = manifest["runtime"]["git"]["check"]["command"]
-    git_ok, git_output = run_check_command(git_command)
-
-    required = {
-        "python": {
-            "required_version": python_spec,
-            "current_version": ".".join(map(str, sys.version_info[:3])),
-            "ok": python_ok,
-        },
-        "git": {
-            "ok": git_ok,
-            "details": git_output,
-        },
-    }
-
-    optional_tools: dict[str, dict] = {}
-    current_platform = sys.platform
-    platform_label = (
-        "windows" if current_platform.startswith("win")
-        else "macos" if current_platform == "darwin"
-        else "linux"
-    )
-    # 平台标签单独算出来，后面 Windows/macOS/Linux 的提示逻辑都会复用。
-    for tool_name, tool_data in manifest.get("system_tools", {}).get("optional", {}).items():
-        ok, details = run_check_command(tool_data["check"]["command"])
-        optional_tools[tool_name] = {
-            "ok": ok,
-            "purpose": tool_data["purpose"],
-            "fallback": tool_data["fallback"],
-            "supported_platforms": tool_data["supported_platforms"],
-            "supported_on_current_platform": platform_label in tool_data["supported_platforms"],
-            "details": details,
-        }
-
-    python_packages = collect_python_package_report(manifest)
-    required_python_packages_ok = all(
-        item["ok"] for item in python_packages["required"].values()
-    )
-    bootstrap_examples = {
-        "windows": [
-            r"py -3.12 -m venv .venv",
-            r".venv\Scripts\python -m pip install -U pip",
-            r".venv\Scripts\python -m myagentwiki bootstrap --extra dev",
-        ],
-        "macos": [
-            "python3.12 -m venv .venv",
-            ".venv/bin/python -m pip install -U pip",
-            ".venv/bin/python -m myagentwiki bootstrap --extra dev",
-        ],
-        "linux": [
-            "python3.12 -m venv .venv",
-            ".venv/bin/python -m pip install -U pip",
-            ".venv/bin/python -m myagentwiki bootstrap --extra dev",
-        ],
-    }
-    return {
-        "project": {
-            "name": project_meta["project"]["name"],
-            "version": project_meta["project"]["version"],
-            "root": str(root),
-        },
-        "platform": {
-            "os_name": os.name,
-            "sys_platform": sys.platform,
-            "platform_label": platform_label,
-        },
-        "required": required,
-        "python_packages": python_packages,
-        "optional": optional_tools,
-        "summary": {
-            "required_ok": all(item["ok"] for item in required.values()) and required_python_packages_ok,
-            "missing_required_python_packages": [
-                name for name, item in python_packages["required"].items() if not item["ok"]
-            ],
-            "optional_missing": [name for name, item in optional_tools.items() if not item["ok"]],
-        },
-        "bootstrap_guidance": {
-            "recommended_shell_examples": bootstrap_examples.get(platform_label, bootstrap_examples["linux"]),
-            "notes": [
-                "核心流程不依赖 shell 专属语法，Windows / macOS / Linux 都应可执行。",
-                "可选系统工具缺失时，优先走 Python 降级路径，再视需要交给 Agent 补强。",
-            ],
-        },
-    }
-
-
-def command_doctor(args: argparse.Namespace) -> CommandResult:
-    # command_* 函数负责组装业务结果；真正的公共逻辑尽量往辅助函数里收。
-    root = find_project_root()
-    payload = build_doctor_payload(root)
-    return CommandResult(payload=payload, message="MyAgentWiki doctor report ready.")
-
-
-def command_bootstrap(args: argparse.Namespace) -> CommandResult:
-    # bootstrap 当前先聚焦 Python 依赖安装，不擅自处理系统级软件。
-    # 命令本身保持跨平台：直接调用当前 Python 解释器，不依赖 bash/zsh 专属语法。
-    root = find_project_root()
-    install_command = [sys.executable, "-m", "pip", "install", "-e"]
-    if args.extras:
-        # extras 允许用户按需装增强能力，比如 pdf / dev。
-        install_command.append(f"{str(root)}[{','.join(args.extras)}]")
-    else:
-        install_command.append(str(root))
-
-    doctor_payload = build_doctor_payload(root)
-
-    if args.dry_run:
-        # dry-run 先把“将做什么”讲清楚，避免一上来就改环境。
-        payload = {
-            "action": "dry_run",
-            "install_command": install_command,
-            "project_root": str(root),
-            "requested_extras": args.extras,
-            "doctor_summary": doctor_payload["summary"],
-        }
-        return CommandResult(payload=payload, message="Bootstrap dry run complete.")
-
-    completed = subprocess.run(
-        install_command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    # pip 的 stdout / stderr 原样带回去，方便排查安装失败的真实原因。
-    payload = {
-        "action": "install",
-        "install_command": install_command,
-        "requested_extras": args.extras,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-        "doctor_summary": doctor_payload["summary"],
-    }
-    return CommandResult(
-        exit_code=completed.returncode,
-        payload=payload,
-        message="Bootstrap finished." if completed.returncode == 0 else "Bootstrap finished with errors.",
-    )
 
 
 def render_template(template_path: Path, context: dict[str, str]) -> str:
@@ -1045,7 +895,6 @@ def coerce_float(value, default: float) -> float:
             return default
     return default
 
-
 def normalize_command_config(value) -> list[str]:
     if isinstance(value, str):
         stripped = value.strip()
@@ -1401,6 +1250,86 @@ def page_intent_group_context(grouped_claims: list[dict]) -> dict:
     }
 
 
+def page_route_structure_projection(grouped_claims: list[dict]) -> dict:
+    section_counter: Counter[str] = Counter()
+    metadata_key_counter: Counter[str] = Counter()
+    evidence_kind_counter: Counter[str] = Counter()
+    content_tag_counter: Counter[str] = Counter()
+    supporting_unit_ids: list[str] = []
+    supporting_evidence_block_ids: list[str] = []
+
+    for claim_record in grouped_claims:
+        context = claim_record.get("structure_context", {})
+        if not isinstance(context, dict):
+            context = {}
+
+        section_path = " > ".join(normalize_string_list(context.get("section_path_parts")))
+        if section_path:
+            section_counter[section_path] += 1
+
+        for key, count in dict(context.get("metadata_key_counts", {}) or {}).items():
+            cleaned_key = str(key).strip()
+            if cleaned_key:
+                metadata_key_counter[cleaned_key] += coerce_int(count, 0) or 1
+
+        for key, count in dict(context.get("evidence_block_kind_counts", {}) or {}).items():
+            cleaned_key = str(key).strip()
+            if cleaned_key:
+                evidence_kind_counter[cleaned_key] += coerce_int(count, 0) or 1
+
+        for key, count in dict(context.get("content_tag_counts", {}) or {}).items():
+            cleaned_key = str(key).strip()
+            if cleaned_key:
+                content_tag_counter[cleaned_key] += coerce_int(count, 0) or 1
+
+        for unit_id in normalize_string_list(context.get("knowledge_unit_ids")):
+            append_unique(supporting_unit_ids, unit_id)
+        for evidence_block_id in normalize_string_list(context.get("evidence_block_ids")):
+            append_unique(supporting_evidence_block_ids, evidence_block_id)
+
+    return {
+        "section_path_counts": sorted_counter_dict(section_counter, limit=8),
+        "metadata_key_counts": sorted_counter_dict(metadata_key_counter, limit=8),
+        "evidence_block_kind_counts": sorted_counter_dict(evidence_kind_counter, limit=8),
+        "content_tag_counts": sorted_counter_dict(content_tag_counter, limit=8),
+        "supporting_unit_ids": supporting_unit_ids[:16],
+        "supporting_evidence_block_ids": supporting_evidence_block_ids[:24],
+    }
+
+
+def page_semantic_frontmatter_projection(
+    claim_records: list[dict],
+    structure_projection: dict | None = None,
+) -> dict:
+    return build_page_semantic_frontmatter_projection_helper(
+        claim_records,
+        structure_projection,
+        claim_semantic_projection=claim_semantic_projection,
+        normalize_string_list=normalize_string_list,
+        coerce_int=coerce_int,
+        sorted_counter_dict=sorted_counter_dict,
+    )
+
+
+def enrich_claim_records_with_structure_context(target: Path, claim_records: list[dict]) -> list[dict]:
+    return enrich_claim_records_with_structure_context_helper(
+        target,
+        claim_records,
+        semantic_structure_records_by_id=semantic_structure_records_by_id,
+        claim_structure_context=claim_structure_context,
+    )
+
+
+def prepare_page_semantic_context(target: Path, claim_records: list[dict]) -> dict:
+    return prepare_page_semantic_context_helper(
+        target,
+        claim_records,
+        enrich_claim_records_with_structure_context=enrich_claim_records_with_structure_context,
+        page_route_structure_projection=page_route_structure_projection,
+        build_page_semantic_frontmatter_projection=page_semantic_frontmatter_projection,
+    )
+
+
 def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
     if task_name == "document_analysis":
         records = load_jsonl(target / "state" / "normalized.jsonl")
@@ -1653,8 +1582,12 @@ def run_semantic_batch_task(
         written_decisions.extend(normalized_results)
 
     if written_decisions and not dry_run:
-        for record in written_decisions:
-            append_jsonl(semantic_decisions_path(target), record)
+        repo_append_semantic_decision_records(
+            target,
+            written_decisions,
+            semantic_decisions_rel_path=SEMANTIC_DECISIONS_REL_PATH,
+            append_jsonl=append_jsonl,
+        )
 
     return {
         "task_name": task_name,
@@ -1909,18 +1842,21 @@ def apply_claim_candidate_quality_decisions_to_claim_records(
     return ordered_records, archived_claim_ids, affected_review_ids
 
 
-SPECIALIZED_PAGE_INTENTS = {"guide", "example", "reference", "timeline"}
+SPECIALIZED_PAGE_INTENTS = {"guide", "duty", "example", "reference", "timeline"}
 PAGE_INTENT_ROLE_SIGNALS = {
     "guide": {"procedure"},
+    "duty": {"fact"},
     "example": {"example"},
 }
 PAGE_INTENT_CONTENT_TAG_SIGNALS = {
     "guide": {"procedural_language"},
+    "duty": {"organization_structure"},
     "example": {"cases"},
     "reference": {"rules"},
     "timeline": {"temporal_language"},
 }
 PAGE_INTENT_BLOCK_SIGNALS = {
+    "duty": {"metadata_line"},
     "reference": {"table_row", "metadata_line"},
     "example": {"code_example"},
 }
@@ -2010,13 +1946,20 @@ def choose_bucket_page_intent(grouped_claims: list[dict]) -> str:
     if not grouped_claims:
         return "reject"
     item_payload = build_page_intent_item_payload("heuristic_bucket", grouped_claims)
+    section_path_counts = dict(item_payload.get("group_context", {}).get("section_path_counts", {}) or {})
+    if any(
+        any(marker in section_path for marker in ("岗位职责", "部门职责", "工作职责", "小组职责", "岗位角色", "部门角色", "组织角色"))
+        for section_path in section_path_counts
+    ):
+        if page_intent_has_enough_group_evidence("duty", item_payload):
+            return "duty"
     hint_counts: Counter[str] = Counter()
     for claim_record in grouped_claims:
         for hint in claim_page_intent_hints(claim_record):
             normalized_hint = str(hint).strip().lower()
             if normalized_hint:
                 hint_counts[normalized_hint] += 1
-    for preferred in ("reject", "timeline", "reference", "guide", "example", "concept", "topic"):
+    for preferred in ("reject", "timeline", "reference", "guide", "duty", "example", "concept", "topic"):
         if not hint_counts.get(preferred):
             continue
         if preferred in SPECIALIZED_PAGE_INTENTS and not page_intent_has_enough_group_evidence(preferred, item_payload):
@@ -2115,6 +2058,14 @@ def apply_page_intent_decisions_to_claim_groups(
             decision_record=decision_record,
             route_reason=route_reason,
         )
+        section_path_counts = dict(item_payload.get("group_context", {}).get("section_path_counts", {}) or {})
+        if page_intent in {"topic", "concept"} and any(
+            any(marker in section_path for marker in ("岗位职责", "部门职责", "工作职责", "小组职责", "岗位角色", "部门角色", "组织角色"))
+            for section_path in section_path_counts
+        ):
+            if page_intent_has_enough_group_evidence("duty", item_payload):
+                page_intent = "duty"
+                route_reason = "duty_structure_section_path_promoted"
         if page_intent == "topic" and should_generate_concept_page(grouped_claims):
             page_intent = "concept"
             route_reason = "topic_promoted_to_concept_by_claim_group"
@@ -2135,10 +2086,11 @@ def apply_page_intent_decisions_to_claim_groups(
             }),
             "rejected_alternatives": [
                 candidate
-                for candidate in ("concept", "guide", "example", "topic", "reference", "timeline")
+                for candidate in ("concept", "guide", "duty", "example", "topic", "reference", "timeline")
                 if candidate != page_intent
             ],
         }
+        route_payload.update(page_route_structure_projection(enriched_grouped_claims))
         route_fingerprint = fingerprint_payload(
             task_name="page_route",
             item_payloads=[route_payload],
@@ -2171,11 +2123,20 @@ def apply_page_intent_decisions_to_claim_groups(
             "route_target": page_intent,
             "source_decision_id": source_decision_id,
             "supporting_unit_ids": route_payload["supporting_unit_ids"],
+            "supporting_evidence_block_ids": route_payload["supporting_evidence_block_ids"],
+            "section_path_counts": route_payload["section_path_counts"],
+            "metadata_key_counts": route_payload["metadata_key_counts"],
+            "evidence_block_kind_counts": route_payload["evidence_block_kind_counts"],
+            "content_tag_counts": route_payload["content_tag_counts"],
             "rejected_alternatives": route_payload["rejected_alternatives"],
         }
 
-    for record in new_route_decisions:
-        append_jsonl(semantic_decisions_path(target), record)
+    repo_append_semantic_decision_records(
+        target,
+        new_route_decisions,
+        semantic_decisions_rel_path=SEMANTIC_DECISIONS_REL_PATH,
+        append_jsonl=append_jsonl,
+    )
 
     return page_routes
 
@@ -2197,6 +2158,11 @@ def page_route_for_bucket(page_routes_by_bucket: dict[str, dict], bucket_key: st
     route.setdefault("route_reason", "missing_page_route_fallback")
     route.setdefault("source_decision_id", None)
     route.setdefault("supporting_unit_ids", [])
+    route.setdefault("supporting_evidence_block_ids", [])
+    route.setdefault("section_path_counts", {})
+    route.setdefault("metadata_key_counts", {})
+    route.setdefault("evidence_block_kind_counts", {})
+    route.setdefault("content_tag_counts", {})
     route.setdefault("rejected_alternatives", [])
     return route
 
@@ -2218,6 +2184,11 @@ def apply_page_route_to_page_record(page_record: dict, page_route: dict) -> dict
         "semantic_decision_id": semantic_decision_id,
         "source_decision_id": source_decision_id,
         "supporting_unit_ids": list(page_route.get("supporting_unit_ids", []) or []),
+        "supporting_evidence_block_ids": list(page_route.get("supporting_evidence_block_ids", []) or []),
+        "section_path_counts": dict(page_route.get("section_path_counts", {}) or {}),
+        "metadata_key_counts": dict(page_route.get("metadata_key_counts", {}) or {}),
+        "evidence_block_kind_counts": dict(page_route.get("evidence_block_kind_counts", {}) or {}),
+        "content_tag_counts": dict(page_route.get("content_tag_counts", {}) or {}),
         "rejected_alternatives": list(page_route.get("rejected_alternatives", []) or []),
     }
     return updated
@@ -2350,19 +2321,15 @@ def semantic_decisions_path(target: Path) -> Path:
 
 
 def load_semantic_decisions(target: Path) -> list[dict]:
-    return load_jsonl(semantic_decisions_path(target))
+    return repo_load_semantic_decisions_records(
+        target,
+        semantic_decisions_rel_path=SEMANTIC_DECISIONS_REL_PATH,
+        load_jsonl=load_jsonl,
+    )
 
 
 def build_latest_semantic_decisions_by_fingerprint(records: list[dict]) -> dict[str, dict]:
-    latest: dict[str, dict] = {}
-    for record in records:
-        fingerprint = str(record.get("input_fingerprint", "")).strip()
-        if not fingerprint:
-            continue
-        current = latest.get(fingerprint)
-        if current is None or record.get("created_at", "") >= current.get("created_at", ""):
-            latest[fingerprint] = record
-    return latest
+    return repo_build_latest_semantic_decisions_by_fingerprint(records)
 
 
 def normalize_alias_value(text: str) -> str:
@@ -2372,16 +2339,12 @@ def normalize_alias_value(text: str) -> str:
 
 
 def load_alias_index(target: Path) -> dict:
-    path = alias_index_path(target)
-    if not path.exists():
-        return {
-            "index_version": ALIAS_INDEX_VERSION,
-            "updated_at": None,
-            "canonical_map": {},
-            "alias_map": {},
-            "conflicts": [],
-        }
-    return load_json(path)
+    return repo_load_alias_index(
+        target,
+        alias_index_rel_path=ALIAS_INDEX_REL_PATH,
+        load_json=load_json,
+        default_index_version=ALIAS_INDEX_VERSION,
+    )
 
 
 def load_page_alias_overrides(target: Path) -> dict:
@@ -2651,7 +2614,7 @@ def build_alias_index(page_records: list[dict], accepted_conflict_signatures: se
         if len(owners) <= 1:
             return True
         return not any(
-            owner.get("type") in {"concept", "overview", "entity"}
+            owner.get("type") in {"concept", "overview", "duty"}
             and owner.get("canonical_id") != page_record.get("canonical_id")
             for owner in owners
         )
@@ -2884,17 +2847,12 @@ def write_page_links_index(target: Path, page_records: list[dict]) -> dict:
 
 
 def load_page_links_index(target: Path) -> dict:
-    path = page_links_index_path(target)
-    if not path.exists():
-        return {
-            "index_version": PAGE_LINKS_INDEX_VERSION,
-            "updated_at": None,
-            "page_count": 0,
-            "pages": {},
-        }
-    payload = load_json(path)
-    payload.setdefault("pages", {})
-    return payload
+    return repo_load_page_links_index(
+        target,
+        page_links_index_rel_path=PAGE_LINKS_INDEX_REL_PATH,
+        load_json=load_json,
+        default_index_version=PAGE_LINKS_INDEX_VERSION,
+    )
 
 
 def apply_page_alias_overrides(target: Path, page_record: dict) -> dict:
@@ -2992,10 +2950,11 @@ def refresh_alias_conflict_reviews(
     # 2. 刷新仍存在的 alias_conflict review
     # 3. 将已消失的 alias_conflict review 转成历史态
     if page_records is None:
-        page_records = [
-            ensure_page_lifecycle_defaults(record)
-            for record in load_jsonl(target / "state" / "pages.jsonl")
-        ]
+        page_records = repo_load_page_state_records(
+            target,
+            load_jsonl=load_jsonl,
+            ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+        )
     page_records = apply_page_alias_overrides_to_records(target, page_records)
     alias_index = write_alias_index(target, page_records)
     created_reviews, touched_review_ids = build_alias_conflict_reviews(alias_index, live_reviews_by_id)
@@ -3048,1664 +3007,6 @@ def replace_source_scoped_jsonl_records(path: Path, source_id: str, replacement_
     )
 
 
-def normalize_text_content(source_type: str, raw_text: str) -> str:
-    # 第一版先做最保守的规范化：统一换行、去掉尾部多余空白，并确保纯文本也能落成 Markdown。
-    normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
-    # 行尾空白通常没有信息价值，反而会让 hash 和 diff 变得不稳定。
-    lines = [line.rstrip() for line in normalized.split("\n")]
-    normalized = "\n".join(lines).strip()
-    if source_type == "plain_text":
-        # 纯文本在 V1 里先直接当成 Markdown 文本存储，简化后续统一处理。
-        return normalized + "\n"
-    return normalized + "\n"
-
-
-def normalize_markdown_or_text_record(
-    target: Path,
-    source_record: dict,
-    *,
-    allow_insecure_downloads: bool = True,
-) -> dict:
-    # Markdown 和纯文本是当前最稳定的一类输入，直接按文本规范化处理。
-    source_type = source_record["source_type"]
-    raw_path = resolve_source_record_path(target, source_record["source_path"])
-    ensure_path_within_raw_root(raw_path, resolve_workspace_raw_dir(target), purpose="Source record")
-    raw_text = raw_path.read_text(encoding="utf-8")
-    if source_type == "markdown":
-        normalized_text, metadata = enrich_markdown_with_embedded_images(
-            target=target,
-            source_record=source_record,
-            raw_path=raw_path,
-            raw_text=raw_text,
-            allow_insecure_downloads=allow_insecure_downloads,
-        )
-    else:
-        normalized_text = normalize_text_content(source_type, raw_text)
-        metadata = {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "good",
-            "warnings": [],
-            "location_map": {
-                "type": "line_map",
-                "source_path": source_record["source_path"],
-            },
-        }
-    normalized_rel_path = Path("normalized") / f"{source_record['source_id']}.md"
-    normalized_abs_path = target / normalized_rel_path
-    normalized_abs_path.write_text(normalized_text, encoding="utf-8")
-
-    normalized_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
-    line_count = len(normalized_text.splitlines()) or 1
-    title = raw_path.stem
-    location_map = dict(metadata.get("location_map", {}))
-    if location_map.get("type") == "line_map" and "normalized_line_range" not in location_map:
-        location_map["normalized_line_range"] = f"1-{line_count}"
-
-    return {
-        "source_id": source_record["source_id"],
-        "source_type": source_type,
-        "source_path": source_record["source_path"],
-        "normalized_path": str(normalized_rel_path),
-        "title": title,
-        "language": "unknown",
-        "content_format": "markdown",
-        "raw_hash": source_record["source_hash"],
-        "normalized_hash": normalized_hash,
-        "normalizer_version": "normalize_v1",
-        "document_kind": "note",
-        "structure_quality": "unknown",
-        "chunk_strategy_hint": "heading_first",
-        "extraction_method": metadata.get("extraction_method", "python_only"),
-        "extraction_quality": metadata.get("extraction_quality", "good"),
-        "warnings": metadata.get("warnings", []),
-        "location_map": location_map,
-        "updated_at": utc_now_iso(),
-    }
-
-
-def convert_pdf_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # PDF 先走纯 Python 文本提取，按页组织成 Markdown。
-    if PdfReader is None:
-        return convert_pdf_to_markdown_fallback(raw_path)
-
-    try:
-        reader = PdfReader(str(raw_path))
-        parts: list[str] = [f"# {raw_path.stem}"]
-        page_map: list[dict] = []
-        warnings: list[str] = []
-
-        for page_index, page in enumerate(reader.pages, start=1):
-            extracted = page.extract_text() or ""
-            cleaned = extracted.strip()
-            parts.append(f"\n## 第 {page_index} 页\n")
-            if cleaned:
-                parts.append(cleaned)
-            else:
-                parts.append("_本页未提取到文本_")
-                warnings.append(f"page_{page_index}_empty_text")
-            page_map.append({
-                "page": page_index,
-                "char_count": len(cleaned),
-            })
-
-        markdown = "\n\n".join(parts).strip() + "\n"
-        metadata = {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "partial" if warnings else "good",
-            "warnings": warnings,
-            "location_map": {
-                "type": "pdf_page_map",
-                "pages": page_map,
-                "source_path": str(raw_path),
-            },
-        }
-        return markdown, metadata
-    except Exception:
-        # 主路径失败时退回低依赖 fallback，尽量别让 PDF 直接中断整批 ingest。
-        return convert_pdf_to_markdown_fallback(raw_path)
-
-
-def pdf_count_pages_from_bytes(pdf_bytes: bytes) -> int:
-    # 这是一个很保守的页数估计：匹配 /Type /Page，避开 /Pages。
-    matches = re.findall(rb"/Type\s*/Page\b", pdf_bytes)
-    return max(len(matches), 0)
-
-
-def pdf_try_inflate_stream(stream_bytes: bytes) -> bytes:
-    try:
-        return zlib.decompress(stream_bytes)
-    except Exception:
-        return stream_bytes
-
-
-def decode_pdf_literal_string(raw: bytes) -> str:
-    # PDF 文本操作符中的字符串常常放在 (...) 里，这里做一层轻量解码。
-    text = raw.replace(b"\\(", b"(").replace(b"\\)", b")").replace(b"\\\\", b"\\")
-    try:
-        return text.decode("utf-8")
-    except UnicodeDecodeError:
-        return text.decode("latin-1", errors="ignore")
-
-
-def pdf_extract_text_snippets_from_bytes(pdf_bytes: bytes) -> list[str]:
-    # fallback 只求“尽量提取一点正文”，不追求完整版面恢复。
-    snippets: list[str] = []
-
-    object_matches = re.finditer(rb"(\d+\s+\d+\s+obj.*?endobj)", pdf_bytes, flags=re.DOTALL)
-    for match in object_matches:
-        object_bytes = match.group(1)
-        stream_match = re.search(rb"stream\r?\n(.*?)\r?\nendstream", object_bytes, flags=re.DOTALL)
-        if not stream_match:
-            continue
-        stream_bytes = stream_match.group(1)
-        if b"/FlateDecode" in object_bytes:
-            stream_bytes = pdf_try_inflate_stream(stream_bytes)
-
-        for block in re.findall(rb"BT(.*?)ET", stream_bytes, flags=re.DOTALL):
-            pieces = re.findall(rb"\(([^()]*)\)", block)
-            if not pieces:
-                continue
-            combined = "".join(decode_pdf_literal_string(piece) for piece in pieces).strip()
-            combined = re.sub(r"\s+", " ", combined)
-            if len(combined) >= 4 and combined not in snippets:
-                snippets.append(combined)
-
-    return snippets[:20]
-
-
-def convert_pdf_to_markdown_fallback(raw_path: Path) -> tuple[str, dict]:
-    # 没有 pypdf 时，至少给 PDF 生成页数、可提取文本片段和占位信息。
-    pdf_bytes = raw_path.read_bytes()
-    page_count = pdf_count_pages_from_bytes(pdf_bytes)
-    snippets = pdf_extract_text_snippets_from_bytes(pdf_bytes)
-    warnings: list[str] = []
-
-    parts = [f"# {raw_path.stem}", "", f"- 估计页数: {page_count or 'unknown'}"]
-    if snippets:
-        parts.extend(["", "## 提取文本片段"])
-        for index, snippet in enumerate(snippets, start=1):
-            parts.append(f"{index}. {snippet}")
-    else:
-        warnings.append("pdf_fallback_no_text")
-        parts.extend([
-            "",
-            "> 当前环境未启用 `pypdf`，且标准库 fallback 未提取到正文文本。",
-        ])
-
-    markdown = "\n".join(parts).strip() + "\n"
-    pages = [{"page": index + 1, "char_count": None} for index in range(page_count)] if page_count else []
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "partial",
-        "warnings": warnings if warnings else ["pdf_fallback_used"],
-        "location_map": {
-            "type": "pdf_page_map",
-            "pages": pages,
-            "source_path": str(raw_path),
-        },
-    }
-
-
-def iter_docx_blocks(document) -> list[tuple[str, str]]:
-    # python-docx 的段落和表格分散在不同结构里。
-    # V1 先分别收集，再按各自顺序做一个保守输出。
-    blocks: list[tuple[str, str]] = []
-
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if not text:
-            continue
-        style_name = paragraph.style.name.lower() if paragraph.style and paragraph.style.name else ""
-        if "heading" in style_name:
-            digits = "".join(ch for ch in style_name if ch.isdigit())
-            level = int(digits) if digits else 1
-            level = min(max(level, 1), 6)
-            blocks.append(("heading", "#" * level + " " + text))
-        else:
-            blocks.append(("paragraph", text))
-
-    for table_index, table in enumerate(document.tables, start=1):
-        rows = []
-        for row in table.rows:
-            values = [cell.text.strip().replace("\n", " ") or " " for cell in row.cells]
-            rows.append(values)
-        if not rows:
-            continue
-        blocks.append(("table_title", f"## 表格 {table_index}"))
-        header = rows[0]
-        divider = ["---"] * len(header)
-        table_lines = [
-            "| " + " | ".join(header) + " |",
-            "| " + " | ".join(divider) + " |",
-        ]
-        for row in rows[1:]:
-            padded = row + [" "] * (len(header) - len(row))
-            table_lines.append("| " + " | ".join(padded[: len(header)]) + " |")
-        blocks.append(("table", "\n".join(table_lines)))
-
-    return blocks
-
-
-DOCX_NAMESPACES = {
-    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-}
-
-XLSX_NAMESPACES = {
-    "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
-}
-
-OLE_HEADER_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-
-
-def docx_style_map_from_archive(archive: zipfile.ZipFile) -> dict[str, str]:
-    # 纯 Python 兜底解析 docx 时，需要先把 styleId 映射到更容易理解的样式名。
-    try:
-        styles_xml = archive.read("word/styles.xml")
-    except KeyError:
-        return {}
-
-    root = ET.fromstring(styles_xml)
-    style_map: dict[str, str] = {}
-    for style in root.findall("w:style", DOCX_NAMESPACES):
-        style_id = style.get(f"{{{DOCX_NAMESPACES['w']}}}styleId")
-        name_node = style.find("w:name", DOCX_NAMESPACES)
-        if not style_id:
-            continue
-        style_map[style_id] = name_node.get(f"{{{DOCX_NAMESPACES['w']}}}val", style_id) if name_node is not None else style_id
-    return style_map
-
-
-def docx_paragraph_text(node: ET.Element) -> str:
-    # Word 段落里的文本经常被拆到多个 run / text 节点里，这里把它们拼回去。
-    texts = [item.text or "" for item in node.findall(".//w:t", DOCX_NAMESPACES)]
-    return "".join(texts).strip()
-
-
-def docx_heading_level_from_style(style_name: str, style_id: str) -> int | None:
-    # heading 样式名和 styleId 在不同文档里可能略有不同，这里做保守识别。
-    candidates = f"{style_name} {style_id}".lower()
-    if "heading" not in candidates:
-        return None
-    digits = "".join(ch for ch in candidates if ch.isdigit())
-    if not digits:
-        return 1
-    return min(max(int(digits[0]), 1), 6)
-
-
-def docx_table_to_markdown(node: ET.Element) -> str:
-    # 纯 XML 路径下把 Word 表格转成 Markdown 表格。
-    rows: list[list[str]] = []
-    for row in node.findall("w:tr", DOCX_NAMESPACES):
-        values = []
-        for cell in row.findall("w:tc", DOCX_NAMESPACES):
-            cell_texts = []
-            for paragraph in cell.findall(".//w:p", DOCX_NAMESPACES):
-                text = docx_paragraph_text(paragraph)
-                if text:
-                    cell_texts.append(text)
-            values.append(" ".join(cell_texts).strip() or " ")
-        if rows or any(value.strip() for value in values):
-            rows.append(values)
-
-    if not rows:
-        return ""
-
-    width = max(len(row) for row in rows)
-    normalized_rows = [row + [" "] * (width - len(row)) for row in rows]
-    header = normalized_rows[0]
-    divider = ["---"] * width
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(divider) + " |",
-    ]
-    for row in normalized_rows[1:]:
-        lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines)
-
-
-def convert_docx_to_markdown_fallback(raw_path: Path) -> tuple[str, dict]:
-    # 这个 fallback 完全走标准库，避免因为 lxml / 二进制依赖不兼容把整条 docx 路堵死。
-    parts = [f"# {raw_path.stem}"]
-    warnings: list[str] = []
-
-    with zipfile.ZipFile(raw_path) as archive:
-        style_map = docx_style_map_from_archive(archive)
-        document_xml = archive.read("word/document.xml")
-
-    root = ET.fromstring(document_xml)
-    body = root.find("w:body", DOCX_NAMESPACES)
-    if body is None:
-        warnings.append("docx_missing_body")
-        markdown = "\n".join(parts).strip() + "\n"
-        return markdown, {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "partial",
-            "warnings": warnings,
-            "location_map": {
-                "type": "line_map",
-                "normalized_line_range": "1-1",
-                "source_path": str(raw_path),
-            },
-        }
-
-    table_index = 0
-    for child in list(body):
-        tag = child.tag.rsplit("}", 1)[-1]
-        if tag == "p":
-            text = docx_paragraph_text(child)
-            if not text:
-                continue
-            style_node = child.find("w:pPr/w:pStyle", DOCX_NAMESPACES)
-            style_id = style_node.get(f"{{{DOCX_NAMESPACES['w']}}}val", "") if style_node is not None else ""
-            style_name = style_map.get(style_id, style_id)
-            heading_level = docx_heading_level_from_style(style_name, style_id)
-            if heading_level is not None:
-                parts.append("#" * heading_level + " " + text)
-            else:
-                parts.append(text)
-        elif tag == "tbl":
-            table_index += 1
-            table_markdown = docx_table_to_markdown(child)
-            if table_markdown:
-                parts.append(f"## 表格 {table_index}")
-                parts.append(table_markdown)
-
-    markdown = "\n\n".join(part for part in parts if part.strip()).strip() + "\n"
-    line_count = len(markdown.splitlines()) or 1
-    metadata = {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "good" if len(parts) > 1 else "partial",
-        "warnings": warnings if warnings else [],
-        "location_map": {
-            "type": "line_map",
-            "normalized_line_range": f"1-{line_count}",
-            "source_path": str(raw_path),
-        },
-    }
-    return markdown, metadata
-
-
-def convert_docx_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # Word 文档优先保留“标题 + 段落 + 表格”的主结构。
-    if docx is not None:
-        document = docx.Document(str(raw_path))
-        blocks = iter_docx_blocks(document)
-        parts = [f"# {raw_path.stem}"]
-        parts.extend(block for _, block in blocks)
-        markdown = "\n\n".join(part for part in parts if part.strip()).strip() + "\n"
-        line_count = len(markdown.splitlines()) or 1
-
-        metadata = {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "good" if blocks else "partial",
-            "warnings": [] if blocks else ["docx_no_visible_blocks"],
-            "location_map": {
-                "type": "line_map",
-                "normalized_line_range": f"1-{line_count}",
-                "source_path": str(raw_path),
-            },
-        }
-        return markdown, metadata
-
-    # 如果 python-docx 不可用，就退回到 zip+xml 路径。
-    return convert_docx_to_markdown_fallback(raw_path)
-
-
-def is_probably_ole_document(raw_path: Path) -> bool:
-    # 老 Office 二进制格式通常基于 OLE Compound File。
-    # 这里先做魔数级判断，用于给 fallback metadata 增加一点上下文。
-    with raw_path.open("rb") as fh:
-        return fh.read(len(OLE_HEADER_MAGIC)) == OLE_HEADER_MAGIC
-
-
-def normalize_binary_snippet_text(text: str) -> str:
-    # 二进制兜底抽出来的文本会混杂很多控制字符和奇怪空白，这里尽量压平。
-    cleaned = []
-    for char in text:
-        if char in {"\n", "\r", "\t"}:
-            cleaned.append(" ")
-            continue
-        category = ord(char)
-        if char.isprintable() or 0x4E00 <= category <= 0x9FFF:
-            cleaned.append(char)
-    normalized = "".join(cleaned)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
-
-
-def binary_text_candidate_is_meaningful(text: str, min_length: int = 8) -> bool:
-    # 兜底提取不要求完美，但至少要像“人会读的片段”，尽量别把纯噪声放进去。
-    if len(text) < min_length:
-        return False
-    interesting_chars = [
-        char for char in text
-        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
-    ]
-    if len(interesting_chars) < max(4, min_length // 2):
-        return False
-    return True
-
-
-def extract_printable_ascii_snippets(binary_bytes: bytes, min_length: int = 8) -> list[str]:
-    snippets: list[str] = []
-    for match in re.finditer(rb"[\x20-\x7e]{8,}", binary_bytes):
-        text = normalize_binary_snippet_text(match.group(0).decode("utf-8", errors="ignore"))
-        if binary_text_candidate_is_meaningful(text, min_length=min_length):
-            snippets.append(text)
-    return snippets
-
-
-def extract_utf16_text_snippets(binary_bytes: bytes, min_length: int = 8) -> list[str]:
-    # 老 Office 二进制里经常能捞到 UTF-16LE 文本。
-    # 为了适应可能的字节对齐偏移，这里从 0/1 两个 offset 都扫一遍。
-    snippets: list[str] = []
-    pattern = re.compile(r"[0-9A-Za-z\u4e00-\u9fff][0-9A-Za-z\u4e00-\u9fff\s，。、“”‘’；：？！,.!?:;()（）\-_/]{7,}")
-    for offset in (0, 1):
-        if len(binary_bytes) <= offset + 2:
-            continue
-        decoded = binary_bytes[offset:].decode("utf-16le", errors="ignore")
-        for match in pattern.finditer(decoded):
-            text = normalize_binary_snippet_text(match.group(0))
-            if binary_text_candidate_is_meaningful(text, min_length=min_length):
-                snippets.append(text)
-    return snippets
-
-
-def extract_text_snippets_from_binary_document(
-    binary_bytes: bytes,
-    limit: int = 20,
-    min_length: int = 8,
-) -> list[str]:
-    # 这是老格式 Office 的兜底文本提取：
-    # - 先扫 ASCII/UTF-8 可见串
-    # - 再扫 UTF-16LE 候选串
-    # 目标是尽量拿到“能提示内容主题”的片段，而不是高保真还原。
-    ordered_candidates = [
-        *extract_printable_ascii_snippets(binary_bytes, min_length=min_length),
-        *extract_utf16_text_snippets(binary_bytes, min_length=min_length),
-    ]
-
-    snippets: list[str] = []
-    seen: set[str] = set()
-    for candidate in ordered_candidates:
-        dedupe_key = candidate.lower()
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        snippets.append(candidate)
-        if len(snippets) >= limit:
-            break
-    return snippets
-
-
-def convert_legacy_doc_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # `.doc` 在 V1 先不上复杂二进制解析器。
-    # 先尽量给出“文件身份 + 可见文本片段 + 明确告警”，保证能进入后续链路。
-    binary_bytes = raw_path.read_bytes()
-    snippets = extract_text_snippets_from_binary_document(binary_bytes)
-    is_ole = is_probably_ole_document(raw_path)
-
-    parts = [
-        f"# {raw_path.stem}",
-        "",
-        "## 文档信息 / Document Info",
-        "",
-        f"- 原始格式: `.doc`",
-        f"- 文件大小: {len(binary_bytes)} bytes",
-        f"- OLE 容器: `{is_ole}`",
-    ]
-
-    if snippets:
-        parts.extend([
-            "",
-            "## 提取文本片段 / Extracted Snippets",
-            "",
-        ])
-        for index, snippet in enumerate(snippets, start=1):
-            parts.append(f"{index}. {snippet}")
-    else:
-        parts.extend([
-            "",
-            "## 提取文本片段 / Extracted Snippets",
-            "",
-            "> 当前纯 Python fallback 未提取到可读正文片段。",
-        ])
-
-    markdown = "\n".join(parts).strip() + "\n"
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "partial" if snippets else "poor",
-        "warnings": ["legacy_doc_binary_fallback"] if snippets else ["legacy_doc_no_text_snippets"],
-        "location_map": {
-            "type": "binary_snippet_map",
-            "source_path": str(raw_path),
-            "snippet_count": len(snippets),
-            "is_ole_container": is_ole,
-        },
-    }
-
-
-def image_size_from_binary(raw_path: Path) -> tuple[int | None, int | None, str | None]:
-    # 在 Pillow 不可用时，用文件头做一层轻量尺寸识别。
-    with raw_path.open("rb") as fh:
-        header = fh.read(64)
-
-    if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
-        width, height = struct.unpack(">II", header[16:24])
-        return width, height, "PNG"
-
-    if header.startswith(b"\xff\xd8"):
-        with raw_path.open("rb") as fh:
-            fh.read(2)
-            while True:
-                marker_start = fh.read(1)
-                if not marker_start:
-                    break
-                if marker_start != b"\xff":
-                    continue
-                marker = fh.read(1)
-                while marker == b"\xff":
-                    marker = fh.read(1)
-                if marker in {b"\xc0", b"\xc1", b"\xc2", b"\xc3", b"\xc5", b"\xc6", b"\xc7", b"\xc9", b"\xca", b"\xcb", b"\xcd", b"\xce", b"\xcf"}:
-                    segment_length = struct.unpack(">H", fh.read(2))[0]
-                    _precision = fh.read(1)
-                    height, width = struct.unpack(">HH", fh.read(4))
-                    return width, height, "JPEG"
-                if marker in {b"\xd8", b"\xd9"}:
-                    continue
-                segment_length_data = fh.read(2)
-                if len(segment_length_data) < 2:
-                    break
-                segment_length = struct.unpack(">H", segment_length_data)[0]
-                fh.seek(segment_length - 2, 1)
-
-    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
-        if header[12:16] == b"VP8X" and len(header) >= 30:
-            width = 1 + int.from_bytes(header[24:27], "little")
-            height = 1 + int.from_bytes(header[27:30], "little")
-            return width, height, "WEBP"
-
-    return None, None, None
-
-
-def worksheet_to_markdown(sheet) -> str:
-    # Excel 每个 sheet 先保守转成一个 Markdown 表格。
-    rows = []
-    for row in sheet.iter_rows(values_only=True):
-        values = ["" if value is None else str(value).replace("\n", " ") for value in row]
-        if any(value != "" for value in values):
-            rows.append(values)
-
-    if not rows:
-        return "_此工作表无可见数据_"
-
-    width = max(len(row) for row in rows)
-    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
-    header = normalized_rows[0]
-    divider = ["---"] * width
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(divider) + " |",
-    ]
-    for row in normalized_rows[1:]:
-        lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines)
-
-
-def xlsx_shared_strings_from_archive(archive: zipfile.ZipFile) -> list[str]:
-    # xlsx 里的字符串常常集中存在 sharedStrings.xml，需要先整体解开。
-    try:
-        xml_data = archive.read("xl/sharedStrings.xml")
-    except KeyError:
-        return []
-
-    root = ET.fromstring(xml_data)
-    values: list[str] = []
-    for item in root.findall("main:si", XLSX_NAMESPACES):
-        texts = [node.text or "" for node in item.findall(".//main:t", XLSX_NAMESPACES)]
-        values.append("".join(texts))
-    return values
-
-
-def xlsx_sheet_names_from_workbook(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
-    # 从 workbook 和关系文件里拿到 sheet 名和对应的 sheet xml 路径。
-    workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
-    rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-
-    rel_map = {}
-    for rel in rel_root.findall("rel:Relationship", XLSX_NAMESPACES):
-        rel_id = rel.get("Id")
-        target = rel.get("Target")
-        if rel_id and target:
-            rel_map[rel_id] = target
-
-    sheets: list[tuple[str, str]] = []
-    for sheet in workbook_root.findall("main:sheets/main:sheet", XLSX_NAMESPACES):
-        name = sheet.get("name", "Sheet")
-        rel_id = sheet.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-        target = rel_map.get(rel_id, "")
-        if target:
-            normalized_target = target.lstrip("/")
-            if normalized_target.startswith("xl/"):
-                sheet_path = normalized_target
-            else:
-                sheet_path = f"xl/{normalized_target}"
-            sheets.append((name, sheet_path))
-    return sheets
-
-
-def column_letters_to_index(value: str) -> int:
-    index = 0
-    for char in value:
-        if not char.isalpha():
-            break
-        index = index * 26 + (ord(char.upper()) - ord("A") + 1)
-    return max(index - 1, 0)
-
-
-def xlsx_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
-    cell_type = cell.get("t")
-    value_node = cell.find("main:v", XLSX_NAMESPACES)
-    inline_node = cell.find("main:is", XLSX_NAMESPACES)
-
-    if inline_node is not None:
-        texts = [node.text or "" for node in inline_node.findall(".//main:t", XLSX_NAMESPACES)]
-        return "".join(texts).strip()
-    if value_node is None or value_node.text is None:
-        return ""
-    raw_value = value_node.text.strip()
-    if cell_type == "s":
-        try:
-            return shared_strings[int(raw_value)]
-        except (ValueError, IndexError):
-            return raw_value
-    return raw_value
-
-
-def xlsx_rows_from_sheet_xml(archive: zipfile.ZipFile, sheet_path: str, shared_strings: list[str]) -> list[list[str]]:
-    root = ET.fromstring(archive.read(sheet_path))
-    rows: list[list[str]] = []
-
-    for row in root.findall("main:sheetData/main:row", XLSX_NAMESPACES):
-        row_values: list[str] = []
-        last_index = -1
-        for cell in row.findall("main:c", XLSX_NAMESPACES):
-            ref = cell.get("r", "")
-            col_index = column_letters_to_index(ref)
-            while len(row_values) < col_index:
-                row_values.append("")
-            value = xlsx_cell_value(cell, shared_strings).replace("\n", " ").strip()
-            row_values.append(value)
-            last_index = col_index
-        if row_values and any(value != "" for value in row_values):
-            rows.append(row_values)
-
-    return rows
-
-
-def rows_to_markdown_table(rows: list[list[str]]) -> str:
-    if not rows:
-        return "_此工作表无可见数据_"
-
-    width = max(len(row) for row in rows)
-    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
-    header = normalized_rows[0]
-    divider = ["---"] * width
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(divider) + " |",
-    ]
-    for row in normalized_rows[1:]:
-        lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines)
-
-
-def convert_xlsx_to_markdown_fallback(raw_path: Path) -> tuple[str, dict]:
-    # 没有 openpyxl 时，xlsx 仍然可以作为 zip+xml 做保守解析。
-    with zipfile.ZipFile(raw_path) as archive:
-        shared_strings = xlsx_shared_strings_from_archive(archive)
-        sheets = xlsx_sheet_names_from_workbook(archive)
-
-        parts = [f"# {raw_path.stem}"]
-        sheet_map: list[dict] = []
-
-        for sheet_name, sheet_path in sheets:
-            rows = xlsx_rows_from_sheet_xml(archive, sheet_path, shared_strings)
-            parts.append(f"## 工作表: {sheet_name}")
-            parts.append(rows_to_markdown_table(rows))
-            sheet_map.append({
-                "sheet_name": sheet_name,
-                "row_count": len(rows),
-                "sheet_path": sheet_path,
-            })
-
-    markdown = "\n\n".join(part for part in parts if part.strip()).strip() + "\n"
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "good" if sheet_map else "partial",
-        "warnings": [] if sheet_map else ["xlsx_no_visible_sheets"],
-        "location_map": {
-            "type": "sheet_map",
-            "sheets": sheet_map,
-            "source_path": str(raw_path),
-        },
-    }
-
-
-def convert_legacy_xls_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # `.xls` 也先走“可见文本片段 + 明确警告”的保守路径。
-    # 这样至少能把工作表名、列名、公式痕迹或可读单元格内容捞出一部分。
-    binary_bytes = raw_path.read_bytes()
-    snippets = extract_text_snippets_from_binary_document(binary_bytes)
-    is_ole = is_probably_ole_document(raw_path)
-
-    parts = [
-        f"# {raw_path.stem}",
-        "",
-        "## 工作簿信息 / Workbook Info",
-        "",
-        f"- 原始格式: `.xls`",
-        f"- 文件大小: {len(binary_bytes)} bytes",
-        f"- OLE 容器: `{is_ole}`",
-    ]
-
-    if snippets:
-        parts.extend([
-            "",
-            "## 可见文本片段 / Visible Text Snippets",
-            "",
-        ])
-        for index, snippet in enumerate(snippets, start=1):
-            parts.append(f"{index}. {snippet}")
-    else:
-        parts.extend([
-            "",
-            "## 可见文本片段 / Visible Text Snippets",
-            "",
-            "> 当前纯 Python fallback 未提取到可读工作簿文本。",
-        ])
-
-    markdown = "\n".join(parts).strip() + "\n"
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "partial" if snippets else "poor",
-        "warnings": ["legacy_xls_binary_fallback"] if snippets else ["legacy_xls_no_text_snippets"],
-        "location_map": {
-            "type": "binary_snippet_map",
-            "source_path": str(raw_path),
-            "snippet_count": len(snippets),
-            "is_ole_container": is_ole,
-        },
-    }
-
-
-def convert_spreadsheet_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # 电子表格优先保留 sheet 结构、表头和主要单元格内容。
-    if raw_path.suffix.lower() == ".csv":
-        return convert_csv_to_markdown(raw_path)
-    if raw_path.suffix.lower() == ".xls":
-        return convert_legacy_xls_to_markdown(raw_path)
-    if openpyxl is None:
-        return convert_xlsx_to_markdown_fallback(raw_path)
-
-    workbook = openpyxl.load_workbook(str(raw_path), data_only=False)
-    parts = [f"# {raw_path.stem}"]
-    sheet_map: list[dict] = []
-
-    for sheet in workbook.worksheets:
-        parts.append(f"\n## 工作表: {sheet.title}\n")
-        parts.append(worksheet_to_markdown(sheet))
-        sheet_map.append({
-            "sheet_name": sheet.title,
-            "max_row": sheet.max_row,
-            "max_column": sheet.max_column,
-        })
-
-    markdown = "\n\n".join(parts).strip() + "\n"
-    metadata = {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "good" if workbook.worksheets else "partial",
-        "warnings": [] if workbook.worksheets else ["spreadsheet_no_worksheets"],
-        "location_map": {
-            "type": "sheet_map",
-            "sheets": sheet_map,
-            "source_path": str(raw_path),
-        },
-    }
-    return markdown, metadata
-
-
-def convert_csv_to_markdown(raw_path: Path) -> tuple[str, dict]:
-    # CSV 不依赖 openpyxl，直接走标准库就够了。
-    rows: list[list[str]] = []
-    with raw_path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.reader(fh)
-        for row in reader:
-            if any(cell.strip() for cell in row):
-                rows.append([cell.strip() for cell in row])
-
-    parts = [f"# {raw_path.stem}", "", "## 工作表: CSV", ""]
-    if rows:
-        width = max(len(row) for row in rows)
-        normalized_rows = [row + [""] * (width - len(row)) for row in rows]
-        header = normalized_rows[0]
-        divider = ["---"] * width
-        parts.append("| " + " | ".join(header) + " |")
-        parts.append("| " + " | ".join(divider) + " |")
-        for row in normalized_rows[1:]:
-            parts.append("| " + " | ".join(row) + " |")
-    else:
-        parts.append("_CSV 文件没有可见数据_")
-
-    markdown = "\n".join(parts).strip() + "\n"
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "good" if rows else "partial",
-        "warnings": [] if rows else ["csv_no_visible_rows"],
-        "location_map": {
-            "type": "sheet_map",
-            "sheets": [{"sheet_name": "CSV", "row_count": len(rows)}],
-            "source_path": str(raw_path),
-        },
-    }
-
-
-def ocr_text_is_meaningful(text: str, min_length: int = 12) -> bool:
-    normalized = normalize_binary_snippet_text(text)
-    if len(normalized) < min_length:
-        return False
-    interesting_chars = [
-        char for char in normalized
-        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
-    ]
-    return len(interesting_chars) >= max(6, min_length // 2)
-
-
-def image_understanding_text_is_meaningful(text: str, min_length: int = 16) -> bool:
-    normalized = normalize_binary_snippet_text(text)
-    if len(normalized) < min_length:
-        return False
-    signal_chars = [
-        char for char in normalized
-        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
-    ]
-    return len(signal_chars) >= max(8, min_length // 2)
-
-
-def sanitize_asset_filename(value: str, default_stem: str = "asset") -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
-    cleaned = cleaned.strip("._")
-    if not cleaned:
-        cleaned = default_stem
-    return stabilize_filename_component(cleaned, max_bytes=120, separator="_")
-
-
-def markdown_image_target_candidates(target_value: str) -> list[str]:
-    normalized = target_value.strip()
-    if not normalized:
-        return []
-    if normalized.startswith("<") and normalized.endswith(">"):
-        normalized = normalized[1:-1].strip()
-    normalized = normalized.replace("\\)", ")").replace("\\(", "(")
-    return [normalized]
-
-
-def markdown_image_asset_extension(
-    *,
-    parsed_url,
-    source_name: str,
-    content_type: str | None = None,
-) -> str:
-    candidate = Path(unquote(parsed_url.path or source_name)).suffix.lower()
-    if candidate:
-        return candidate
-    if content_type:
-        guessed = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
-        if guessed:
-            return guessed.lower()
-    fallback = Path(source_name).suffix.lower()
-    return fallback or ".bin"
-
-
-def build_markdown_asset_path(assets_dir: Path, source_record: dict, image_index: int, source_name: str) -> Path:
-    stem = sanitize_asset_filename(Path(source_name).stem or f"image_{image_index}", default_stem=f"image_{image_index}")
-    suffix = Path(source_name).suffix.lower() or ".bin"
-    relative_dir = Path(source_record["source_id"])
-    relative_path = relative_dir / f"{image_index:03d}_{stem}{suffix}"
-    return assets_dir / relative_path
-
-
-def is_certificate_verification_error(exc: Exception) -> bool:
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return True
-    if isinstance(exc, urllib.error.URLError):
-        reason = exc.reason
-        if isinstance(reason, ssl.SSLCertVerificationError):
-            return True
-        if isinstance(reason, ssl.SSLError):
-            return "CERTIFICATE_VERIFY_FAILED" in str(reason)
-    return "CERTIFICATE_VERIFY_FAILED" in str(exc)
-
-
-def download_url_with_optional_insecure_retry(
-    target_value: str,
-    *,
-    allow_insecure_downloads: bool,
-) -> tuple[bytes, str | None, str, list[str]]:
-    try:
-        with urllib.request.urlopen(target_value, timeout=20) as response:
-            return (
-                response.read(),
-                response.headers.get("Content-Type"),
-                "verified",
-                [],
-            )
-    except Exception as exc:
-        if not allow_insecure_downloads or not is_certificate_verification_error(exc):
-            raise
-
-    insecure_context = ssl._create_unverified_context()
-    with urllib.request.urlopen(target_value, timeout=20, context=insecure_context) as response:
-        return (
-            response.read(),
-            response.headers.get("Content-Type"),
-            "insecure_retry",
-            ["markdown_remote_image_download_used_insecure_retry"],
-        )
-
-
-def download_markdown_image_to_assets(
-    *,
-    target: Path,
-    source_record: dict,
-    raw_dir: Path,
-    image_index: int,
-    target_value: str,
-    allow_insecure_downloads: bool = True,
-) -> dict:
-    assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
-    parsed = urlparse(target_value)
-    source_name = Path(unquote(parsed.path)).name or f"image_{image_index}"
-
-    content, content_type, download_mode, warnings = download_url_with_optional_insecure_retry(
-        target_value,
-        allow_insecure_downloads=allow_insecure_downloads,
-    )
-
-    suffix = markdown_image_asset_extension(parsed_url=parsed, source_name=source_name, content_type=content_type)
-    asset_path = build_markdown_asset_path(
-        assets_dir,
-        source_record,
-        image_index,
-        f"{Path(source_name).stem}{suffix}",
-    )
-    ensure_directory(asset_path.parent)
-    asset_path.write_bytes(content)
-    asset_hash = hashlib.sha256(content).hexdigest()
-    return {
-        "storage_kind": "downloaded",
-        "asset_path": asset_path,
-        "asset_hash": asset_hash,
-        "content_type": content_type,
-        "download_mode": download_mode,
-        "warnings": warnings,
-    }
-
-
-def resolve_markdown_local_image_path(raw_path: Path, target_value: str, raw_dir: Path) -> Path:
-    parsed = urlparse(target_value)
-    if parsed.scheme and parsed.scheme != "file":
-        raise ValueError(f"Unsupported local image reference scheme: {target_value}")
-    if parsed.scheme == "file":
-        candidate = Path(unquote(parsed.path)).expanduser()
-    else:
-        candidate = (raw_path.parent / unquote(target_value)).expanduser()
-    return ensure_path_within_raw_root(candidate, raw_dir, purpose="Markdown image reference")
-
-
-def convert_markdown_embedded_image_to_section(
-    *,
-    target: Path,
-    asset_path: Path,
-    asset_label: str,
-    alt_text: str,
-    image_context: dict | None = None,
-) -> tuple[list[str], dict]:
-    image_markdown, image_metadata = convert_image_to_markdown(
-        asset_path,
-        target=target,
-        image_context=image_context,
-    )
-    body_lines = [line.rstrip() for line in image_markdown.splitlines()]
-    if body_lines and body_lines[0].startswith("# "):
-        body_lines = body_lines[1:]
-        if body_lines and not body_lines[0]:
-            body_lines = body_lines[1:]
-
-    lines = [
-        f"## 内嵌图片 {asset_label}",
-        "",
-        f"- alt: {alt_text or '(empty)'}",
-        f"- asset_path: {asset_path}",
-        f"- extraction_quality: {image_metadata.get('extraction_quality', 'partial')}",
-    ]
-    lines.extend(body_lines if body_lines else ["> 图片存在，但当前未生成附加文本内容。"])
-    return lines, image_metadata
-
-
-def enrich_markdown_with_embedded_images(
-    *,
-    target: Path,
-    source_record: dict,
-    raw_path: Path,
-    raw_text: str,
-    allow_insecure_downloads: bool = True,
-) -> tuple[str, dict]:
-    raw_dir = resolve_workspace_raw_dir(target)
-    assets_dir = raw_assets_dir_for_workspace(target, raw_dir)
-    ensure_directory(assets_dir)
-
-    warnings: list[str] = []
-    image_records: list[dict] = []
-    section_lines: list[str] = []
-    extraction_quality = "good"
-    used_downloads = False
-    used_ocr = False
-
-    matches = list(MARKDOWN_IMAGE_PATTERN.finditer(raw_text))
-    if not matches:
-        return normalize_text_content("markdown", raw_text), {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "good",
-            "warnings": [],
-            "location_map": {
-                "type": "line_map",
-                "source_path": source_record["source_path"],
-            },
-        }
-
-    for image_index, match in enumerate(matches, start=1):
-        alt_text = (match.group("alt") or "").strip()
-        target_value = (match.group("target") or "").strip()
-        candidate_values = markdown_image_target_candidates(target_value)
-        if not candidate_values:
-            warnings.append(f"markdown_image_invalid_target:{image_index}")
-            extraction_quality = "partial"
-            section_lines.extend([
-                f"## 内嵌图片 image_{image_index}",
-                "",
-                f"- alt: {alt_text or '(empty)'}",
-                "> 源文件包含图片，但图片地址为空或无法解析。",
-                "",
-            ])
-            continue
-
-        candidate = candidate_values[0]
-        parsed = urlparse(candidate)
-        try:
-            if parsed.scheme in {"http", "https"}:
-                asset_result = download_markdown_image_to_assets(
-                    target=target,
-                    source_record=source_record,
-                    raw_dir=raw_dir,
-                    image_index=image_index,
-                    target_value=candidate,
-                    allow_insecure_downloads=allow_insecure_downloads,
-                )
-                used_downloads = True
-                asset_path = asset_result["asset_path"]
-            else:
-                asset_path = resolve_markdown_local_image_path(raw_path, candidate, raw_dir)
-                asset_result = {
-                    "storage_kind": "local_raw",
-                    "asset_path": asset_path,
-                    "asset_hash": file_sha256(asset_path),
-                    "content_type": None,
-                    "download_mode": "local_raw",
-                    "warnings": [],
-                }
-
-            section_block, image_metadata = convert_markdown_embedded_image_to_section(
-                target=target,
-                asset_path=asset_path,
-                asset_label=f"image_{image_index}",
-                alt_text=alt_text,
-                image_context={
-                    "markdown_source_path": source_record["source_path"],
-                    "image_index": image_index,
-                    "image_alt": alt_text,
-                    "image_target": candidate,
-                },
-            )
-            used_ocr = used_ocr or bool(image_metadata.get("location_map", {}).get("ocr", {}).get("used"))
-            image_quality = image_metadata.get("extraction_quality", "partial")
-            if image_quality in {"failed", "poor", "partial"}:
-                extraction_quality = "partial"
-            warnings.extend(image_metadata.get("warnings", []))
-            warnings.extend(asset_result.get("warnings", []))
-            section_lines.extend(section_block)
-            section_lines.append("")
-            image_records.append({
-                "index": image_index,
-                "alt": alt_text,
-                "target": candidate,
-                "storage_kind": asset_result["storage_kind"],
-                "asset_path": str(asset_path),
-                "asset_hash": asset_result["asset_hash"],
-                "content_type": asset_result.get("content_type"),
-                "download_mode": asset_result.get("download_mode"),
-                "image_metadata": image_metadata.get("location_map", {}),
-            })
-        except Exception as exc:
-            warnings.append(f"markdown_image_conversion_failed:{image_index}:{type(exc).__name__}")
-            extraction_quality = "partial"
-            section_lines.extend([
-                f"## 内嵌图片 image_{image_index}",
-                "",
-                f"- alt: {alt_text or '(empty)'}",
-                f"- target: {candidate}",
-                "> 源文件包含图片，但内容暂时无法转换为文本。",
-                "",
-            ])
-            image_records.append({
-                "index": image_index,
-                "alt": alt_text,
-                "target": candidate,
-                "storage_kind": "failed",
-                "error": f"{type(exc).__name__}: {exc}",
-            })
-
-    normalized_markdown = normalize_text_content("markdown", raw_text)
-    if section_lines:
-        normalized_markdown = (
-            normalized_markdown.rstrip()
-            + "\n\n## 内嵌图片内容 / Embedded Image Content\n\n"
-            + "\n".join(section_lines).strip()
-            + "\n"
-        )
-
-    extraction_method = "python_only"
-    if used_downloads:
-        extraction_method += "+remote_assets"
-    if used_ocr:
-        extraction_method += "+tesseract"
-
-    return normalized_markdown, {
-        "content_format": "markdown",
-        "extraction_method": extraction_method,
-        "extraction_quality": extraction_quality,
-        "warnings": sorted(set(warnings)),
-        "location_map": {
-            "type": "markdown_with_embedded_images",
-            "source_path": source_record["source_path"],
-            "image_count": len(image_records),
-            "images": image_records,
-        },
-    }
-
-
-def normalize_agent_assisted_image_result(hook_result: dict | None, min_confidence: float) -> tuple[str, dict]:
-    if not isinstance(hook_result, dict):
-        return "", {
-            "used": False,
-            "ok": False,
-            "quality": "unavailable",
-            "warnings": [],
-            "confidence": 0.0,
-            "reason": "image_to_text_unavailable",
-            "summary": "",
-        }
-
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
-    reason = str(hook_result.get("reason", "")).strip() or "image_to_text_agent_result"
-    warnings = [str(item).strip() for item in hook_result.get("warnings", []) if str(item).strip()]
-    if confidence < min_confidence:
-        return "", {
-            "used": True,
-            "ok": False,
-            "quality": "low_confidence",
-            "warnings": sorted(set([*warnings, "image_to_text_low_confidence"])),
-            "confidence": confidence,
-            "reason": reason,
-            "summary": normalize_binary_snippet_text(str(hook_result.get("summary", ""))),
-        }
-
-    extracted_text = normalize_binary_snippet_text(
-        str(hook_result.get("extracted_text") or hook_result.get("text") or "")
-    )
-    summary = normalize_binary_snippet_text(str(hook_result.get("summary", "")))
-    combined_text = extracted_text
-    if summary and summary not in combined_text:
-        combined_text = (
-            f"摘要: {summary}\n\n{extracted_text}".strip()
-            if extracted_text else summary
-        )
-
-    if not combined_text:
-        return "", {
-            "used": True,
-            "ok": False,
-            "quality": "empty",
-            "warnings": sorted(set([*warnings, "image_to_text_no_text"])),
-            "confidence": confidence,
-            "reason": reason,
-            "summary": summary,
-        }
-
-    quality = "good" if image_understanding_text_is_meaningful(combined_text) else "partial"
-    if quality == "partial":
-        warnings.append("image_to_text_low_signal")
-    return combined_text, {
-        "used": True,
-        "ok": True,
-        "quality": quality,
-        "warnings": sorted(set(warnings)),
-        "confidence": confidence,
-        "reason": reason,
-        "summary": summary,
-    }
-
-
-def run_agent_assisted_image_to_text(
-    target: Path | None,
-    raw_path: Path,
-    image_context: dict | None = None,
-) -> tuple[str, dict]:
-    if target is None:
-        return "", {
-            "used": False,
-            "ok": False,
-            "quality": "disabled",
-            "warnings": [],
-            "confidence": 0.0,
-            "reason": "image_to_text_target_missing",
-            "summary": "",
-        }
-
-    automation_config = load_automation_target_config(load_workspace_config(target), "image_to_text")
-    if not automation_config.get("enabled"):
-        return "", {
-            "used": False,
-            "ok": False,
-            "quality": "disabled",
-            "warnings": [],
-            "confidence": 0.0,
-            "reason": "image_to_text_agent_disabled",
-            "summary": "",
-        }
-
-    payload = {
-        "task": "describe_image",
-        "image_path": str(raw_path.resolve()),
-        "image_name": raw_path.name,
-        "image_context": image_context or {},
-    }
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=payload,
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
-    )
-    return normalize_agent_assisted_image_result(
-        hook_result,
-        automation_config.get("min_confidence", 0.8),
-    )
-
-
-def run_tesseract_ocr(raw_path: Path) -> tuple[str, dict]:
-    # 图片 OCR 作为增强路径存在：
-    # - 有 tesseract：尽量提取正文
-    # - 无 tesseract：走元数据占位
-    # 这里统一返回结构化结果，方便 normalized / 日志 / 测试共用。
-    if not command_exists("tesseract"):
-        return "", {
-            "used": False,
-            "ok": False,
-            "quality": "missing",
-            "warnings": ["tesseract_missing"],
-            "details": "tesseract command not found in PATH",
-        }
-
-    completed = subprocess.run(
-        ["tesseract", str(raw_path), "stdout", "--psm", "3"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    raw_text = (completed.stdout or "").strip()
-    normalized_text = normalize_binary_snippet_text(raw_text)
-
-    if completed.returncode != 0:
-        stderr_text = (completed.stderr or "").strip() or "unknown_tesseract_error"
-        return "", {
-            "used": True,
-            "ok": False,
-            "quality": "failed",
-            "warnings": ["tesseract_ocr_failed"],
-            "details": stderr_text,
-        }
-
-    if not normalized_text:
-        return "", {
-            "used": True,
-            "ok": True,
-            "quality": "empty",
-            "warnings": ["tesseract_ocr_no_text"],
-            "details": (completed.stderr or "").strip(),
-        }
-
-    quality = "good" if ocr_text_is_meaningful(normalized_text) else "partial"
-    warnings: list[str] = []
-    if quality == "partial":
-        warnings.append("tesseract_ocr_low_signal")
-    return normalized_text, {
-        "used": True,
-        "ok": True,
-        "quality": quality,
-        "warnings": warnings,
-        "details": (completed.stderr or "").strip(),
-    }
-
-
-def convert_image_to_markdown(
-    raw_path: Path,
-    *,
-    target: Path | None = None,
-    image_context: dict | None = None,
-) -> tuple[str, dict]:
-    # 图片标准化采用“元数据始终保底，OCR 视环境增强”的策略。
-    warnings: list[str] = []
-    stat = raw_path.stat()
-    metadata_lines = [
-        f"# {raw_path.stem}",
-        "",
-        f"- 文件名: {raw_path.name}",
-        f"- 文件大小: {stat.st_size} bytes",
-    ]
-    location_map = {
-        "type": "image_metadata",
-        "source_path": str(raw_path),
-    }
-
-    width = None
-    height = None
-    image_format = None
-    image_mode = "unknown"
-    exif = {}
-
-    if Image is None:
-        warnings.append("pillow_missing")
-        width, height, image_format = image_size_from_binary(raw_path)
-    else:
-        try:
-            with Image.open(raw_path) as image:
-                width = image.width
-                height = image.height
-                image_mode = image.mode
-                image_format = image.format or "unknown"
-                if hasattr(image, "getexif"):
-                    exif_data = image.getexif()
-                    if exif_data:
-                        exif = {str(key): str(value) for key, value in exif_data.items()}
-        except Exception as exc:
-            warnings.append("pillow_image_open_failed")
-            width, height, image_format = image_size_from_binary(raw_path)
-            image_mode = "unknown"
-
-    metadata_lines.extend([
-        f"- 尺寸: {width}x{height}" if width and height else "- 尺寸: unknown",
-        f"- 模式: {image_mode}",
-        f"- 格式: {image_format}" if image_format else "- 格式: unknown",
-    ])
-
-    if exif:
-        metadata_lines.append("")
-        metadata_lines.append("## EXIF")
-        for key, value in sorted(exif.items()):
-            metadata_lines.append(f"- {key}: {value}")
-
-    ocr_text, ocr_result = run_tesseract_ocr(raw_path)
-    warnings.extend(ocr_result.get("warnings", []))
-    llm_text = ""
-    llm_result = {
-        "used": False,
-        "ok": False,
-        "quality": "disabled",
-        "warnings": [],
-        "confidence": 0.0,
-        "reason": "image_to_text_not_attempted",
-        "summary": "",
-    }
-
-    should_try_llm = (
-        not ocr_text
-        or ocr_result.get("quality") in {"missing", "failed", "partial", "empty"}
-    )
-    if should_try_llm:
-        llm_text, llm_result = run_agent_assisted_image_to_text(
-            target=target,
-            raw_path=raw_path,
-            image_context=image_context,
-        )
-        warnings.extend(llm_result.get("warnings", []))
-
-    extraction_quality = "partial"
-    combined_sections: list[str] = []
-    if ocr_text:
-        combined_sections.extend([
-            "## OCR 文本 / OCR Text",
-            "",
-            ocr_text,
-        ])
-        extraction_quality = "good" if ocr_result.get("quality") == "good" else "partial"
-    if llm_text:
-        combined_sections.extend([
-            "## LLM 图片理解 / LLM Image Understanding",
-            "",
-            llm_text,
-        ])
-        if llm_result.get("quality") == "good":
-            extraction_quality = "good"
-
-    if combined_sections:
-        metadata_lines.extend([
-            "",
-            *combined_sections,
-        ])
-    else:
-        if ocr_result.get("quality") == "failed":
-            metadata_lines.extend([
-                "",
-                "> tesseract 已安装，但本次 OCR 执行失败，当前仅保留图片元数据。",
-            ])
-        elif ocr_result.get("quality") == "missing":
-            metadata_lines.extend([
-                "",
-                "> 当前环境未检测到 tesseract，图片仅生成元数据级 normalized 文档。",
-            ])
-        else:
-            metadata_lines.extend([
-                "",
-                "> 本次 OCR 未提取到稳定正文，当前保留图片元数据供后续人工或 Agent 处理。",
-            ])
-        if llm_result.get("used") and not llm_text:
-            metadata_lines.extend([
-                "",
-                "> 已尝试使用 LLM 识别图片内容，但当前未得到可稳定落盘的文本结果。",
-            ])
-
-    markdown = "\n".join(metadata_lines).strip() + "\n"
-    location_map["image"] = {
-        "has_exif": bool(exif),
-        "width": width,
-        "height": height,
-        "mode": image_mode,
-        "format": image_format,
-    }
-    location_map["ocr"] = {
-        "used": ocr_result.get("used", False),
-        "ok": ocr_result.get("ok", False),
-        "quality": ocr_result.get("quality"),
-        "char_count": len(ocr_text),
-    }
-    location_map["llm_image_understanding"] = {
-        "used": llm_result.get("used", False),
-        "ok": llm_result.get("ok", False),
-        "quality": llm_result.get("quality"),
-        "char_count": len(llm_text),
-        "confidence": llm_result.get("confidence", 0.0),
-        "reason": llm_result.get("reason"),
-        "summary": llm_result.get("summary", ""),
-    }
-    extraction_method = "python_only"
-    if ocr_result.get("used"):
-        extraction_method += "+tesseract"
-    if llm_result.get("used"):
-        extraction_method += "+agent_assisted"
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": extraction_method,
-        "extraction_quality": extraction_quality,
-        "warnings": warnings if warnings else ([] if (ocr_text or llm_text) else ["image_metadata_only"]),
-        "location_map": location_map,
-    }
-
-
-def convert_unknown_source_to_placeholder(raw_path: Path, source_type: str) -> tuple[str, dict]:
-    # 对暂不支持的格式，至少生成一个可追踪占位文档，而不是静默丢掉。
-    markdown = (
-        f"# {raw_path.stem}\n\n"
-        f"- source_type: {source_type}\n"
-        f"- source_path: {raw_path}\n\n"
-        "> 当前版本暂不支持该格式的自动标准化，请等待后续转换器或使用 Agent 辅助处理。\n"
-    )
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "poor",
-        "warnings": [f"unsupported_source_type:{source_type}"],
-        "location_map": {
-            "type": "placeholder",
-            "source_path": str(raw_path),
-        },
-    }
-
-
-def convert_source_to_normalized_markdown(raw_path: Path, source_type: str) -> tuple[str, dict]:
-    # 多格式标准化统一从这里分派，后续新增格式时只需要扩展这一层。
-    if source_type in {"markdown", "plain_text"}:
-        raw_text = raw_path.read_text(encoding="utf-8")
-        return normalize_text_content(source_type, raw_text), {
-            "content_format": "markdown",
-            "extraction_method": "python_only",
-            "extraction_quality": "good",
-            "warnings": [],
-        }
-    if source_type == "pdf":
-        return convert_pdf_to_markdown(raw_path)
-    if source_type == "docx":
-        return convert_docx_to_markdown(raw_path)
-    if source_type == "doc":
-        return convert_legacy_doc_to_markdown(raw_path)
-    if source_type == "spreadsheet":
-        return convert_spreadsheet_to_markdown(raw_path)
-    if source_type == "image":
-        return convert_image_to_markdown(raw_path)
-    return convert_unknown_source_to_placeholder(raw_path, source_type)
-
-
-def build_failed_conversion_placeholder(raw_path: Path, source_type: str, exc: Exception) -> tuple[str, dict]:
-    # 某个转换器失败时，不让整次 ingest 中断，而是生成一个可追踪的失败占位文档。
-    markdown = (
-        f"# {raw_path.stem}\n\n"
-        f"- source_type: {source_type}\n"
-        f"- source_path: {raw_path}\n"
-        f"- converter_error: {type(exc).__name__}: {exc}\n\n"
-        "> 当前版本在标准化该文件时失败，已生成占位文档等待后续修复或 Agent 辅助处理。\n"
-    )
-    return markdown, {
-        "content_format": "markdown",
-        "extraction_method": "python_only",
-        "extraction_quality": "failed",
-        "warnings": [f"converter_error:{type(exc).__name__}", str(exc)],
-        "location_map": {
-            "type": "conversion_error",
-            "source_path": str(raw_path),
-        },
-    }
-
-
-def normalize_source_record(
-    target: Path,
-    source_record: dict,
-    *,
-    allow_insecure_downloads: bool = True,
-) -> dict | None:
-    # 这一层负责把“来源登记记录”转成“标准化记录”。
-    # 这里是 normalized 层的统一入口：不同类型都尽量产出 Markdown 形态的标准文本。
-    source_type = source_record["source_type"]
-    if source_type in {"markdown", "plain_text"}:
-        return normalize_markdown_or_text_record(
-            target,
-            source_record,
-            allow_insecure_downloads=allow_insecure_downloads,
-        )
-
-    raw_path = resolve_source_record_path(target, source_record["source_path"])
-    ensure_path_within_raw_root(raw_path, resolve_workspace_raw_dir(target), purpose="Source record")
-    try:
-        normalized_text, metadata = convert_source_to_normalized_markdown(raw_path, source_type)
-    except Exception as exc:
-        # 多格式转换器允许单文件失败，但不应该拖垮整个 ingest 批次。
-        normalized_text, metadata = build_failed_conversion_placeholder(raw_path, source_type, exc)
-    normalized_text = normalize_text_content("markdown", normalized_text)
-    normalized_rel_path = Path("normalized") / f"{source_record['source_id']}.md"
-    normalized_abs_path = target / normalized_rel_path
-    normalized_abs_path.write_text(normalized_text, encoding="utf-8")
-
-    # 标准化后的 hash 要单独记录，因为后面 chunk/claim 更关心“规范化后的稳定文本”。
-    normalized_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
-    title = raw_path.stem
-    location_map = dict(metadata.get("location_map", {}))
-    location_map["source_path"] = source_record["source_path"]
-
-    if location_map.get("type") == "line_map" and "normalized_line_range" not in location_map:
-        line_count = len(normalized_text.splitlines()) or 1
-        location_map["normalized_line_range"] = f"1-{line_count}"
-
-    return {
-        "source_id": source_record["source_id"],
-        "source_type": source_type,
-        "source_path": source_record["source_path"],
-        "normalized_path": str(normalized_rel_path),
-        "title": title,
-        "language": "unknown",
-        "content_format": metadata.get("content_format", "markdown"),
-        "raw_hash": source_record["source_hash"],
-        "normalized_hash": normalized_hash,
-        "normalizer_version": "normalize_v1",
-        "document_kind": "note",
-        "structure_quality": "unknown",
-        "chunk_strategy_hint": "heading_first",
-        "extraction_method": metadata.get("extraction_method", "python_only"),
-        "extraction_quality": metadata.get("extraction_quality", "partial"),
-        "warnings": metadata.get("warnings", []),
-        "location_map": location_map,
-        "updated_at": utc_now_iso(),
-    }
 
 
 def estimate_token_count(text: str) -> int:
@@ -4928,6 +3229,8 @@ def extract_metadata_from_text(text: str) -> dict:
     key = match.group(1).strip()
     value = match.group(2).strip()
     if not key or not value:
+        return {}
+    if key in {"案例", "示例", "例子", "提示", "注意", "说明"}:
         return {}
     if any(token in key.lower() for token in ("http", "https", "file")):
         return {}
@@ -5709,6 +4012,47 @@ def classify_claim_type(text: str) -> str:
     return "fact"
 
 
+def claim_type_for_knowledge_unit(knowledge_unit: dict, claim_text: str) -> str:
+    unit_kind = str(knowledge_unit.get("unit_kind", "")).strip().lower()
+    if unit_kind == "metadata_fact":
+        return "metadata_fact"
+    if unit_kind == "table_fact":
+        return "table_fact"
+    return classify_claim_type(claim_text)
+
+
+def contextualize_structural_claim_text(knowledge_unit: dict, claim_text: str) -> str:
+    unit_kind = str(knowledge_unit.get("unit_kind", "")).strip().lower()
+    cleaned_text = clean_claim_candidate_text(claim_text)
+    if unit_kind not in {"metadata_fact", "table_fact"}:
+        return cleaned_text
+
+    metadata = knowledge_unit.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    section_path_parts = normalize_string_list(metadata.get("section_path_parts"))
+    subject = section_path_parts[-1] if section_path_parts else ""
+
+    if unit_kind == "metadata_fact":
+        metadata_items = [
+            (str(key).strip(), str(value).strip())
+            for key, value in metadata.items()
+            if str(key).strip() and str(key).strip() not in {"section_path_parts", "heading_path_parts"} and str(value).strip()
+        ]
+        if subject and len(metadata_items) == 1:
+            key, value = metadata_items[0]
+            return f"{subject} {key} 是 {value}"
+        return cleaned_text
+
+    cells = metadata.get("cells")
+    if subject and isinstance(cells, list) and len(cells) >= 2:
+        header = str(cells[0]).strip()
+        value = str(cells[1]).strip()
+        if header and value and header not in {"字段", "field", "name"}:
+            return f"{subject} {header} 是 {value}"
+    return cleaned_text
+
+
 def format_claim_type_label(claim_type: str | None) -> str:
     # 用代码样式展示 claim 类型，避免 Markdown 方括号在部分查看器里被误解成可点击引用。
     return f"`{claim_type or 'unknown'}`"
@@ -5900,31 +4244,23 @@ def build_ordered_review_state_records(
 def load_claim_state_maps(target: Path) -> tuple[dict[str, dict], dict[str, dict], list[dict]]:
     # review 命令需要同时看到在线 claim 和历史 claim。
     # 这里统一加载，避免 list/apply 两个命令重复写一遍状态拆分逻辑。
-    claim_records = [
-        ensure_claim_lifecycle_defaults(record)
-        for record in load_jsonl(target / "state" / "claims.jsonl")
-    ]
-    live_claims = {record["claim_id"]: record for record in filter_live_claim_records(claim_records)}
-    historical_claims = {
-        record["claim_id"]: record
-        for record in claim_records
-        if not is_live_claim_record(record)
-    }
-    return live_claims, historical_claims, claim_records
+    return repo_load_claim_state_maps(
+        target,
+        load_jsonl=load_jsonl,
+        ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+        filter_live_claim_records=filter_live_claim_records,
+        is_live_claim_record=is_live_claim_record,
+    )
 
 
 def load_review_state_maps(target: Path) -> tuple[dict[str, dict], dict[str, dict], list[dict]]:
-    review_records = [
-        ensure_review_lifecycle_defaults(record)
-        for record in load_jsonl(target / "state" / "reviews.jsonl")
-    ]
-    live_reviews = {record["review_id"]: record for record in filter_live_review_records(review_records)}
-    historical_reviews = {
-        record["review_id"]: record
-        for record in review_records
-        if not is_live_review_record(record)
-    }
-    return live_reviews, historical_reviews, review_records
+    return repo_load_review_state_maps(
+        target,
+        load_jsonl=load_jsonl,
+        ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+        filter_live_review_records=filter_live_review_records,
+        is_live_review_record=is_live_review_record,
+    )
 
 
 def build_claim_lookup_by_any_id(
@@ -6305,6 +4641,7 @@ def build_claim_record_from_knowledge_unit(
     claim_text: str,
     chunk_record: dict | None = None,
 ) -> dict:
+    claim_text = contextualize_structural_claim_text(knowledge_unit, claim_text)
     normalized_text = normalize_claim_text(claim_text)
     claim_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
     claim_id = f"clm_{knowledge_unit['source_id']}_{claim_hash[:12]}"
@@ -6362,7 +4699,8 @@ def build_claim_record_from_knowledge_unit(
         "claim_id": claim_id,
         "text": claim_text.strip(),
         "normalized_text": normalized_text,
-        "claim_type": classify_claim_type(claim_text),
+        "claim_type": claim_type_for_knowledge_unit(knowledge_unit, claim_text),
+        "claim_origin_kind": str(knowledge_unit.get("unit_kind", "")).strip().lower() or "statement",
         "knowledge_role": None,
         "page_intent_hints": [],
         "concept_candidate_score": 0.0,
@@ -6586,6 +4924,21 @@ def build_claims_from_knowledge_unit(knowledge_unit: dict, chunk_records: list[d
         return claim_records
 
     if unit_kind in {"metadata_fact", "table_fact"}:
+        metadata = knowledge_unit.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if unit_kind == "table_fact":
+            cells = metadata.get("cells")
+            if isinstance(cells, list) and len(cells) >= 2:
+                header = str(cells[0]).strip().lower()
+                value = str(cells[1]).strip().lower()
+                if (header, value) in {
+                    ("field", "value"),
+                    ("字段", "值"),
+                    ("name", "value"),
+                    ("key", "value"),
+                }:
+                    return []
         cleaned_text = clean_claim_candidate_text(text)
         if cleaned_text and not claim_candidate_is_noise(cleaned_text):
             return [build_claim_record_from_knowledge_unit(knowledge_unit, cleaned_text, covering_chunk)]
@@ -7887,19 +6240,6 @@ def render_claim_as_sentence(claim_record: dict, concept_title: str = "") -> str
     return f"{sentence}。"
 
 
-def build_readable_concept_summary_text(
-    title: str,
-    canonical_claim: dict,
-    stable_claim_records: list[dict],
-    source_refs: list[dict],
-) -> str:
-    intro = render_claim_as_sentence(canonical_claim, title)
-    if not intro:
-        intro = f"{title} 目前已经沉淀出可复用的稳定结论。"
-    coverage = f"当前版本基于 {len(stable_claim_records)} 条稳定 Claim、{len(source_refs)} 个来源整理。"
-    return f"{intro} {coverage}".strip()
-
-
 def extract_first_sentence(text: str) -> str:
     cleaned = markdown_to_plain_text(text).strip()
     if not cleaned:
@@ -7991,135 +6331,6 @@ def overview_theme_representativeness_score(
     )
 
 
-def summarize_concept_page_for_overview(page_record: dict) -> str:
-    sentence = extract_first_sentence(page_record.get("summary", ""))
-    if sentence:
-        return sentence
-    return f"{page_record.get('title', '该主题')} 已经沉淀出稳定结论。"
-
-
-def build_workspace_overview_key_theme_rows(
-    concept_pages: list[dict],
-    claim_records_by_id: dict[str, dict],
-    limit: int = 10,
-) -> list[dict]:
-    rows: list[dict] = []
-    ranked_pages = sorted(
-        concept_pages,
-        key=lambda item: overview_theme_representativeness_score(item, claim_records_by_id),
-        reverse=True,
-    )
-    selected_pages: list[dict] = []
-    used_family_keys: set[str] = set()
-
-    for page_record in ranked_pages:
-        if len(selected_pages) >= limit:
-            break
-        family_key = overview_theme_family_key(page_record)
-        if family_key in used_family_keys:
-            continue
-        selected_pages.append(page_record)
-        used_family_keys.add(family_key)
-
-    if len(selected_pages) < limit:
-        for page_record in ranked_pages:
-            if len(selected_pages) >= limit:
-                break
-            if any(item.get("page_id") == page_record.get("page_id") for item in selected_pages):
-                continue
-            selected_pages.append(page_record)
-
-    for page_record in selected_pages:
-        claim_records = collect_page_claim_records(page_record, claim_records_by_id)
-        claim_type_counts = count_claim_types(claim_records)
-        foundational_signal = sum(
-            claim_type_counts.get(claim_type, 0)
-            for claim_type in {"definition", "fact"}
-        )
-        operational_signal = sum(
-            claim_type_counts.get(claim_type, 0)
-            for claim_type in {"procedure", "warning", "comparison", "causal", "evaluation"}
-        )
-        if operational_signal > foundational_signal:
-            theme_kind = "operational"
-        elif foundational_signal > 0:
-            theme_kind = "foundation"
-        else:
-            theme_kind = "mixed"
-        rows.append({
-            "page_record": page_record,
-            "summary": summarize_concept_page_for_overview(page_record),
-            "theme_kind": theme_kind,
-            "source_count": len(page_record.get("source_refs", [])),
-            "claim_count": len(page_record.get("claim_ids", [])),
-            "review_count": len(page_record.get("review_ids", [])),
-        })
-    return rows
-
-
-def build_workspace_source_coverage_rows(
-    concept_pages: list[dict],
-    source_pages_by_id: dict[str, dict],
-    limit: int = 8,
-) -> list[dict]:
-    grouped: dict[str, dict] = {}
-    for concept_page in concept_pages:
-        for source_ref in concept_page.get("source_refs", []):
-            source_id = source_ref["source_id"]
-            if source_id not in grouped:
-                grouped[source_id] = {
-                    "source_ref": source_ref,
-                    "source_page": source_pages_by_id.get(expected_source_summary_page_id(source_id)),
-                    "concept_titles": [],
-                    "claim_ids": [],
-                    "chunk_ids": [],
-                }
-            append_unique(grouped[source_id]["concept_titles"], concept_page.get("title", ""))
-            for claim_id in source_ref.get("claim_ids", []):
-                append_unique(grouped[source_id]["claim_ids"], claim_id)
-            for chunk_id in source_ref.get("chunk_ids", []):
-                append_unique(grouped[source_id]["chunk_ids"], chunk_id)
-    rows = sorted(
-        grouped.values(),
-        key=lambda item: (
-            len(item["concept_titles"]),
-            len(item["claim_ids"]),
-            item["source_ref"].get("source_id", ""),
-        ),
-        reverse=True,
-    )
-    return rows[:limit]
-
-
-def build_workspace_overview_summary_text(
-    concept_pages: list[dict],
-    source_refs: list[dict],
-    claim_records_by_id: dict[str, dict],
-) -> str:
-    claim_ids = {
-        claim_id
-        for page_record in concept_pages
-        for claim_id in page_record.get("claim_ids", [])
-    }
-    key_theme_rows = build_workspace_overview_key_theme_rows(
-        concept_pages=concept_pages,
-        claim_records_by_id=claim_records_by_id,
-        limit=3,
-    )
-    key_theme_titles = [item["page_record"].get("title", "") for item in key_theme_rows if item["page_record"].get("title")]
-    key_theme_text = "、".join(key_theme_titles[:3]) if key_theme_titles else "若干稳定主题"
-    operational_theme_count = sum(1 for item in key_theme_rows if item["theme_kind"] == "operational")
-    summary_parts = [
-        f"{key_theme_text} 是当前工作区里已经沉淀出的稳定主题。",
-        f"这些主题当前覆盖 {len(claim_ids)} 条稳定 Claim 和 {len(source_refs)} 个来源。",
-    ]
-    if operational_theme_count:
-        summary_parts.append(f"其中有 {operational_theme_count} 个主题带有更强的操作或判断信号。")
-    else:
-        summary_parts.append("这些主题目前以基础概念和事实定义为主。")
-    return " ".join(summary_parts)
-
-
 def format_overview_title_phrase(titles: list[str]) -> str:
     cleaned_titles = [str(title).strip() for title in titles if str(title).strip()]
     if not cleaned_titles:
@@ -8141,6 +6352,57 @@ def format_overview_theme_count_phrase(count: int) -> str:
         6: "六个",
     }
     return small_count_labels.get(count, f"{count} 个")
+
+
+def summarize_concept_page_for_overview(page_record: dict) -> str:
+    return summarize_concept_page_for_overview_helper(
+        page_record=page_record,
+        extract_first_sentence=extract_first_sentence,
+    )
+
+
+def build_workspace_overview_key_theme_rows(
+    concept_pages: list[dict],
+    claim_records_by_id: dict[str, dict],
+    limit: int = 10,
+) -> list[dict]:
+    return build_workspace_overview_key_theme_rows_helper(
+        concept_pages=concept_pages,
+        claim_records_by_id=claim_records_by_id,
+        extract_first_sentence=extract_first_sentence,
+        limit=limit,
+    )
+
+
+def build_workspace_source_coverage_rows(
+    concept_pages: list[dict],
+    source_pages_by_id: dict[str, dict],
+    limit: int = 8,
+) -> list[dict]:
+    return build_workspace_source_coverage_rows_helper(
+        concept_pages=concept_pages,
+        source_pages_by_id=source_pages_by_id,
+        expected_source_summary_page_id=expected_source_summary_page_id,
+        append_unique=append_unique,
+        limit=limit,
+    )
+
+
+def build_workspace_overview_summary_text(
+    concept_pages: list[dict],
+    source_refs: list[dict],
+    claim_records_by_id: dict[str, dict],
+) -> str:
+    key_theme_rows = build_workspace_overview_key_theme_rows(
+        concept_pages=concept_pages,
+        claim_records_by_id=claim_records_by_id,
+        limit=3,
+    )
+    return build_workspace_overview_summary_text_helper(
+        concept_pages=concept_pages,
+        source_refs=source_refs,
+        key_theme_rows=key_theme_rows,
+    )
 
 
 def build_workspace_overview_summary_grounding_references(
@@ -8628,7 +6890,7 @@ def concept_page_quality_issues(page_record: dict, claim_records_by_id: dict[str
 
 def page_semantic_consistency_issues(page_record: dict, claim_records_by_id: dict[str, dict]) -> list[str]:
     page_type = str(page_record.get("type", "")).strip().lower()
-    if page_type not in {"concept", "guide", "example", "topic", "reference", "timeline"}:
+    if page_type not in {"concept", "guide", "duty", "example", "topic", "reference", "timeline"}:
         return []
 
     page_intent = str(page_record.get("page_intent", "")).strip().lower()
@@ -8660,6 +6922,7 @@ def page_semantic_consistency_issues(page_record: dict, claim_records_by_id: dic
     expected_intent_by_type = {
         "concept": "concept",
         "guide": "guide",
+        "duty": "duty",
         "example": "example",
         "topic": "topic",
         "reference": "reference",
@@ -8684,6 +6947,9 @@ def page_semantic_consistency_issues(page_record: dict, claim_records_by_id: dic
     elif page_type == "guide":
         if roles and "procedure" not in roles:
             issues.append(f"guide_page_missing_procedure_role:{','.join(sorted(roles))}")
+    elif page_type == "duty":
+        if roles and roles.issubset({"procedure", "example", "meta", "opinion"}):
+            issues.append(f"duty_page_missing_fact_like_role:{','.join(sorted(roles))}")
     elif page_type == "example":
         if roles and "example" not in roles:
             issues.append(f"example_page_missing_example_role:{','.join(sorted(roles))}")
@@ -8875,7 +7141,10 @@ def run_llm_assisted_overview_render(
             {
                 "page_id": item["page_record"]["page_id"],
                 "title": item["page_record"].get("title", ""),
-                "summary": summarize_concept_page_for_overview(item["page_record"]),
+                "summary": summarize_concept_page_for_overview_helper(
+                    page_record=item["page_record"],
+                    extract_first_sentence=extract_first_sentence,
+                ),
             }
             for item in reading_path_rows
         ],
@@ -8950,17 +7219,30 @@ def run_llm_assisted_overview_render(
 
 
 def build_source_summary_page(
+    target: Path,
     source_record: dict,
     page_rel_path: Path,
     normalized_record: dict | None,
     claim_records: list[dict],
     chunk_records: list[dict],
 ) -> tuple[str, dict]:
-    # 第一版 wiki 页面先从“来源摘要页”做起，稳定承载这一份资料的处理结果。
+    # source-summary 现在明确承担“来源入口视图”角色：
+    # 先给出来源与转换状态，再暴露 claim / chunk / 结构信号入口，
+    # 而不是兜底承载各种杂项内容。
     page_id = f"page_src_{source_record['source_id']}"
     title = normalized_record["title"] if normalized_record else Path(source_record["source_path"]).stem
     summary_claims = summarize_claims_for_page(claim_records)
     summary_text = summary_claims[0] if summary_claims else f"Source summary for {title}"
+    semantic_context = prepare_page_semantic_context(
+        target,
+        claim_records,
+    )
+    semantic_frontmatter = semantic_context["semantic_frontmatter"]
+    structure_projection = semantic_context["structure_projection"]
+    metadata_key_counts = dict(structure_projection.get("metadata_key_counts", {}) or {})
+    evidence_block_kind_counts = dict(structure_projection.get("evidence_block_kind_counts", {}) or {})
+    section_path_counts = dict(structure_projection.get("section_path_counts", {}) or {})
+    source_view_label = "source_view"
 
     lines = [
         "---",
@@ -8970,19 +7252,24 @@ def build_source_summary_page(
         f'canonical_id: "{page_id}"',
         'status: "draft"',
         'automation_level: "auto_with_log"',
+        f'render_target: "{source_view_label}"',
         f'source_id: "{source_record["source_id"]}"',
         f'claim_count: {len(claim_records)}',
         f'chunk_count: {len(chunk_records)}',
+    ]
+    append_frontmatter_list(lines, "content_tags", semantic_frontmatter["content_tags"])
+    append_frontmatter_list(lines, "semantic_feature_tags", semantic_frontmatter["semantic_feature_tags"])
+    lines.extend([
         "---",
         "",
         f"# {title}",
         "",
-        "## 原文概览 / Source Overview",
+        "## 来源入口视图 / Source Entry View",
         "",
         f"- 来源路径: `{source_record['source_path']}`",
         f"- 来源类型: `{source_record['source_type']}`",
         f"- 当前状态: `{source_record.get('status', 'unknown')}`",
-    ]
+    ])
 
     if normalized_record is not None:
         lines.extend([
@@ -8995,7 +7282,7 @@ def build_source_summary_page(
 
     lines.extend([
         "",
-        "## 核心观点 / Key Points",
+        "## 来源摘要 / Source Summary",
         "",
     ])
     if summary_claims:
@@ -9006,7 +7293,28 @@ def build_source_summary_page(
 
     lines.extend([
         "",
-        "## 知识声明 / Claims",
+        "## 结构与证据入口 / Structure And Evidence Entry",
+        "",
+        f"- 章节路径覆盖数: `{len(section_path_counts)}`",
+        f"- 结构元信息字段数: `{sum(metadata_key_counts.values())}`",
+        f"- 证据块类型数: `{len(evidence_block_kind_counts)}`",
+    ])
+    if section_path_counts:
+        lines.append(f"- 代表性章节: `{next(iter(section_path_counts.keys()))}`")
+    if metadata_key_counts:
+        lines.append(
+            "- 元信息字段: "
+            + ", ".join(f"`{key}` x{count}" for key, count in list(metadata_key_counts.items())[:6])
+        )
+    if evidence_block_kind_counts:
+        lines.append(
+            "- 证据块类型: "
+            + ", ".join(f"`{key}` x{count}" for key, count in list(evidence_block_kind_counts.items())[:6])
+        )
+
+    lines.extend([
+        "",
+        "## 可追踪 Claims / Traceable Claims",
         "",
     ])
     if claim_records:
@@ -9020,7 +7328,7 @@ def build_source_summary_page(
 
     lines.extend([
         "",
-        "## 证据切块 / Chunks",
+        "## 上下文切块 / Context Chunks",
         "",
     ])
     if chunk_records:
@@ -9035,10 +7343,11 @@ def build_source_summary_page(
 
     lines.extend([
         "",
-        "## 后续建议 / Next Steps",
+        "## 读取建议 / Reading Path",
         "",
-        "- 检查是否需要将高价值 claim 提升为概念页或综述页。",
-        "- 若存在 partial / failed 提取，优先补强转换路径或人工审核。",
+        "- 先看本页的来源状态、元信息字段和代表性 Claims，再决定是否继续跳到正式页面。",
+        "- 如果问题偏证据核对，优先沿 claim -> evidence_block -> source 回链继续阅读。",
+        "- 如果问题偏主题理解，再跳转到概念页、职责页、参考页或综述页。",
     ])
 
     page_text = "\n".join(lines).strip() + "\n"
@@ -9046,6 +7355,7 @@ def build_source_summary_page(
         "page_id": page_id,
         "title": title,
         "type": "source-summary",
+        "render_target": source_view_label,
         "canonical_id": page_id,
         "status": "draft",
         "lifecycle_status": "active",
@@ -9055,6 +7365,9 @@ def build_source_summary_page(
         "aliases": [],
         "redirect_to": None,
         "claim_ids": [item["claim_id"] for item in claim_records],
+        "content_tags": semantic_frontmatter["content_tags"],
+        "semantic_feature_tags": semantic_frontmatter["semantic_feature_tags"],
+        "structure_projection": structure_projection,
         "source_refs": [
             {
                 "source_id": source_record["source_id"],
@@ -9080,72 +7393,77 @@ def build_concept_page(
 ) -> tuple[str, dict]:
     render_target = page_record_render_target({"type": "concept"}) or "readable_concept"
     config = load_workspace_config(target)
-    concept_claim_records = filter_claim_records_for_concept_path(claim_records)
-    if concept_claim_records:
-        primary_claim_records = concept_claim_records
-    else:
-        primary_claim_records = claim_records
-    stable_claim_records = filter_live_stable_claim_records(primary_claim_records)
-    if stable_claim_records:
-        render_claim_records = stable_claim_records
-    else:
-        render_claim_records = primary_claim_records
-
-    group_topic_label = choose_group_topic_label(render_claim_records)
-    canonical_claim = choose_canonical_claim(render_claim_records, group_topic_label)
+    concept_claim_selection = prepare_concept_claim_selection_helper(
+        target=target,
+        claim_records=claim_records,
+        prepare_page_semantic_context=prepare_page_semantic_context,
+        filter_claim_records_for_concept_path=filter_claim_records_for_concept_path,
+        filter_live_stable_claim_records=filter_live_stable_claim_records,
+        choose_group_topic_label=choose_group_topic_label,
+        choose_canonical_claim=choose_canonical_claim,
+    )
+    stable_claim_records = concept_claim_selection["stable_claim_records"]
+    render_claim_records = concept_claim_selection["render_claim_records"]
+    group_topic_label = concept_claim_selection["group_topic_label"]
+    canonical_claim = concept_claim_selection["canonical_claim"]
     page_id = build_concept_page_id(bucket_key)
-    title, title_quality = resolve_concept_title_candidate(
+    concept_page_title = prepare_concept_page_title_helper(
         target=target,
         config=config,
         canonical_claim=canonical_claim,
-        claim_records=render_claim_records,
-        preferred_section_label=group_topic_label,
+        render_claim_records=render_claim_records,
+        group_topic_label=group_topic_label,
+        resolve_concept_title_candidate=resolve_concept_title_candidate,
+        build_concept_canonical_key=build_concept_canonical_key,
     )
-    canonical_id = f"concept:{build_concept_canonical_key(title)}"
-    canonical_display_text = render_claim_as_sentence(canonical_claim, title)
-    review_ids = collect_review_ids_for_claims(
-        [claim_record["claim_id"] for claim_record in render_claim_records],
-        review_records,
+    title = concept_page_title["title"]
+    title_quality = concept_page_title["title_quality"]
+    concept_page_context = prepare_concept_page_context_helper(
+        target=target,
+        title=title,
+        canonical_claim=canonical_claim,
+        render_claim_records=render_claim_records,
+        review_records=review_records,
+        page_records_by_id=page_records_by_id,
+        prepare_page_semantic_context=prepare_page_semantic_context,
+        render_claim_as_sentence=render_claim_as_sentence,
+        collect_review_ids_for_claims=collect_review_ids_for_claims,
+        collect_source_summary_pages_for_claims=collect_source_summary_pages_for_claims,
+        aggregate_source_refs_for_page=aggregate_source_refs_for_page,
+        build_concept_canonical_key=build_concept_canonical_key,
     )
-    source_pages = collect_source_summary_pages_for_claims(render_claim_records, page_records_by_id)
-    source_refs = aggregate_source_refs_for_page(render_claim_records)
+    render_claim_records = concept_page_context["render_claim_records"]
+    review_ids = concept_page_context["review_ids"]
+    source_pages = concept_page_context["source_pages"]
+    source_refs = concept_page_context["source_refs"]
+    semantic_frontmatter = concept_page_context["semantic_frontmatter"]
+    canonical_display_text = concept_page_context["canonical_display_text"]
+    canonical_key = concept_page_title["canonical_key"]
+    canonical_id = concept_page_title["canonical_id"]
 
-    sorted_claims = sorted(
-        render_claim_records,
-        key=lambda item: claim_record_rank_key(item, group_topic_label),
-        reverse=True,
+    concept_render_inputs = prepare_concept_render_inputs_helper(
+        render_claim_records=render_claim_records,
+        canonical_claim=canonical_claim,
+        group_topic_label=group_topic_label,
+        title=title,
+        claim_record_rank_key=claim_record_rank_key,
+        claim_is_topic_shell_text=claim_is_topic_shell_text,
+        clean_concept_title_text=clean_concept_title_text,
+        shorten_title_text=shorten_title_text,
+        extract_primary_section_label=extract_primary_section_label,
+        collect_section_label_aliases=collect_section_label_aliases,
     )
-    supporting_claims = [
-        claim_record
-        for claim_record in sorted_claims
-        if claim_record["claim_id"] != canonical_claim["claim_id"]
-        and not claim_is_topic_shell_text(claim_record, group_topic_label)
-    ]
-    key_point_claims = supporting_claims[:4]
-    practical_claims = [
-        claim_record
-        for claim_record in supporting_claims
-        if claim_record.get("claim_type") in {"comparison", "causal", "procedure", "warning", "evaluation"}
-    ][:3]
-    aliases = [
-        alias
-        for alias in {
-            clean_concept_title_text(shorten_title_text(claim_record["text"], limit=36))
-            for claim_record in render_claim_records
-            if claim_record["text"] != canonical_claim["text"]
-        }
-        if alias
-    ]
-    section_alias = extract_primary_section_label(canonical_claim)
-    if section_alias and section_alias != title:
-        aliases.append(section_alias)
-    aliases.extend(collect_section_label_aliases(render_claim_records))
+    sorted_claims = concept_render_inputs["sorted_claims"]
+    key_point_claims = concept_render_inputs["key_point_claims"]
+    practical_claims = concept_render_inputs["practical_claims"]
+    aliases = concept_render_inputs["aliases"]
 
-    summary_text = build_readable_concept_summary_text(
+    summary_text = build_readable_concept_summary_text_helper(
         title=title,
         canonical_claim=canonical_claim,
         stable_claim_records=render_claim_records,
         source_refs=source_refs,
+        render_claim_as_sentence=render_claim_as_sentence,
     )
     assisted_render = run_llm_assisted_readable_concept_render(
         target=target,
@@ -9157,195 +7475,53 @@ def build_concept_page(
         practical_claims=practical_claims,
         summary_text=summary_text,
     )
-    rendered_summary_text = assisted_render.get("summary") if assisted_render else ""
-    if not rendered_summary_text:
-        rendered_summary_text = summary_text
-    rendered_key_points = assisted_render.get("key_points", []) if assisted_render else []
-    rendered_practical_notes = assisted_render.get("practical_notes", []) if assisted_render else []
     requested_render_mode = (render_config or {}).get("mode", "deterministic")
-    render_status = (
-        "llm_assisted"
-        if assisted_render
-        else "deterministic_fallback"
-        if requested_render_mode == "llm_assisted"
-        else "deterministic"
+    render_result = finalize_concept_render_result_helper(
+        assisted_render=assisted_render,
+        requested_render_mode=requested_render_mode,
+        summary_text=summary_text,
     )
+    rendered_summary_text = render_result["rendered_summary_text"]
+    rendered_key_points = render_result["rendered_key_points"]
+    rendered_practical_notes = render_result["rendered_practical_notes"]
+    render_status = render_result["render_status"]
 
-    lines = [
-        "---",
-        f'page_id: "{page_id}"',
-        f'title: "{title}"',
-        'type: "concept"',
-        f'render_target: "{render_target}"',
-        f'canonical_id: "{canonical_id}"',
-        f'status: "{"needs_review" if review_ids else "stable"}"',
-        'automation_level: "auto_with_log"',
-        f'render_mode: "{requested_render_mode}"',
-        f'render_status: "{render_status}"',
-        f'claim_count: {len(stable_claim_records)}',
-        f'source_count: {len(source_refs)}',
-        "---",
-        "",
-        f"# {title}",
-        "",
-        "## 概念摘要 / Concept Summary",
-        "",
-        f"- 规范概念键: `{build_concept_canonical_key(title)}`",
-        f"- 聚类键: `{bucket_key}`",
-        f"- 代表陈述: {canonical_display_text}",
-        f"- 关联 Claim 数量: `{len(render_claim_records)}`",
-        f"- 关联来源数量: `{len(source_refs)}`",
-        f"- 关联审核项数量: `{len(review_ids)}`",
-        "",
-        "## 摘要 / Summary",
-        "",
-        rendered_summary_text,
-        "",
-        "## 核心定义 / Core Definition",
-        "",
-        canonical_display_text,
-        "",
-        f"支撑 Claim: {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))}",
-        "",
-        "## 核心陈述 / Canonical Claim",
-        "",
-        f"- {format_claim_reference(page_rel_path, canonical_claim)} {format_claim_type_label(canonical_claim.get('claim_type'))} {canonical_display_text}",
-        "",
-        "## 关键要点 / Key Points",
-        "",
-    ]
-
-    if rendered_key_points:
-        for item in rendered_key_points:
-            lines.append(
-                f"- {item['text']} "
-                f"({format_claim_reference(page_rel_path, item['claim_record'])})"
-            )
-    elif key_point_claims:
-        for claim_record in key_point_claims:
-            lines.append(
-                f"- {render_claim_as_sentence(claim_record, title)} "
-                f"({format_claim_reference(page_rel_path, claim_record)})"
-            )
-    else:
-        lines.append(f"- {canonical_display_text} ({format_claim_reference(page_rel_path, canonical_claim)})")
-
-    lines.extend([
-        "",
-        "## 使用提示 / Practical Notes",
-        "",
-    ])
-    if rendered_practical_notes:
-        for item in rendered_practical_notes:
-            lines.append(
-                f"- {item['text']} "
-                f"({format_claim_reference(page_rel_path, item['claim_record'])})"
-            )
-    elif practical_claims:
-        for claim_record in practical_claims:
-            lines.append(
-                f"- {render_claim_as_sentence(claim_record, title)} "
-                f"({format_claim_reference(page_rel_path, claim_record)})"
-            )
-    else:
-        lines.append("- 当前稳定结论以概念定义和基础事实为主，尚未整理出更多操作性提示。")
-
-    lines.extend([
-        "",
-        "## 支撑声明 / Supporting Claims",
-        "",
-    ])
-    for claim_record in sorted_claims:
-        lines.append(
-            f"- {format_claim_reference(page_rel_path, claim_record)} {format_claim_type_label(claim_record.get('claim_type'))} {claim_record['text']} "
-            f"(sources={len(claim_record.get('source_ids', []))}, "
-            f"chunks={len(claim_record.get('chunk_ids', []))})"
-        )
-
-    lines.extend([
-        "",
-        "## 来源页面 / Source Pages",
-        "",
-    ])
-    if source_pages:
-        source_pages_by_id = {source_page["page_id"]: source_page for source_page in source_pages}
-        for source_ref in source_refs:
-            source_page = source_pages_by_id.get(f"page_src_{source_ref['source_id']}")
-            if source_page is None:
-                continue
-            lines.append(f"- 来源摘要页: {format_source_page_label(page_rel_path, source_page)}")
-            lines.append(f"  原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}")
-            lines.append(f"  标识: {format_source_page_meta(source_page, source_ref)}")
-    else:
-        lines.append("- 当前还没有可链接的来源摘要页。")
-
-    lines.extend([
-        "",
-        "## 证据入口 / Evidence Trail",
-        "",
-    ])
-    for source_ref in source_refs:
-        source_page = next(
-            (item for item in source_pages if item["page_id"] == f"page_src_{source_ref['source_id']}"),
-            None,
-        )
-        source_label = (
-            format_source_page_label(page_rel_path, source_page)
-            if source_page is not None
-            else "`未生成来源摘要页`"
-        )
-        lines.append(
-            f"- {source_label} | 原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])} | "
-            f"claims={len(source_ref['claim_ids'])}, chunks={len(source_ref['chunk_ids'])}"
-        )
-        lines.append(f"  标识: {format_source_page_meta(source_page, source_ref)}")
-        if source_ref.get("chunks"):
-            lines.append("  证据切块:")
-            for chunk_ref in source_ref["chunks"][:6]:
-                lines.append(f"  - {format_chunk_reference(page_rel_path, source_ref['source_id'], chunk_ref)}")
-            if len(source_ref["chunks"]) > 6:
-                lines.append(f"  - ... 其余 {len(source_ref['chunks']) - 6} 个 chunk")
-
-    lines.extend([
-        "",
-        "## 维护状态 / Maintenance",
-        "",
-        f"- 页面状态: `{'needs_review' if review_ids else 'stable'}`",
-        f"- 聚合 Claim 数量: `{len(render_claim_records)}`",
-        f"- 稳定 Claim 数量: `{len(stable_claim_records)}`",
-        f"- 覆盖来源数量: `{len(source_refs)}`",
-        f"- 关联审核项数量: `{len(review_ids)}`",
-    ])
-    if review_ids:
-        lines.append("- 当前已有稳定结论，但仍有未关闭的审核项，阅读时请结合证据页一起查看。")
-    else:
-        lines.append("- 当前页面由稳定 Claim 自动编译，适合作为优先阅读入口。")
-
-    page_text = "\n".join(lines).strip() + "\n"
-    page_record = {
-        "page_id": page_id,
-        "title": title,
-        "type": "concept",
-        "render_target": render_target,
-        "canonical_id": canonical_id,
-        "status": "needs_review" if review_ids else "stable",
-        "lifecycle_status": "active",
-        "automation_level": "auto_with_log",
-        "render_mode": requested_render_mode,
-        "render_status": render_status,
-        "concept_title_quality": title_quality,
-        "review_reason": "claim_reviews_attached" if review_ids else None,
-        "summary": rendered_summary_text,
-        "aliases": sorted(set(alias for alias in aliases if alias and alias != title))[:8],
-        "redirect_to": None,
-        "claim_ids": [claim_record["claim_id"] for claim_record in render_claim_records],
-        "review_ids": review_ids,
-        "source_refs": source_refs,
-        "created": utc_now_iso(),
-        "updated": utc_now_iso(),
-        "archived_at": None,
-    }
-    return page_text, page_record
+    return build_concept_page_output_helper(
+        page_id=page_id,
+        title=title,
+        render_target=render_target,
+        canonical_id=canonical_id,
+        review_ids=review_ids,
+        requested_render_mode=requested_render_mode,
+        render_status=render_status,
+        stable_claim_count=len(stable_claim_records),
+        source_refs=source_refs,
+        semantic_frontmatter=semantic_frontmatter,
+        bucket_key=bucket_key,
+        canonical_key=canonical_key,
+        canonical_display_text=canonical_display_text,
+        render_claim_records=render_claim_records,
+        rendered_summary_text=rendered_summary_text,
+        canonical_claim=canonical_claim,
+        rendered_key_points=rendered_key_points,
+        key_point_claims=key_point_claims,
+        rendered_practical_notes=rendered_practical_notes,
+        practical_claims=practical_claims,
+        sorted_claims=sorted_claims,
+        source_pages=source_pages,
+        page_rel_path=page_rel_path,
+        format_claim_reference=format_claim_reference,
+        format_claim_type_label=format_claim_type_label,
+        render_claim_as_sentence=render_claim_as_sentence,
+        format_source_page_label=format_source_page_label,
+        format_workspace_file_reference=format_workspace_file_reference,
+        format_source_page_meta=format_source_page_meta,
+        format_chunk_reference=format_chunk_reference,
+        append_frontmatter_list=append_frontmatter_list,
+        utc_now_iso=utc_now_iso,
+        title_quality=title_quality,
+        aliases=aliases,
+    )
 
 
 def build_workspace_overview_page(
@@ -9366,52 +7542,38 @@ def build_workspace_overview_page(
     page_id = build_workspace_overview_page_id()
     title = f"{project_name} 综述"
     canonical_id = "overview:workspace"
-    source_refs = aggregate_source_refs_for_pages(concept_pages)
-    source_pages_by_id = {
-        page_record["page_id"]: page_record
-        for page_record in page_records_by_id.values()
-        if is_live_page_record(page_record) and page_record.get("type") == "source-summary"
-    }
-    claim_ids = sorted({
-        claim_id
-        for page_record in concept_pages
-        for claim_id in page_record.get("claim_ids", [])
-    })
-    review_ids = sorted({
-        review_id
-        for page_record in concept_pages
-        for review_id in page_record.get("review_ids", [])
-    })
-    summary_text = build_workspace_overview_summary_text(
+    overview_context = prepare_workspace_overview_context_helper(
         concept_pages=concept_pages,
-        source_refs=source_refs,
+        page_records_by_id=page_records_by_id,
         claim_records_by_id=claim_records_by_id,
+        aggregate_source_refs_for_pages=aggregate_source_refs_for_pages,
+        is_live_page_record=is_live_page_record,
+        expected_source_summary_page_id=expected_source_summary_page_id,
+        append_unique=append_unique,
+        extract_first_sentence=extract_first_sentence,
     )
-    key_theme_rows = build_workspace_overview_key_theme_rows(
-        concept_pages=concept_pages,
-        claim_records_by_id=claim_records_by_id,
-        limit=10,
+    source_refs = overview_context["source_refs"]
+    claim_ids = overview_context["claim_ids"]
+    review_ids = overview_context["review_ids"]
+    key_theme_rows = overview_context["key_theme_rows"]
+    source_coverage_rows = overview_context["source_coverage_rows"]
+    summary_text = overview_context["summary_text"]
+    overview_claim_records = [
+        claim_records_by_id[claim_id]
+        for claim_id in claim_ids
+        if isinstance(claim_records_by_id.get(claim_id), dict)
+    ]
+    semantic_frontmatter = prepare_page_semantic_context(
+        target,
+        overview_claim_records,
+    )["semantic_frontmatter"]
+    overview_render_inputs = prepare_workspace_overview_render_inputs_helper(
+        key_theme_rows=key_theme_rows,
     )
-    source_coverage_rows = build_workspace_source_coverage_rows(
-        concept_pages=concept_pages,
-        source_pages_by_id=source_pages_by_id,
-        limit=8,
-    )
-    operational_rows = [item for item in key_theme_rows if item["theme_kind"] == "operational"]
-    foundational_rows = [item for item in key_theme_rows if item["theme_kind"] != "operational"]
+    operational_rows = overview_render_inputs["operational_rows"]
+    foundational_rows = overview_render_inputs["foundational_rows"]
     requested_render_mode = (render_config or {}).get("mode", "deterministic")
-    deterministic_reading_path_rows: list[dict] = []
-    if foundational_rows:
-        deterministic_reading_path_rows.append({"page_record": foundational_rows[0]["page_record"]})
-    if operational_rows:
-        deterministic_reading_path_rows.append({"page_record": operational_rows[0]["page_record"]})
-    if key_theme_rows:
-        densest_page = max(
-            key_theme_rows,
-            key=lambda item: (item["source_count"], item["claim_count"], item["review_count"]),
-        )["page_record"]
-        if all(item["page_record"]["page_id"] != densest_page["page_id"] for item in deterministic_reading_path_rows):
-            deterministic_reading_path_rows.append({"page_record": densest_page})
+    deterministic_reading_path_rows = overview_render_inputs["deterministic_reading_path_rows"]
 
     assisted_render = run_llm_assisted_overview_render(
         target=target,
@@ -9422,190 +7584,46 @@ def build_workspace_overview_page(
         reading_path_rows=deterministic_reading_path_rows,
         claim_records_by_id=claim_records_by_id,
     )
-    rendered_summary_text = assisted_render.get("summary") if assisted_render else ""
-    if not rendered_summary_text:
-        rendered_summary_text = summary_text
-    rendered_theme_rows = assisted_render.get("theme_rows", []) if assisted_render else []
-    rendered_reading_path = assisted_render.get("reading_path", []) if assisted_render else []
-    render_status = (
-        "llm_assisted"
-        if assisted_render
-        else "deterministic_fallback"
-        if requested_render_mode == "llm_assisted"
-        else "deterministic"
+    render_result = finalize_workspace_overview_render_result_helper(
+        assisted_render=assisted_render,
+        requested_render_mode=requested_render_mode,
+        summary_text=summary_text,
     )
+    rendered_summary_text = render_result["rendered_summary_text"]
+    rendered_theme_rows = render_result["rendered_theme_rows"]
+    rendered_reading_path = render_result["rendered_reading_path"]
+    render_status = render_result["render_status"]
 
-    lines = [
-        "---",
-        f'page_id: "{page_id}"',
-        f'title: "{title}"',
-        'type: "overview"',
-        f'render_target: "{render_target}"',
-        f'canonical_id: "{canonical_id}"',
-        f'status: "{"needs_review" if review_ids else "stable"}"',
-        'automation_level: "auto_with_log"',
-        f'render_mode: "{requested_render_mode}"',
-        f'render_status: "{render_status}"',
-        f'claim_count: {len(claim_ids)}',
-        f'source_count: {len(source_refs)}',
-        "---",
-        "",
-        f"# {title}",
-        "",
-        "## 工作区综述 / Workspace Overview",
-        "",
-        rendered_summary_text,
-        "",
-        "## 主题导览 / Theme Map",
-        "",
-    ]
-
-    if rendered_theme_rows:
-        for item in rendered_theme_rows:
-            concept_page = item["page_record"]
-            lines.append(
-                f"- {format_page_label(page_rel_path, concept_page)} | {item['text']}"
-            )
-    elif foundational_rows:
-        lines.append("- 先读这些基础主题：")
-        for item in foundational_rows[:3]:
-            concept_page = item["page_record"]
-            lines.append(
-                f"  - {format_page_label(page_rel_path, concept_page)} | {item['summary']} "
-                f"(claims={item['claim_count']}, sources={item['source_count']})"
-            )
-    if operational_rows:
-        lines.append("- 再看这些更偏操作或判断的主题：")
-        for item in operational_rows[:3]:
-            concept_page = item["page_record"]
-            lines.append(
-                f"  - {format_page_label(page_rel_path, concept_page)} | {item['summary']} "
-                f"(claims={item['claim_count']}, sources={item['source_count']})"
-            )
-    if not key_theme_rows:
-        lines.append("- 当前还没有足够的稳定主题可用于生成综述。")
-
-    lines.extend([
-        "",
-        "## 推荐阅读路径 / Suggested Reading Path",
-        "",
-    ])
-    if rendered_reading_path:
-        for item in rendered_reading_path:
-            concept_page = item["page_record"]
-            lines.append(f"- {item['text']} ({format_page_label(page_rel_path, concept_page)})")
-    else:
-        if foundational_rows:
-            first_page = foundational_rows[0]["page_record"]
-            lines.append(f"- 如果你想先建立全局认识，建议先读 {format_page_label(page_rel_path, first_page)}。")
-        if operational_rows:
-            first_operational_page = operational_rows[0]["page_record"]
-            lines.append(f"- 如果你更关心做法、风险或取舍，接着读 {format_page_label(page_rel_path, first_operational_page)}。")
-        if key_theme_rows:
-            densest_page = max(
-                key_theme_rows,
-                key=lambda item: (item["source_count"], item["claim_count"], item["review_count"]),
-            )["page_record"]
-            lines.append(f"- 如果你想追证据覆盖面，优先从 {format_page_label(page_rel_path, densest_page)} 往下钻。")
-
-    lines.extend([
-        "",
-        "## 全部主题 / All Themes",
-        "",
-    ])
-    for concept_page in sorted(concept_pages, key=lambda item: item.get("title", "").lower()):
-        lines.append(
-            f"- {format_page_label(page_rel_path, concept_page)} | {summarize_concept_page_for_overview(concept_page)} "
-            f"(claims={len(concept_page.get('claim_ids', []))}, sources={len(concept_page.get('source_refs', []))})"
-        )
-
-    if render_status == "llm_assisted":
-        lines.extend([
-            "",
-            "## 改写回绑 / Rewrite Traceability",
-            "",
-            "<details>",
-            "<summary>查看 overview 改写句与其回绑页面</summary>",
-            "",
-        ])
-        if rendered_summary_text:
-            lines.append(
-                f"- 工作区综述摘要 -> 基于这些主题页聚合改写: "
-                f"{', '.join(format_page_label(page_rel_path, item['page_record']) for item in key_theme_rows[:3]) or '`无可用主题页`'}"
-            )
-        for item in rendered_theme_rows:
-            lines.append(
-                f"- 主题导览句: `{item['text']}` -> {format_page_label(page_rel_path, item['page_record'])}"
-            )
-        for item in rendered_reading_path:
-            lines.append(
-                f"- 推荐阅读句: `{item['text']}` -> {format_page_label(page_rel_path, item['page_record'])}"
-            )
-        if not rendered_summary_text and not rendered_theme_rows and not rendered_reading_path:
-            lines.append("- 当前没有可展示的 overview 改写回绑项。")
-        lines.extend([
-            "",
-            "</details>",
-        ])
-
-    lines.extend([
-        "",
-        "## 来源覆盖 / Source Coverage",
-        "",
-    ])
-    for row in source_coverage_rows:
-        source_ref = row["source_ref"]
-        source_page = row["source_page"]
-        source_label = (
-            format_source_page_label(page_rel_path, source_page)
-            if source_page is not None
-            else "`未生成来源摘要页`"
-        )
-        lines.append(
-            f"- 来源页: {source_label} | 原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])} | "
-            f"concepts={len(row['concept_titles'])}, claims={len(row['claim_ids'])}, chunks={len(row['chunk_ids'])}"
-        )
-        if row["concept_titles"]:
-            lines.append(f"  关联主题: {', '.join(row['concept_titles'][:4])}")
-
-    lines.extend([
-        "",
-        "## 维护状态 / Maintenance",
-        "",
-        f"- 可读概念页数量: `{len(concept_pages)}`",
-        f"- 稳定 Claim 数量: `{len(claim_ids)}`",
-        f"- 覆盖来源数量: `{len(source_refs)}`",
-        f"- 关联审核项数量: `{len(review_ids)}`",
-    ])
-    if review_ids:
-        lines.append("- 当前综述仍关联未关闭审核项，阅读时请优先回到对应概念页与证据页确认边界。")
-    else:
-        lines.append("- 当前综述由稳定概念页自动汇总，适合作为工作区级入口。")
-
-    page_text = "\n".join(lines).strip() + "\n"
-    page_record = {
-        "page_id": page_id,
-        "title": title,
-        "type": "overview",
-        "render_target": render_target,
-        "canonical_id": canonical_id,
-        "status": "needs_review" if review_ids else "stable",
-        "lifecycle_status": "active",
-        "automation_level": "auto_with_log",
-        "render_mode": requested_render_mode,
-        "render_status": render_status,
-        "review_reason": "claim_reviews_attached" if review_ids else None,
-        "summary": rendered_summary_text,
-        "aliases": [],
-        "redirect_to": None,
-        "claim_ids": claim_ids,
-        "review_ids": review_ids,
-        "source_refs": source_refs,
-        "created": utc_now_iso(),
-        "updated": utc_now_iso(),
-        "archived_at": None,
-    }
-    return page_text, page_record
+    return build_workspace_overview_page_output_helper(
+        page_id=page_id,
+        title=title,
+        render_target=render_target,
+        canonical_id=canonical_id,
+        review_ids=review_ids,
+        requested_render_mode=requested_render_mode,
+        render_status=render_status,
+        claim_ids=claim_ids,
+        source_refs=source_refs,
+        rendered_summary_text=rendered_summary_text,
+        rendered_theme_rows=rendered_theme_rows,
+        foundational_rows=foundational_rows,
+        operational_rows=operational_rows,
+        key_theme_rows=key_theme_rows,
+        rendered_reading_path=rendered_reading_path,
+        source_coverage_rows=source_coverage_rows,
+        concept_pages=concept_pages,
+        semantic_frontmatter=semantic_frontmatter,
+        page_rel_path=page_rel_path,
+        format_page_label=format_page_label,
+        summarize_concept_page_for_overview=lambda page_record: summarize_concept_page_for_overview_helper(
+            page_record=page_record,
+            extract_first_sentence=extract_first_sentence,
+        ),
+        format_source_page_label=format_source_page_label,
+        format_workspace_file_reference=format_workspace_file_reference,
+        append_frontmatter_list=append_frontmatter_list,
+        utc_now_iso=utc_now_iso,
+    )
 
 
 def page_intent_page_id(bucket_key: str, page_intent: str) -> str:
@@ -9617,6 +7635,7 @@ def page_intent_page_path(page_intent: str, page_id: str, title: str) -> Path:
     filename = sanitize_page_filename(title)
     folder = {
         "guide": "guides",
+        "duty": "duties",
         "example": "examples",
         "topic": "topics",
         "reference": "references",
@@ -9635,33 +7654,21 @@ def build_intent_routed_page(
     page_records_by_id: dict[str, dict],
     review_records: list[dict],
 ) -> tuple[str, dict]:
+    semantic_context = prepare_page_semantic_context(target, claim_records)
+    claim_records = semantic_context["claim_records"]
     group_topic_label = choose_group_topic_label(claim_records)
     canonical_claim = choose_canonical_claim(claim_records, group_topic_label)
-    if page_intent == "guide":
-        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "指南"
-        canonical_id = f"guide:{build_concept_canonical_key(title)}"
-        summary = f"{title} 的操作步骤与执行提示。"
-        section_title = "步骤摘要 / Steps"
-    elif page_intent == "example":
-        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "示例"
-        canonical_id = f"example:{build_concept_canonical_key(title)}"
-        summary = f"{title} 的样例与案例说明。"
-        section_title = "示例内容 / Examples"
-    elif page_intent == "reference":
-        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "参考"
-        canonical_id = f"reference:{build_concept_canonical_key(title)}"
-        summary = f"{title} 的参考信息、规则条目与检索入口。"
-        section_title = "参考条目 / Reference Notes"
-    elif page_intent == "timeline":
-        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "时间线"
-        canonical_id = f"timeline:{build_concept_canonical_key(title)}"
-        summary = f"{title} 的时间顺序事实与演变节点。"
-        section_title = "时间节点 / Timeline Notes"
-    else:
-        title = clean_concept_title_text(group_topic_label or canonical_claim.get("text", "")) or "主题"
-        canonical_id = f"topic:{build_concept_canonical_key(title)}"
-        summary = f"{title} 的主题概览与相关证据入口。"
-        section_title = "主题要点 / Topic Notes"
+    descriptor = build_intent_page_descriptor_helper(
+        page_intent=page_intent,
+        group_topic_label=group_topic_label or "",
+        canonical_claim_text=canonical_claim.get("text", ""),
+        clean_concept_title_text=clean_concept_title_text,
+        build_concept_canonical_key=build_concept_canonical_key,
+    )
+    title = descriptor["title"]
+    canonical_id = descriptor["canonical_id"]
+    summary = descriptor["summary"]
+    section_title = descriptor["section_title"]
 
     page_id = page_intent_page_id(bucket_key, page_intent)
     review_ids = collect_review_ids_for_claims(
@@ -9670,85 +7677,28 @@ def build_intent_routed_page(
     )
     source_refs = aggregate_source_refs_for_page(claim_records)
     source_pages = collect_source_summary_pages_for_claims(claim_records, page_records_by_id)
+    semantic_frontmatter = semantic_context["semantic_frontmatter"]
 
-    lines = [
-        "---",
-        f'page_id: "{page_id}"',
-        f'title: "{title}"',
-        f'type: "{page_intent}"',
-        f'canonical_id: "{canonical_id}"',
-        f'status: "{"needs_review" if review_ids else "stable"}"',
-        'automation_level: "auto_with_log"',
-        f'claim_count: {len(claim_records)}',
-        f'source_count: {len(source_refs)}',
-        "---",
-        "",
-        f"# {title}",
-        "",
-        "## 摘要 / Summary",
-        "",
-        summary,
-        "",
-        f"## {section_title}",
-        "",
-    ]
-    for claim_record in claim_records[:6]:
-        lines.append(
-            f"- {render_claim_as_sentence(claim_record, title)} "
-            f"({format_claim_reference(page_rel_path, claim_record)})"
-        )
-    if page_intent == "timeline":
-        lines.extend([
-            "",
-            "## 时间线来源 / Timeline Sources",
-            "",
-        ])
-        for source_ref in source_refs[:8]:
-            lines.append(
-                f"- {source_ref.get('section_path') or '未标注章节'} | "
-                f"{format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
-            )
-    lines.extend([
-        "",
-        "## 证据入口 / Evidence Trail",
-        "",
-    ])
-    for source_ref in source_refs:
-        source_page = next(
-            (item for item in source_pages if item["page_id"] == f"page_src_{source_ref['source_id']}"),
-            None,
-        )
-        source_label = (
-            format_source_page_label(page_rel_path, source_page)
-            if source_page is not None
-            else "`未生成来源摘要页`"
-        )
-        lines.append(
-            f"- {source_label} | 原始文件: {format_workspace_file_reference(page_rel_path, source_ref['source_path'])}"
-        )
-
-    page_text = "\n".join(lines).strip() + "\n"
-    page_record = {
-        "page_id": page_id,
-        "title": title,
-        "type": page_intent,
-        "canonical_id": canonical_id,
-        "status": "needs_review" if review_ids else "stable",
-        "lifecycle_status": "active",
-        "automation_level": "auto_with_log",
-        "review_reason": "claim_reviews_attached" if review_ids else None,
-        "page_intent": page_intent,
-        "summary": summary,
-        "aliases": [],
-        "redirect_to": None,
-        "claim_ids": [claim_record["claim_id"] for claim_record in claim_records],
-        "review_ids": review_ids,
-        "source_refs": source_refs,
-        "created": utc_now_iso(),
-        "updated": utc_now_iso(),
-        "archived_at": None,
-    }
-    return page_text, page_record
+    return build_intent_routed_page_output_helper(
+        page_id=page_id,
+        title=title,
+        page_intent=page_intent,
+        canonical_id=canonical_id,
+        review_ids=review_ids,
+        claim_records=claim_records,
+        source_refs=source_refs,
+        source_pages=source_pages,
+        semantic_frontmatter=semantic_frontmatter,
+        summary=summary,
+        section_title=section_title,
+        page_rel_path=page_rel_path,
+        format_source_page_label=format_source_page_label,
+        format_workspace_file_reference=format_workspace_file_reference,
+        render_claim_as_sentence=render_claim_as_sentence,
+        format_claim_reference=format_claim_reference,
+        append_frontmatter_list=append_frontmatter_list,
+        utc_now_iso=utc_now_iso,
+    )
 
 
 def write_wiki_page(target: Path, relative_path: Path, page_text: str) -> None:
@@ -10026,187 +7976,64 @@ def tokenize_for_search(text: str) -> list[str]:
 
 
 def normalize_query_text(text: str) -> str:
-    # query normalization 先保持轻量：
-    # 统一空白、大小写和常见标点，得到一个稳定查询串。
-    return normalize_claim_text(text)
+    return normalize_query_text_helper(
+        text,
+        normalize_claim_text=normalize_claim_text,
+    )
 
 
 def detect_query_intent(query_text: str, normalized_query: str) -> str:
-    # V1 的意图识别先保持可解释：
-    # 只看一些高频提示词，不做复杂分类模型。
-    combined_text = f"{query_text.lower()} {normalized_query}"
-    # 某些意图比 definition 更具体，例如“如何建立来源追踪”“来源证据是什么”。
-    # 这里先把 how_to / evidence 提到前面，避免被“是什么”或“来源”误吞。
-    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["how_to"]):
-        return "how_to"
-    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["evidence"]):
-        return "evidence"
-    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["reference"]):
-        return "reference"
-    if any(marker in combined_text for marker in QUERY_INTENT_MARKERS["overview"]):
-        return "overview"
-    for intent, markers in QUERY_INTENT_MARKERS.items():
-        if intent in {"how_to", "evidence", "reference", "overview"}:
-            continue
-        if any(marker in combined_text for marker in markers):
-            return intent
-    return "lookup"
+    return detect_query_intent_helper(
+        query_text,
+        normalized_query,
+        query_intent_markers=QUERY_INTENT_MARKERS,
+    )
 
 
 def alias_match_boost(page_record: dict, normalized_query: str, alias_hits: list[dict]) -> tuple[float, list[str]]:
-    # alias/canonical 命中如果只回传不参与排序，用户感受会很奇怪。
-    # 这里给精确命中一个温和加权，不会压过真正强相关的正文命中。
-    boost_reasons: list[str] = []
-    title_norm = normalize_query_text(page_record.get("title", ""))
-    aliases_norm = [normalize_query_text(alias) for alias in page_record.get("aliases", [])]
-    canonical_norm = normalize_query_text(page_record.get("canonical_id", "") or "")
-
-    boost = 1.0
-    if normalized_query and title_norm == normalized_query:
-        boost = max(boost, QUERY_EXACT_MATCH_MAX_BOOST)
-        boost_reasons.append("title_exact")
-    if normalized_query and canonical_norm == normalized_query:
-        boost = max(boost, 1.30)
-        boost_reasons.append("canonical_exact")
-    if normalized_query and normalized_query in aliases_norm:
-        boost = max(boost, 1.25)
-        boost_reasons.append("alias_exact")
-
-    alias_hit_page_ids = {item.get("page_id") for item in alias_hits}
-    if page_record.get("page_id") in alias_hit_page_ids:
-        boost = max(boost, 1.20)
-        boost_reasons.append("alias_registry_hit")
-
-    return boost, boost_reasons
+    return alias_match_boost_helper(
+        page_record,
+        normalized_query,
+        alias_hits,
+        normalize_query_text=normalize_query_text,
+        query_exact_match_max_boost=QUERY_EXACT_MATCH_MAX_BOOST,
+    )
 
 
 def query_intent_page_type_boost(intent: str, page_record: dict) -> tuple[float, str | None]:
-    # query intent 只做一层轻微调权，用来把“看定义”和“看证据”这类问题往更合适的页型推一点。
-    page_type = page_record.get("type", "")
-    page_status = page_record.get("status", "")
-
-    if intent == "overview" and page_type == "overview":
-        return 1.85, "intent_overview_prefers_overview_page"
-    if intent == "overview" and page_type == "concept":
-        return 1.05, "intent_overview_falls_back_to_readable_concept"
-    if intent == "overview" and page_type == "source-summary":
-        return 0.70, "intent_overview_deprioritizes_source_summary"
-    if intent == "definition" and page_type == "concept":
-        return 1.7, "intent_definition_prefers_concept"
-    if intent == "compare" and page_type == "concept":
-        return 1.12, "intent_compare_prefers_concept"
-    if intent == "reference" and page_type == "reference":
-        return 2.40, "intent_reference_prefers_reference_page"
-    if intent == "reference" and page_type == "source-summary":
-        return 1.45, "intent_reference_prefers_source"
-    if intent == "reference" and page_type == "concept":
-        return 0.35, "intent_reference_deprioritizes_concept_views"
-    if intent == "how_to" and page_type == "source-summary":
-        return 1.05, "intent_how_to_prefers_source"
-    if intent == "evidence" and page_type == "source-summary":
-        return 2.6, "intent_evidence_prefers_source"
-    if intent == "evidence" and page_type == "topic":
-        return 0.55, "intent_evidence_deprioritizes_topic_page"
-    if intent == "evidence" and page_type == "guide":
-        return 0.50, "intent_evidence_deprioritizes_guide_page"
-    if intent == "evidence" and page_type == "example":
-        return 0.50, "intent_evidence_deprioritizes_example_page"
-    if intent == "evidence" and page_type == "concept":
-        return 0.40, "intent_evidence_deprioritizes_concept"
-    if intent == "timeline" and page_status == "stable":
-        return 1.05, "intent_timeline_prefers_stable"
-    return 1.0, None
+    return query_intent_page_type_boost_helper(intent, page_record)
 
 
 def query_intent_field_multiplier(intent: str, field_name: str) -> float:
-    # 字段乘子只做轻量调权，尽量不破坏 BM25 的主体排序逻辑。
-    return QUERY_INTENT_FIELD_MULTIPLIERS.get(intent, {}).get(field_name, 1.0)
+    return query_intent_field_multiplier_helper(
+        intent,
+        field_name,
+        query_intent_field_multipliers=QUERY_INTENT_FIELD_MULTIPLIERS,
+    )
 
 
 def expand_query_with_alias_registry(
     query_text: str,
     alias_index: dict,
 ) -> dict:
-    # 这一步负责把用户输入变成“可检索对象”：
-    # - 原始查询
-    # - 规范化查询
-    # - alias 命中的扩展词
-    # - 如果 alias 唯一映射到某个 canonical_id，就一并记录规范目标
-    normalized_query = normalize_query_text(query_text)
-    alias_map = alias_index.get("alias_map", {})
-    canonical_map = alias_index.get("canonical_map", {})
-    matched_alias_entries = alias_map.get(normalized_query, [])
-
-    alias_expansions: list[str] = []
-    canonical_targets: list[dict] = []
-    for entry in matched_alias_entries:
-        canonical_id = entry.get("canonical_id")
-        canonical_record = canonical_map.get(canonical_id, {})
-        for candidate in [
-            entry.get("title", ""),
-            canonical_id or "",
-            *canonical_record.get("aliases", []),
-        ]:
-            normalized_candidate = normalize_query_text(candidate)
-            if normalized_candidate and normalized_candidate not in alias_expansions:
-                alias_expansions.append(normalized_candidate)
-        if canonical_record and canonical_record not in canonical_targets:
-            canonical_targets.append(canonical_record)
-
-    expanded_parts = [normalized_query, *alias_expansions]
-    expanded_query = " ".join(part for part in expanded_parts if part).strip()
-    expanded_tokens = tokenize_for_search(expanded_query)
-    detected_intent = detect_query_intent(query_text, normalized_query)
-
-    return {
-        "raw_query": query_text,
-        "normalized_query": normalized_query,
-        "expanded_query": expanded_query or normalized_query,
-        "query_tokens": expanded_tokens,
-        "alias_hits": matched_alias_entries,
-        "canonical_targets": canonical_targets,
-        "intent": detected_intent,
-    }
+    return expand_query_with_alias_registry_helper(
+        query_text,
+        alias_index,
+        normalize_query_text=normalize_query_text,
+        tokenize_for_search=tokenize_for_search,
+        detect_query_intent=detect_query_intent,
+    )
 
 
 def build_page_field_texts(page_record: dict, page_text: str, claim_records_by_id: dict[str, dict]) -> dict[str, str]:
-    # query 读的是“页面视角”，但 claim/source 相关内容也要折叠进字段里参与排序。
-    claim_texts = []
-    for claim_id in page_record.get("claim_ids", []):
-        claim_record = claim_records_by_id.get(claim_id)
-        if claim_record is None:
-            continue
-        claim_texts.append(claim_record.get("text", ""))
-
-    source_ref_parts = []
-    hierarchy_parts = []
-    for source_ref in page_record.get("source_refs", []):
-        source_ref_parts.append(source_ref.get("source_id", ""))
-        source_ref_parts.append(source_ref.get("source_path", ""))
-        hierarchy_parts.append(source_ref.get("section_path", ""))
-        hierarchy_parts.append(source_ref.get("section_title", ""))
-        hierarchy_parts.append(source_ref.get("parent_section_path", ""))
-        section_path_parts = source_ref.get("section_path_parts", [])
-        if isinstance(section_path_parts, list):
-            hierarchy_parts.extend(str(part) for part in section_path_parts if str(part).strip())
-        for chunk_ref in source_ref.get("chunks", []):
-            chunk_section_path = chunk_ref.get("section_path", "")
-            hierarchy_parts.append(chunk_section_path)
-            parsed = parse_section_path(chunk_section_path)
-            hierarchy_parts.extend(parsed.get("section_path_parts", []))
-    hierarchy_parts.append(page_record.get("title", ""))
-    hierarchy_parts.extend(page_record.get("aliases", []))
-
-    return {
-        "title": page_record.get("title", ""),
-        "aliases": "\n".join(page_record.get("aliases", [])),
-        "hierarchy": "\n".join(part for part in hierarchy_parts if part),
-        "summary": page_record.get("summary", ""),
-        "headings": "\n".join(extract_markdown_headings(page_text)),
-        "body": build_searchable_body_text(page_text),
-        "claim_text": "\n".join(claim_texts),
-        "source_refs": "\n".join(source_ref_parts),
-    }
+    return repo_build_page_field_texts(
+        page_record,
+        page_text,
+        claim_records_by_id,
+        parse_section_path=parse_section_path,
+        extract_markdown_headings=extract_markdown_headings,
+        build_searchable_body_text=build_searchable_body_text,
+    )
 
 
 def compute_document_frequency(documents: list[dict[str, list[str]]], field_name: str) -> dict[str, int]:
@@ -10251,7 +8078,6 @@ def bm25_score(
 
 
 def query_page_type_weight(page_record: dict) -> float:
-    # 设计文档里的类型名和当前实现的页面类型不完全一样，这里做一层兼容映射。
     page_type = page_record.get("type", "source-summary")
     return QUERY_PAGE_TYPE_WEIGHTS.get(page_type, QUERY_PAGE_TYPE_WEIGHTS.get("draft", 0.70))
 
@@ -10287,75 +8113,22 @@ def build_query_documents(
     page_records: list[dict],
     claim_records_by_id: dict[str, dict],
 ) -> list[dict]:
-    # 页面记录是 query 的主入口；正文和 claim 文本会在这里汇总成待检索文档。
-    documents: list[dict] = []
-    for page_record in filter_live_page_records(page_records):
-        page_path = target / page_record["page_path"]
-        if not page_path.exists():
-            continue
-        page_text = page_path.read_text(encoding="utf-8")
-        field_texts = build_page_field_texts(page_record, page_text, claim_records_by_id)
-        field_tokens = {
-            field_name: tokenize_for_search(field_text)
-            for field_name, field_text in field_texts.items()
-        }
-        documents.append({
-            "page_record": page_record,
-            "page_text": page_text,
-            "field_texts": field_texts,
-            "field_tokens": field_tokens,
-        })
-    return documents
+    return repo_build_query_documents(
+        target,
+        page_records,
+        claim_records_by_id,
+        filter_live_page_records=filter_live_page_records,
+        build_page_field_texts=build_page_field_texts,
+        tokenize_for_search=tokenize_for_search,
+    )
 
 
 def build_search_index_record(document: dict) -> dict:
-    # 持久化索引只保存 query 真正需要的字段，避免把整页正文重复存得过重。
-    page_record = document["page_record"]
-    field_texts = document["field_texts"]
-    field_tokens = document["field_tokens"]
-    signature_payload = {
-        "page_path": page_record.get("page_path", ""),
-        "title": page_record.get("title", ""),
-        "type": page_record.get("type", ""),
-        "status": page_record.get("status", ""),
-        "summary": page_record.get("summary", ""),
-        "aliases": page_record.get("aliases", []),
-        "canonical_id": page_record.get("canonical_id"),
-        "claim_ids": page_record.get("claim_ids", []),
-        "review_ids": page_record.get("review_ids", []),
-        "source_refs": page_record.get("source_refs", []),
-        "outgoing_page_ids": page_record.get("outgoing_page_ids", []),
-        "incoming_page_ids": page_record.get("incoming_page_ids", []),
-        "related_page_ids": page_record.get("related_page_ids", []),
-        "field_texts": field_texts,
-    }
-    document_signature = hashlib.sha256(
-        json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    return {
-        "page_id": page_record["page_id"],
-        "title": page_record.get("title", ""),
-        "page_path": page_record.get("page_path", ""),
-        "type": page_record.get("type", ""),
-        "status": page_record.get("status", ""),
-        "summary": page_record.get("summary", ""),
-        "aliases": page_record.get("aliases", []),
-        "canonical_id": page_record.get("canonical_id"),
-        "claim_ids": page_record.get("claim_ids", []),
-        "review_ids": page_record.get("review_ids", []),
-        "source_refs": page_record.get("source_refs", []),
-        "outgoing_page_ids": page_record.get("outgoing_page_ids", []),
-        "incoming_page_ids": page_record.get("incoming_page_ids", []),
-        "related_page_ids": page_record.get("related_page_ids", []),
-        "field_texts": field_texts,
-        "field_tokens": field_tokens,
-        # 把页面签名一并写进索引，后续 ingest 就可以先看页面有没有变，
-        # 没变时直接复用整条索引记录，连页面文件都不用再读。
-        "page_signature": page_record.get("page_signature"),
-        "document_signature": document_signature,
-        "indexed_at": utc_now_iso(),
-        "index_version": SEARCH_PAGES_INDEX_VERSION,
-    }
+    return repo_build_search_index_record(
+        document,
+        utc_now_iso=utc_now_iso,
+        search_pages_index_version=SEARCH_PAGES_INDEX_VERSION,
+    )
 
 
 def write_search_pages_index(
@@ -10364,96 +8137,31 @@ def write_search_pages_index(
     claim_records_by_id: dict[str, dict],
     previous_records: list[dict] | None = None,
 ) -> dict:
-    # search_pages.jsonl 是 query 的派生索引：
-    # 页面权威内容仍然在 wiki/*.md 和 state/pages.jsonl，索引只负责加速读取。
-    index_path = target / SEARCH_PAGES_INDEX_REL_PATH
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    previous_by_page_id = {
-        record["page_id"]: record for record in (previous_records or [])
-        if record.get("page_id")
-    }
-    records: list[dict] = []
-    reused_count = 0
-    rebuilt_count = 0
-
-    for page_record in filter_live_page_records(page_records):
-        previous_record = previous_by_page_id.get(page_record["page_id"])
-        if (
-            previous_record is not None
-            and previous_record.get("page_signature") == page_record.get("page_signature")
-            and previous_record.get("index_version") == SEARCH_PAGES_INDEX_VERSION
-        ):
-            reused_record = dict(previous_record)
-            # 索引命中完全相同内容时，保留旧 indexed_at，便于观察哪些记录真的被重建过。
-            records.append(reused_record)
-            reused_count += 1
-            continue
-
-        page_path = target / page_record["page_path"]
-        if not page_path.exists():
-            continue
-
-        page_text = page_path.read_text(encoding="utf-8")
-        field_texts = build_page_field_texts(page_record, page_text, claim_records_by_id)
-        field_tokens = {
-            field_name: tokenize_for_search(field_text)
-            for field_name, field_text in field_texts.items()
-        }
-        record = build_search_index_record({
-            "page_record": page_record,
-            "page_text": page_text,
-            "field_texts": field_texts,
-            "field_tokens": field_tokens,
-        })
-
-        records.append(record)
-        rebuilt_count += 1
-
-    write_jsonl(index_path, records)
-    return {
-        "index_path": str(SEARCH_PAGES_INDEX_REL_PATH),
-        "record_count": len(records),
-        "rebuilt_count": rebuilt_count,
-        "reused_count": reused_count,
-        "index_version": SEARCH_PAGES_INDEX_VERSION,
-        "updated_at": utc_now_iso(),
-    }
+    return repo_write_search_pages_index(
+        target,
+        page_records,
+        claim_records_by_id,
+        previous_records,
+        search_pages_index_rel_path=str(SEARCH_PAGES_INDEX_REL_PATH),
+        search_pages_index_version=SEARCH_PAGES_INDEX_VERSION,
+        filter_live_page_records=filter_live_page_records,
+        build_page_field_texts=build_page_field_texts,
+        tokenize_for_search=tokenize_for_search,
+        write_jsonl=write_jsonl,
+        utc_now_iso=utc_now_iso,
+    )
 
 
 def load_search_pages_index(target: Path) -> list[dict]:
-    index_path = target / SEARCH_PAGES_INDEX_REL_PATH
-    if not index_path.exists():
-        return []
-    return load_jsonl(index_path)
+    return repo_load_search_pages_index(
+        target,
+        search_pages_index_rel_path=SEARCH_PAGES_INDEX_REL_PATH,
+        load_jsonl=load_jsonl,
+    )
 
 
 def index_records_to_query_documents(index_records: list[dict]) -> list[dict]:
-    # query 从索引恢复时，拼回与“现算文档”一致的形状，这样评分逻辑就可以复用。
-    documents: list[dict] = []
-    for record in index_records:
-        page_record = {
-            "page_id": record["page_id"],
-            "title": record.get("title", ""),
-            "page_path": record.get("page_path", ""),
-            "type": record.get("type", ""),
-            "status": record.get("status", ""),
-            "summary": record.get("summary", ""),
-            "aliases": record.get("aliases", []),
-            "canonical_id": record.get("canonical_id"),
-            "claim_ids": record.get("claim_ids", []),
-            "review_ids": record.get("review_ids", []),
-            "source_refs": record.get("source_refs", []),
-            "outgoing_page_ids": record.get("outgoing_page_ids", []),
-            "incoming_page_ids": record.get("incoming_page_ids", []),
-            "related_page_ids": record.get("related_page_ids", []),
-        }
-        documents.append({
-            "page_record": page_record,
-            "page_text": None,
-            "field_texts": record.get("field_texts", {}),
-            "field_tokens": record.get("field_tokens", {}),
-        })
-    return documents
+    return repo_load_query_documents_from_search_index(index_records)
 
 
 def ensure_query_documents(
@@ -10461,11 +8169,14 @@ def ensure_query_documents(
     page_records: list[dict],
     claim_records_by_id: dict[str, dict],
 ) -> tuple[list[dict], str]:
-    # query 优先读持久化索引；索引缺失时再降级现场构建，保证功能永远可用。
-    index_records = load_search_pages_index(target)
-    if index_records:
-        return index_records_to_query_documents(index_records), "search_pages_index"
-    return build_query_documents(target, page_records, claim_records_by_id), "live_scan"
+    return repo_ensure_query_documents(
+        target,
+        page_records,
+        claim_records_by_id,
+        load_search_pages_index=load_search_pages_index,
+        load_query_documents_from_search_index=index_records_to_query_documents,
+        build_query_documents=build_query_documents,
+    )
 
 
 def load_chunks_by_id(target: Path) -> dict[str, dict]:
@@ -10478,220 +8189,50 @@ def load_chunks_by_id(target: Path) -> dict[str, dict]:
 
 
 def score_claim_for_query(query_tokens: list[str], claim_record: dict) -> tuple[float, list[str]]:
-    # claim 排序先用一个轻量相关度：命中 token 越多、claim 自身越短小直接，越优先展示。
-    claim_tokens = tokenize_for_search(claim_record.get("text", ""))
-    matched_tokens = select_top_matches(query_tokens, claim_tokens, limit=8)
-    if not matched_tokens:
-        return 0.0, []
-    score = float(len(matched_tokens))
-    return score, matched_tokens
+    return score_claim_for_query_helper(
+        query_tokens,
+        claim_record,
+        tokenize_for_search=tokenize_for_search,
+        select_top_matches=select_top_matches,
+    )
 
 
 def score_chunk_for_query(query_tokens: list[str], chunk_record: dict) -> tuple[float, list[str]]:
-    # chunk 相关度同样保持简单：看 chunk 文本与摘要里实际命中的 token。
-    chunk_text = "\n".join([chunk_record.get("summary", ""), chunk_record.get("text", "")])
-    chunk_tokens = tokenize_for_search(chunk_text)
-    matched_tokens = select_top_matches(query_tokens, chunk_tokens, limit=8)
-    section_tokens = tokenize_for_search(
-        "\n".join(
-            [
-                chunk_record.get("section_title", ""),
-                chunk_record.get("parent_section_path", ""),
-                chunk_record.get("section_path", ""),
-                "\n".join(chunk_record.get("section_path_parts", []) if isinstance(chunk_record.get("section_path_parts", []), list) else []),
-            ]
-        )
+    return score_chunk_for_query_helper(
+        query_tokens,
+        chunk_record,
+        tokenize_for_search=tokenize_for_search,
+        select_top_matches=select_top_matches,
     )
-    section_matches = select_top_matches(query_tokens, section_tokens, limit=8)
-    if not matched_tokens and not section_matches:
-        return 0.0, []
-    score = float(len(matched_tokens))
-    score += float(len(section_matches)) * 0.45
-    if chunk_record.get("section_title") and section_matches:
-        score += 0.2
-    # 更短的 chunk 往往更聚焦，给一个很轻的偏好。
-    score += 0.25 if chunk_record.get("char_count", 0) <= 600 else 0.0
-    combined_matches = []
-    for token in [*matched_tokens, *section_matches]:
-        if token not in combined_matches:
-            combined_matches.append(token)
-    return score, combined_matches[:8]
 
 
 def build_source_brief(source_ref: dict) -> dict:
-    # 阅读包里不需要把 source 全量展开，先给一个短摘要，保持结果紧凑。
-    return {
-        "source_id": source_ref.get("source_id"),
-        "source_path": source_ref.get("source_path"),
-        "normalized_path": source_ref.get("normalized_path"),
-        "start_line": source_ref.get("start_line"),
-        "end_line": source_ref.get("end_line"),
-        "section_path": source_ref.get("section_path"),
-        "chunk_id": source_ref.get("chunk_id"),
-    }
+    return build_source_brief_helper(source_ref)
 
 
 def build_chunk_reading_brief(chunk_record: dict) -> dict:
-    # 设计文档要求命中 chunk 时附带 section_path / previous / next，这里固定打包出来。
-    return {
-        "chunk_id": chunk_record.get("chunk_id"),
-        "section_path": chunk_record.get("section_path"),
-        "start_line": chunk_record.get("start_line"),
-        "end_line": chunk_record.get("end_line"),
-        "summary": chunk_record.get("summary"),
-        "text": chunk_record.get("text"),
-        "previous_chunk": chunk_record.get("previous_chunk"),
-        "next_chunk": chunk_record.get("next_chunk"),
-        "source_id": chunk_record.get("source_id"),
-        "source_path": chunk_record.get("source_path"),
-        "normalized_path": chunk_record.get("normalized_path"),
-    }
+    return build_chunk_reading_brief_helper(chunk_record)
 
 
 def build_timeline_sources(chunk_matches: list[dict]) -> list[dict]:
-    # timeline query 需要的不是“更多 chunk”，而是“按来源组织的时序证据入口”。
-    grouped: dict[str, dict] = {}
-    for chunk in chunk_matches:
-        source_id = chunk.get("source_id")
-        if not source_id:
-            continue
-        if source_id not in grouped:
-            grouped[source_id] = {
-                "source_id": source_id,
-                "source_path": chunk.get("source_path"),
-                "normalized_path": chunk.get("normalized_path"),
-                "chunk_ids": [],
-                "section_paths": [],
-            }
-        if chunk.get("chunk_id") and chunk["chunk_id"] not in grouped[source_id]["chunk_ids"]:
-            grouped[source_id]["chunk_ids"].append(chunk["chunk_id"])
-        if chunk.get("section_path") and chunk["section_path"] not in grouped[source_id]["section_paths"]:
-            grouped[source_id]["section_paths"].append(chunk["section_path"])
-    return sorted(grouped.values(), key=lambda item: item["source_id"])
+    return build_timeline_sources_helper(chunk_matches)
 
 
 def build_source_trail(claim_matches: list[dict], chunk_matches: list[dict]) -> list[dict]:
-    grouped: dict[str, dict] = {}
-    for claim in claim_matches:
-        for source_ref in claim.get("source_refs", []):
-            source_id = source_ref.get("source_id")
-            if not source_id:
-                continue
-            if source_id not in grouped:
-                grouped[source_id] = {
-                    "source_id": source_id,
-                    "source_path": source_ref.get("source_path"),
-                    "normalized_path": source_ref.get("normalized_path"),
-                    "claim_ids": [],
-                    "chunk_ids": [],
-                    "section_paths": [],
-                }
-            if claim.get("claim_id") and claim["claim_id"] not in grouped[source_id]["claim_ids"]:
-                grouped[source_id]["claim_ids"].append(claim["claim_id"])
-            chunk_id = source_ref.get("chunk_id")
-            if chunk_id and chunk_id not in grouped[source_id]["chunk_ids"]:
-                grouped[source_id]["chunk_ids"].append(chunk_id)
-            section_path = source_ref.get("section_path")
-            if section_path and section_path not in grouped[source_id]["section_paths"]:
-                grouped[source_id]["section_paths"].append(section_path)
-
-    for chunk in chunk_matches:
-        source_id = chunk.get("source_id")
-        if not source_id:
-            continue
-        if source_id not in grouped:
-            grouped[source_id] = {
-                "source_id": source_id,
-                "source_path": chunk.get("source_path"),
-                "normalized_path": chunk.get("normalized_path"),
-                "claim_ids": [],
-                "chunk_ids": [],
-                "section_paths": [],
-            }
-        if chunk.get("chunk_id") and chunk["chunk_id"] not in grouped[source_id]["chunk_ids"]:
-            grouped[source_id]["chunk_ids"].append(chunk["chunk_id"])
-        if chunk.get("section_path") and chunk["section_path"] not in grouped[source_id]["section_paths"]:
-            grouped[source_id]["section_paths"].append(chunk["section_path"])
-
-    return sorted(
-        grouped.values(),
-        key=lambda item: (len(item["claim_ids"]), len(item["chunk_ids"]), item["source_id"]),
-        reverse=True,
-    )
+    return build_source_trail_helper(claim_matches, chunk_matches)
 
 
 def build_hierarchy_match_explanation(result: dict, matched_chunks: list[dict]) -> dict:
-    hierarchy_tokens = result.get("field_hits", {}).get("hierarchy", []) or []
-    hierarchy_paths: list[str] = []
-    matched_parent = False
-    matched_leaf = False
-
-    for chunk in matched_chunks:
-        section_path = chunk.get("section_path")
-        if section_path and section_path not in hierarchy_paths:
-            hierarchy_paths.append(section_path)
-
-    for source_ref in result.get("source_refs", []) or []:
-        section_path = source_ref.get("section_path")
-        if section_path and section_path not in hierarchy_paths:
-            hierarchy_paths.append(section_path)
-        for chunk_ref in source_ref.get("chunks", []) or []:
-            chunk_section_path = chunk_ref.get("section_path")
-            if chunk_section_path and chunk_section_path not in hierarchy_paths:
-                hierarchy_paths.append(chunk_section_path)
-
-    for section_path in hierarchy_paths:
-        parsed = parse_section_path(section_path)
-        section_parts = parsed.get("section_path_parts", [])
-        if not section_parts:
-            continue
-        leaf_tokens = set(tokenize_for_search(section_parts[-1]))
-        parent_tokens = set(tokenize_for_search(" ".join(section_parts[:-1])))
-        if leaf_tokens.intersection(hierarchy_tokens):
-            matched_leaf = True
-        if parent_tokens.intersection(hierarchy_tokens):
-            matched_parent = True
-
-    if matched_parent and matched_leaf:
-        anchor_reason = "matched_parent_and_leaf"
-    elif matched_parent:
-        anchor_reason = "matched_parent_only"
-    elif matched_leaf:
-        anchor_reason = "matched_leaf_only"
-    else:
-        anchor_reason = "matched_hierarchy_context"
-
-    anchor_reason_text = {
-        "matched_parent_and_leaf": "同时命中了父级路径和叶子标题，因此更偏向这个层级分支。",
-        "matched_parent_only": "主要命中了父级路径，因此结果更偏向这个上层分类。",
-        "matched_leaf_only": "主要命中了叶子标题，因此结果更偏向这个具体节点。",
-        "matched_hierarchy_context": "命中了层级相关上下文，因此结果参考了章节路径信息。",
-    }.get(anchor_reason, "命中了层级路径信息。")
-
-    return {
-        "matched_tokens": hierarchy_tokens,
-        "matched_paths": hierarchy_paths[:5],
-        "anchor_reason": anchor_reason,
-        "anchor_reason_text": anchor_reason_text,
-    }
+    return build_hierarchy_match_explanation_helper(
+        result,
+        matched_chunks,
+        parse_section_path=parse_section_path,
+        tokenize_for_search=tokenize_for_search,
+    )
 
 
 def query_reading_focus(query_intent: str, page_type: str = "") -> str:
-    if query_intent == "overview":
-        return "workspace_overview"
-    if query_intent == "compare":
-        return "compare_claims"
-    if query_intent == "timeline":
-        return "timeline_evidence"
-    if query_intent == "how_to":
-        return "guide_steps" if page_type == "guide" else "procedural_chunks"
-    if query_intent == "evidence":
-        return "source_evidence"
-    if page_type == "example":
-        return "worked_examples"
-    if page_type == "topic":
-        return "topic_orientation"
-    return "general_lookup"
+    return query_reading_focus_helper(query_intent, page_type=page_type)
 
 
 def build_answer_guardrails(
@@ -10704,133 +8245,20 @@ def build_answer_guardrails(
     timeline_sources: list[dict],
     source_trail: list[dict],
 ) -> dict:
-    risk_flags: list[str] = []
-    if review_ids:
-        risk_flags.append("has_open_reviews")
-    if page_status == "needs_review":
-        risk_flags.append("page_needs_review")
-    elif page_status == "disputed":
-        risk_flags.append("page_disputed")
-    elif page_status == "outdated":
-        risk_flags.append("page_outdated")
-    elif page_status == "draft":
-        risk_flags.append("page_draft")
-    if not matched_claims:
-        risk_flags.append("no_matched_claims")
-    if query_intent in {"how_to", "timeline", "evidence"} and not matched_chunks:
-        risk_flags.append("no_matched_chunks")
-    if query_intent == "timeline" and not timeline_sources:
-        risk_flags.append("no_timeline_sources")
-    if query_intent == "evidence" and not source_trail and not any(
-        claim.get("source_refs") for claim in matched_claims
-    ):
-        risk_flags.append("weak_source_trace")
-
-    can_answer_from_summary_only = (
-        query_intent in {"lookup", "definition", "overview"}
-        and page_type not in {"guide", "example"}
-        and page_status not in {"needs_review", "disputed", "outdated"}
-        and not review_ids
+    return build_answer_guardrails_helper(
+        query_intent,
+        page_status,
+        page_type,
+        review_ids,
+        matched_claims,
+        matched_chunks,
+        timeline_sources,
+        source_trail,
     )
-
-    return {
-        "can_answer_from_summary_only": can_answer_from_summary_only,
-        "must_read_claims": query_intent in {"compare", "timeline", "evidence"},
-        "must_read_chunks": query_intent in {"how_to", "timeline", "evidence"},
-        "must_read_sources": query_intent in {"timeline", "evidence"},
-        "cite_expectation": (
-            "strong" if query_intent in {"timeline", "evidence"}
-            else "light" if query_intent in {"compare", "how_to"}
-            else "none"
-        ),
-        "risk_flags": risk_flags,
-    }
 
 
 def build_answer_handoff(query_intent: str, answer_guardrails: dict, page_type: str) -> dict:
-    if query_intent in {"timeline", "evidence"}:
-        answer_mode = "sources_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "evidence_context.matched_claims",
-            "evidence_context.matched_chunks",
-            "evidence_context.timeline_sources" if query_intent == "timeline" else "evidence_context.source_trail",
-            "page_context.summary",
-        ]
-    elif page_type == "guide":
-        answer_mode = "chunks_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "page_context.summary",
-            "evidence_context.matched_chunks",
-            "evidence_context.matched_claims",
-        ]
-    elif page_type == "example":
-        answer_mode = "claims_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "page_context.summary",
-            "evidence_context.matched_claims",
-            "evidence_context.matched_chunks",
-        ]
-    elif page_type == "topic" and query_intent in {"lookup", "definition", "overview"}:
-        answer_mode = "summary_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "page_context.summary",
-            "evidence_context.matched_claims",
-            "evidence_context.matched_chunks",
-        ]
-    elif query_intent == "how_to":
-        answer_mode = "chunks_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "evidence_context.matched_chunks",
-            "evidence_context.matched_claims",
-            "page_context.summary",
-        ]
-    elif query_intent == "compare":
-        answer_mode = "claims_first"
-        recommended_read_order = [
-            "retrieval_context.focus",
-            "evidence_context.matched_claims",
-            "evidence_context.matched_chunks",
-            "page_context.summary",
-        ]
-    else:
-        answer_mode = "summary_first"
-        recommended_read_order = [
-            "page_context.summary",
-            "evidence_context.matched_claims",
-            "retrieval_context.focus",
-        ]
-
-    required_evidence_paths = []
-    if answer_guardrails.get("must_read_claims"):
-        required_evidence_paths.append("evidence_context.matched_claims")
-    if answer_guardrails.get("must_read_chunks"):
-        required_evidence_paths.append("evidence_context.matched_chunks")
-    if answer_guardrails.get("must_read_sources"):
-        required_evidence_paths.append(
-            "evidence_context.timeline_sources" if query_intent == "timeline" else "evidence_context.source_trail"
-        )
-
-    risk_flags = answer_guardrails.get("risk_flags", [])
-    if risk_flags:
-        fallback_action = "answer_with_uncertainty"
-    elif answer_guardrails.get("can_answer_from_summary_only"):
-        fallback_action = "answer_from_summary_and_claims"
-    else:
-        fallback_action = "read_required_evidence_before_answering"
-
-    return {
-        "answer_mode": answer_mode,
-        "recommended_read_order": recommended_read_order,
-        "required_evidence_paths": required_evidence_paths,
-        "should_cite_sources": answer_guardrails.get("cite_expectation") in {"light", "strong"},
-        "should_surface_uncertainty": bool(risk_flags),
-        "fallback_action": fallback_action,
-    }
+    return build_answer_handoff_helper(query_intent, answer_guardrails, page_type)
 
 
 def summarize_linked_page(page_record: dict, reason: str) -> dict:
@@ -10852,68 +8280,13 @@ def expand_related_pages_for_query_result(
     page_links_index: dict,
     link_expansion: str,
 ) -> tuple[list[dict], dict]:
-    if link_expansion == "off":
-        return [], {
-            "link_expansion_used": False,
-            "link_expansion_reason": None,
-            "linked_page_paths": [],
-        }
-
-    page_links = page_links_index.get("pages", {})
-    entry = page_links.get(result.get("page_id"), {})
-    if not entry:
-        return [], {
-            "link_expansion_used": False,
-            "link_expansion_reason": None,
-            "linked_page_paths": [],
-        }
-
-    limit = 3 if link_expansion == "auto" else 5
-    linked_pages: list[dict] = []
-    linked_page_paths: list[str] = []
-    added_page_ids: set[str] = set()
-
-    same_family_ids = []
-    canonical_family = entry.get("canonical_family_id")
-    if canonical_family:
-        for candidate_page_id, candidate_entry in page_links.items():
-            if candidate_page_id == result.get("page_id"):
-                continue
-            if candidate_entry.get("canonical_family_id") == canonical_family:
-                same_family_ids.append(candidate_page_id)
-
-    candidate_groups = [
-        ("same_canonical_family", same_family_ids),
-        ("outgoing_link", entry.get("outgoing_page_ids", [])),
-        ("incoming_link", entry.get("incoming_page_ids", [])),
-        ("related_page", entry.get("related_page_ids", [])),
-    ]
-
-    first_reason = None
-    for reason, candidate_page_ids in candidate_groups:
-        for candidate_page_id in candidate_page_ids:
-            if candidate_page_id in added_page_ids:
-                continue
-            candidate_page = page_records_by_id.get(candidate_page_id)
-            if candidate_page is None or not is_live_page_record(candidate_page):
-                continue
-            linked_pages.append(summarize_linked_page(candidate_page, reason))
-            linked_page_paths.append(candidate_page.get("page_path", ""))
-            added_page_ids.add(candidate_page_id)
-            if first_reason is None:
-                first_reason = reason
-            if len(linked_pages) >= limit:
-                return linked_pages, {
-                    "link_expansion_used": True,
-                    "link_expansion_reason": first_reason,
-                    "linked_page_paths": linked_page_paths,
-                }
-
-    return linked_pages, {
-        "link_expansion_used": bool(linked_pages),
-        "link_expansion_reason": first_reason,
-        "linked_page_paths": linked_page_paths,
-    }
+    return expand_related_pages_for_query_result_helper(
+        result,
+        page_records_by_id,
+        page_links_index,
+        link_expansion,
+        is_live_page_record=is_live_page_record,
+    )
 
 
 def build_result_reading_pack(
@@ -10930,626 +8303,61 @@ def build_result_reading_pack(
     query_intent: str,
     link_expansion: str,
 ) -> dict:
-    # 阅读包是 query V1 的关键补强：
-    # 先返回“为什么命中这页”，再给最相关的 claims/chunks/sources，方便 Agent 继续读。
-    claim_matches: list[dict] = []
-    chunk_matches: list[dict] = []
-    seen_chunk_ids: set[str] = set()
-
-    for claim_id in result.get("claim_ids", []):
-        claim_record = claim_records_by_id.get(claim_id)
-        if claim_record is None:
-            continue
-        claim_score, claim_hits = score_claim_for_query(query_tokens, claim_record)
-        if claim_score <= 0:
-            continue
-
-        claim_matches.append({
-            "claim_id": claim_record["claim_id"],
-            "text": claim_record.get("text", ""),
-            "claim_type": claim_record.get("claim_type"),
-            "status": claim_record.get("status"),
-            "matched_tokens": claim_hits,
-            "source_refs": [build_source_brief(item) for item in claim_record.get("source_refs", [])],
-            "_score": (
-                claim_score + (len(claim_record.get("source_refs", [])) * 0.25)
-                if query_intent == "evidence"
-                else claim_score + 0.4
-                if query_intent == "compare" and claim_record.get("claim_type") in {"comparison", "evaluation", "causal"}
-                else claim_score + 0.2
-                if query_intent == "timeline" and claim_record.get("source_refs")
-                else claim_score
-            ),
-        })
-
-        for chunk_id in claim_record.get("chunk_ids", []):
-            if chunk_id in seen_chunk_ids:
-                continue
-            chunk_record = chunk_records_by_id.get(chunk_id)
-            if chunk_record is None:
-                continue
-            chunk_score, chunk_hits = score_chunk_for_query(query_tokens, chunk_record)
-            if chunk_score <= 0:
-                continue
-            seen_chunk_ids.add(chunk_id)
-            chunk_matches.append({
-                "matched_tokens": chunk_hits,
-                "_score": (
-                    chunk_score + 0.5
-                    if query_intent == "evidence" and chunk_record.get("source_id")
-                    else chunk_score + 0.25
-                    if query_intent == "timeline" and chunk_record.get("source_id")
-                    else chunk_score
-                ),
-                **build_chunk_reading_brief(chunk_record),
-            })
-
-    claim_matches.sort(key=lambda item: item["_score"], reverse=True)
-    chunk_matches.sort(key=lambda item: item["_score"], reverse=True)
-
-    trimmed_claims = []
-    for item in claim_matches[:claim_limit]:
-        cleaned = dict(item)
-        cleaned.pop("_score", None)
-        trimmed_claims.append(cleaned)
-
-    trimmed_chunks = []
-    for item in chunk_matches[:chunk_limit]:
-        cleaned = dict(item)
-        cleaned.pop("_score", None)
-        trimmed_chunks.append(cleaned)
-
-    reading_depth = result.get("reading_depth", "standard")
-    source_trail = build_source_trail(trimmed_claims, trimmed_chunks) if reading_depth == "deep" else []
-    timeline_sources = build_timeline_sources(trimmed_chunks) if query_intent == "timeline" else []
-    page_type = result.get("type", "")
-    focus = query_reading_focus(query_intent, page_type=page_type)
-    hierarchy_explanation = build_hierarchy_match_explanation(result, trimmed_chunks)
-    linked_pages, link_expansion_context = expand_related_pages_for_query_result(
-        result=result,
-        page_records_by_id=page_records_by_id,
-        page_links_index=page_links_index,
-        link_expansion=link_expansion,
+    return build_result_reading_pack_helper(
+        result,
+        query_text,
+        normalized_query,
+        query_tokens,
+        claim_records_by_id,
+        chunk_records_by_id,
+        page_records_by_id,
+        page_links_index,
+        claim_limit,
+        chunk_limit,
+        query_intent,
+        link_expansion,
+        score_claim_for_query=score_claim_for_query,
+        build_source_brief=build_source_brief,
+        score_chunk_for_query=score_chunk_for_query,
+        build_chunk_reading_brief=build_chunk_reading_brief,
+        build_source_trail=build_source_trail,
+        build_timeline_sources=build_timeline_sources,
+        query_reading_focus=query_reading_focus,
+        build_hierarchy_match_explanation=build_hierarchy_match_explanation,
+        expand_related_pages_for_query_result=expand_related_pages_for_query_result,
+        build_answer_guardrails=build_answer_guardrails,
+        build_answer_handoff=build_answer_handoff,
+        query_answer_handoff_contract_version=QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
+        page_type_profile=page_type_profile,
     )
-    ranking_reasons = []
-    if result.get("exact_match_reasons"):
-        ranking_reasons.extend(result["exact_match_reasons"])
-    if result.get("intent_boost_reason"):
-        ranking_reasons.append(result["intent_boost_reason"])
-    if hierarchy_explanation["matched_tokens"] or hierarchy_explanation["matched_paths"]:
-        ranking_reasons.append(f"hierarchy_{hierarchy_explanation['anchor_reason']}")
-    ranking_reasons.extend(sorted(result.get("field_scores", {}).keys()))
-    answer_guardrails = build_answer_guardrails(
-        query_intent=query_intent,
-        page_status=result.get("status", ""),
-        page_type=page_type,
-        review_ids=result.get("review_ids", []),
-        matched_claims=trimmed_claims,
-        matched_chunks=trimmed_chunks,
-        timeline_sources=timeline_sources,
-        source_trail=source_trail,
-    )
-    risk_flags = answer_guardrails.get("risk_flags", [])
-    if linked_pages and link_expansion_context.get("link_expansion_reason") in {"incoming_link"}:
-        if "weak_link_expansion" not in risk_flags:
-            risk_flags.append("weak_link_expansion")
-    answer_handoff = build_answer_handoff(
-        query_intent=query_intent,
-        answer_guardrails=answer_guardrails,
-        page_type=page_type,
-    )
-    return {
-        "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
-        "handoff_kind": "reading_pack",
-        "page_summary": result.get("summary", ""),
-        "query_intent": query_intent,
-        "reading_depth": reading_depth,
-        "matched_claims": trimmed_claims,
-        "matched_chunks": trimmed_chunks,
-        "source_trail": source_trail,
-        "timeline_sources": timeline_sources,
-        "linked_pages": linked_pages,
-        "review_ids": result.get("review_ids", []),
-        "focus": focus,
-        "query": {
-            "text": query_text,
-            "normalized_text": normalized_query,
-            "intent": query_intent,
-            "reading_depth": reading_depth,
-        },
-        "page_context": {
-            "page_id": result.get("page_id"),
-            "title": result.get("title", ""),
-            "page_path": result.get("page_path", ""),
-            "type": result.get("type", ""),
-            "page_type_profile": page_type_profile(result.get("type", "")),
-            "status": result.get("status", ""),
-            "summary": result.get("summary", ""),
-            "canonical_id": result.get("canonical_id"),
-            "aliases": result.get("aliases", []),
-        },
-        "retrieval_context": {
-            "focus": focus,
-            "matched_fields": sorted(result.get("field_hits", {}).keys()),
-            "ranking_reasons": ranking_reasons,
-            "review_ids": result.get("review_ids", []),
-            "hierarchy_hits": hierarchy_explanation["matched_tokens"],
-            "hierarchy_paths": hierarchy_explanation["matched_paths"],
-            "hierarchy_anchor_reason": hierarchy_explanation["anchor_reason"],
-            "hierarchy_anchor_reason_text": hierarchy_explanation["anchor_reason_text"],
-            "link_expansion_used": link_expansion_context.get("link_expansion_used", False),
-            "link_expansion_reason": link_expansion_context.get("link_expansion_reason"),
-            "linked_page_paths": link_expansion_context.get("linked_page_paths", []),
-        },
-        "evidence_context": {
-            "matched_claims": trimmed_claims,
-            "matched_chunks": trimmed_chunks,
-            "timeline_sources": timeline_sources,
-            "source_trail": source_trail,
-            "linked_pages": linked_pages,
-        },
-        "answer_guardrails": answer_guardrails,
-        "answer_handoff": answer_handoff,
-    }
 
 
 def build_answer_ready_payload(query_payload: dict) -> dict:
-    base_payload = {
-        "contract_version": ANSWER_READY_OUTPUT_VERSION,
-        "query_contract_version": query_payload.get("contract_version"),
-        "workspace": query_payload.get("workspace"),
-        "workspace_summary": query_payload.get("workspace_summary"),
-        "query": query_payload.get("query"),
-        "normalized_query": query_payload.get("normalized_query"),
-        "expanded_query": query_payload.get("expanded_query"),
-        "intent": query_payload.get("intent"),
-        "reading_depth": query_payload.get("reading_depth"),
-        "selected_result": None,
-        "alternatives": [],
-        "agent_brief": {
-            "answer_mode": "no_match",
-            "page_type_profile": "unknown",
-            "recommended_read_order": [],
-            "required_evidence_paths": [],
-            "should_cite_sources": False,
-            "should_surface_uncertainty": True,
-            "fallback_action": "broaden_or_rephrase_query",
-            "risk_flags": ["no_query_results"],
-        },
-        "answer_context": {
-            "page_summary": "",
-            "answer_shape": "unknown",
-            "key_claims": [],
-            "key_chunks": [],
-            "key_sources": [],
-        },
-        "agent_summary": "No matched page was found. Broaden or rephrase the query before attempting an answer.",
-    }
-
-    results = query_payload.get("results", [])
-    if not results:
-        return base_payload
-
-    top_result = results[0]
-    reading_pack = top_result.get("reading_pack", {})
-    answer_guardrails = reading_pack.get("answer_guardrails", {})
-    answer_handoff = reading_pack.get("answer_handoff", {})
-    evidence_context = reading_pack.get("evidence_context", {})
-    retrieval_context = reading_pack.get("retrieval_context", {})
-    matched_fields = retrieval_context.get("matched_fields", [])
-    weak_match = (
-        not matched_fields
-        or (
-            top_result.get("score", 0.0) < 1.0
-            and not evidence_context.get("matched_claims")
-            and not evidence_context.get("matched_chunks")
-        )
+    return build_answer_ready_payload_helper(
+        query_payload,
+        answer_ready_output_version=ANSWER_READY_OUTPUT_VERSION,
+        page_type_profile=page_type_profile,
     )
-    if weak_match:
-        base_payload["agent_brief"] = {
-            "answer_mode": "no_match",
-            "page_type_profile": "unknown",
-            "recommended_read_order": [],
-            "required_evidence_paths": [],
-            "should_cite_sources": False,
-            "should_surface_uncertainty": True,
-            "fallback_action": "broaden_or_rephrase_query",
-            "risk_flags": ["weak_top_match"],
-        }
-        base_payload["selected_result"] = {
-            "rank": 1,
-            "page_id": top_result.get("page_id"),
-            "title": top_result.get("title", ""),
-            "page_path": top_result.get("page_path", ""),
-            "type": top_result.get("type", ""),
-            "status": top_result.get("status", ""),
-            "summary": top_result.get("summary", ""),
-            "score": top_result.get("score"),
-            "focus": reading_pack.get("focus"),
-            "page_type_profile": "unknown",
-            "ready_state": "answer_with_uncertainty",
-        }
-        base_payload["alternatives"] = [
-            {
-                "rank": index,
-                "page_id": result.get("page_id"),
-                "title": result.get("title", ""),
-                "page_path": result.get("page_path", ""),
-                "type": result.get("type", ""),
-                "status": result.get("status", ""),
-                "score": result.get("score"),
-            }
-            for index, result in enumerate(results[1:4], start=2)
-        ]
-        base_payload["agent_summary"] = (
-            "Top query result is too weak to serve as a safe answer anchor. "
-            "Broaden or rephrase the query before attempting an answer."
-        )
-        base_payload["answer_context"]["answer_shape"] = "unknown"
-        return base_payload
-
-    key_claims = [
-        {
-            "claim_id": claim.get("claim_id"),
-            "text": claim.get("text", ""),
-            "claim_type": claim.get("claim_type"),
-            "status": claim.get("status"),
-            "source_ref_count": len(claim.get("source_refs", [])),
-        }
-        for claim in evidence_context.get("matched_claims", [])[:3]
-    ]
-    key_chunks = [
-        {
-            "chunk_id": chunk.get("chunk_id"),
-            "section_path": chunk.get("section_path"),
-            "summary": chunk.get("summary") or chunk.get("text", "")[:180],
-            "start_line": chunk.get("start_line"),
-            "end_line": chunk.get("end_line"),
-            "source_path": chunk.get("source_path"),
-        }
-        for chunk in evidence_context.get("matched_chunks", [])[:3]
-    ]
-    key_sources = (
-        evidence_context.get("timeline_sources")
-        or evidence_context.get("source_trail")
-        or [
-            {
-                "source_id": source_ref.get("source_id"),
-                "source_path": source_ref.get("source_path"),
-                "section_path": source_ref.get("section_path"),
-                "chunk_id": source_ref.get("chunk_id"),
-            }
-            for claim in evidence_context.get("matched_claims", [])
-            for source_ref in claim.get("source_refs", [])
-        ][:5]
-    )
-    hierarchy_hits = retrieval_context.get("hierarchy_hits", [])
-    hierarchy_paths = retrieval_context.get("hierarchy_paths", [])
-    hierarchy_anchor_reason = retrieval_context.get("hierarchy_anchor_reason")
-    hierarchy_anchor_reason_text = retrieval_context.get("hierarchy_anchor_reason_text")
-    page_type = str(top_result.get("type", "")).strip().lower()
-    page_profile = page_type_profile(page_type)
-    query_intent = str(query_payload.get("intent", "")).strip().lower()
-    answer_shape = (
-        "timeline_evidence" if query_intent == "timeline"
-        else "step_by_step" if answer_handoff.get("answer_mode") == "chunks_first"
-        else "worked_example" if page_profile == "example"
-        else "topic_orientation" if page_profile == "topic"
-        else "reference_sheet" if page_profile == "reference"
-        else "timeline_evidence" if page_profile == "timeline"
-        else "evidence_trace" if answer_handoff.get("answer_mode") == "sources_first"
-        else "concept_summary" if page_profile == "concept"
-        else "generic_summary"
-    )
-
-    if answer_handoff.get("fallback_action") == "answer_with_uncertainty":
-        ready_state = "answer_with_uncertainty"
-    elif answer_guardrails.get("can_answer_from_summary_only"):
-        ready_state = "summary_ready"
-    else:
-        ready_state = "evidence_required"
-
-    risk_flags = answer_guardrails.get("risk_flags", [])
-    risk_text = ", ".join(risk_flags) if risk_flags else "none"
-    selected_title = top_result.get("title", "")
-    agent_summary_lines = [
-        f"Use page '{selected_title}' as the answer anchor.",
-        f"Answer mode: {answer_handoff.get('answer_mode', 'summary_first')}.",
-        f"Read order: {' -> '.join(answer_handoff.get('recommended_read_order', [])) or 'page_context.summary'}.",
-        f"Fallback action: {answer_handoff.get('fallback_action', 'read_required_evidence_before_answering')}.",
-        f"Risk flags: {risk_text}.",
-    ]
-    if hierarchy_paths:
-        agent_summary_lines.append(
-            f"Hierarchy anchor: {' | '.join(hierarchy_paths[:3])}."
-        )
-    if hierarchy_anchor_reason_text:
-        agent_summary_lines.append(f"Hierarchy reason: {hierarchy_anchor_reason_text}")
-    elif hierarchy_anchor_reason:
-        agent_summary_lines.append(f"Hierarchy reason: {hierarchy_anchor_reason}.")
-
-    base_payload.update({
-        "selected_result": {
-            "rank": 1,
-            "page_id": top_result.get("page_id"),
-            "title": top_result.get("title", ""),
-            "page_path": top_result.get("page_path", ""),
-            "type": top_result.get("type", ""),
-            "status": top_result.get("status", ""),
-            "summary": top_result.get("summary", ""),
-            "score": top_result.get("score"),
-            "focus": reading_pack.get("focus"),
-            "page_type_profile": page_profile,
-            "ready_state": ready_state,
-            "hierarchy_hits": hierarchy_hits,
-            "hierarchy_paths": hierarchy_paths,
-            "hierarchy_anchor_reason": hierarchy_anchor_reason,
-            "hierarchy_anchor_reason_text": hierarchy_anchor_reason_text,
-        },
-        "alternatives": [
-            {
-                "rank": index,
-                "page_id": result.get("page_id"),
-                "title": result.get("title", ""),
-                "page_path": result.get("page_path", ""),
-                "type": result.get("type", ""),
-                "status": result.get("status", ""),
-                "score": result.get("score"),
-            }
-            for index, result in enumerate(results[1:4], start=2)
-        ],
-        "agent_brief": {
-            "answer_mode": answer_handoff.get("answer_mode"),
-            "page_type_profile": page_profile,
-            "recommended_read_order": answer_handoff.get("recommended_read_order", []),
-            "required_evidence_paths": answer_handoff.get("required_evidence_paths", []),
-            "should_cite_sources": answer_handoff.get("should_cite_sources", False),
-            "should_surface_uncertainty": answer_handoff.get("should_surface_uncertainty", False),
-            "fallback_action": answer_handoff.get("fallback_action"),
-            "risk_flags": risk_flags,
-        },
-        "answer_context": {
-            "page_summary": reading_pack.get("page_summary", top_result.get("summary", "")),
-            "answer_shape": answer_shape,
-            "key_claims": key_claims,
-            "key_chunks": key_chunks,
-            "key_sources": key_sources,
-            "hierarchy_hits": hierarchy_hits,
-            "hierarchy_paths": hierarchy_paths,
-            "hierarchy_anchor_reason": hierarchy_anchor_reason,
-            "hierarchy_anchor_reason_text": hierarchy_anchor_reason_text,
-        },
-        "agent_summary": "\n".join(agent_summary_lines),
-    })
-    return base_payload
 
 
 def render_answer_ready_message(answer_ready_payload: dict) -> str:
-    lines = [
-        f"Query: {answer_ready_payload['query']}",
-        f"Intent: {answer_ready_payload['intent']}",
-    ]
-    selected_result = answer_ready_payload.get("selected_result")
-    if selected_result is None:
-        lines.append("")
-        lines.append("Answer-Ready Summary:")
-        lines.append("  No matched page was found.")
-        lines.append("  Action: broaden or rephrase the query before answering.")
-        return "\n".join(lines)
-
-    agent_brief = answer_ready_payload.get("agent_brief", {})
-    answer_context = answer_ready_payload.get("answer_context", {})
-    lines.extend([
-        "",
-        "Answer-Ready Summary:",
-        f"  anchor_page: {selected_result.get('title')} [{selected_result.get('type')}, status={selected_result.get('status')}]",
-        f"  path: {selected_result.get('page_path')}",
-        f"  ready_state: {selected_result.get('ready_state')}",
-        f"  answer_mode: {agent_brief.get('answer_mode')}",
-        f"  page_type_profile: {agent_brief.get('page_type_profile')}",
-        f"  answer_shape: {answer_context.get('answer_shape')}",
-        f"  fallback_action: {agent_brief.get('fallback_action')}",
-        f"  read_order: {' -> '.join(agent_brief.get('recommended_read_order', []))}",
-    ])
-    if agent_brief.get("required_evidence_paths"):
-        lines.append(f"  required_evidence: {', '.join(agent_brief['required_evidence_paths'])}")
-    if agent_brief.get("risk_flags"):
-        lines.append(f"  risk_flags: {', '.join(agent_brief['risk_flags'])}")
-    if answer_context.get("hierarchy_paths"):
-        lines.append(f"  hierarchy: {' | '.join(answer_context['hierarchy_paths'])}")
-    if answer_context.get("hierarchy_anchor_reason_text"):
-        lines.append(f"  hierarchy_reason: {answer_context.get('hierarchy_anchor_reason_text')}")
-    elif answer_context.get("hierarchy_anchor_reason"):
-        lines.append(f"  hierarchy_reason: {answer_context.get('hierarchy_anchor_reason')}")
-    lines.append(f"  summary: {answer_context.get('page_summary', '')}")
-
-    key_claims = answer_context.get("key_claims", [])
-    if key_claims:
-        lines.append("  key_claims:")
-        for claim in key_claims:
-            lines.append(f"    - {claim['claim_id']} {claim['text']}")
-
-    key_chunks = answer_context.get("key_chunks", [])
-    if key_chunks:
-        lines.append("  key_chunks:")
-        for chunk in key_chunks:
-            lines.append(
-                f"    - {chunk['chunk_id']} {chunk.get('section_path')} "
-                f"(lines {chunk.get('start_line')}-{chunk.get('end_line')})"
-            )
-
-    key_sources = answer_context.get("key_sources", [])
-    if key_sources:
-        lines.append("  key_sources:")
-        for source in key_sources[:5]:
-            lines.append(
-                f"    - {source.get('source_id')} {source.get('source_path')} "
-                f"{source.get('section_path') or ''}".rstrip()
-            )
-
-    alternatives = answer_ready_payload.get("alternatives", [])
-    if alternatives:
-        lines.append("  alternatives:")
-        for alternative in alternatives:
-            lines.append(
-                f"    - #{alternative['rank']} {alternative['title']} "
-                f"[{alternative['type']}, status={alternative['status']}]"
-            )
-    return "\n".join(lines)
+    return render_answer_ready_message_helper(answer_ready_payload)
 
 
 def render_answer_ready_prompt(answer_ready_payload: dict) -> str:
-    selected_result = answer_ready_payload.get("selected_result")
-    agent_brief = answer_ready_payload.get("agent_brief", {})
-    answer_context = answer_ready_payload.get("answer_context", {})
-
-    lines = [
-        "You are the answer layer for a MyAgentWiki query handoff.",
-        "Use only the provided handoff context to answer.",
-        "If evidence is weak or risk flags are present, explicitly say what is uncertain.",
-        "Do not invent citations or unsupported details.",
-        "",
-        "## Query",
-        f"- user_query: {answer_ready_payload.get('query', '')}",
-        f"- intent: {answer_ready_payload.get('intent', '')}",
-        f"- reading_depth: {answer_ready_payload.get('reading_depth', '')}",
-        "",
-        "## Handoff",
-        f"- answer_mode: {agent_brief.get('answer_mode', '')}",
-        f"- page_type_profile: {agent_brief.get('page_type_profile', '')}",
-        f"- answer_shape: {answer_context.get('answer_shape', '')}",
-        f"- fallback_action: {agent_brief.get('fallback_action', '')}",
-        f"- should_cite_sources: {agent_brief.get('should_cite_sources', False)}",
-        f"- should_surface_uncertainty: {agent_brief.get('should_surface_uncertainty', False)}",
-        f"- risk_flags: {', '.join(agent_brief.get('risk_flags', [])) or 'none'}",
-        f"- recommended_read_order: {' -> '.join(agent_brief.get('recommended_read_order', [])) or 'none'}",
-        f"- required_evidence_paths: {', '.join(agent_brief.get('required_evidence_paths', [])) or 'none'}",
-        "",
-        "## Selected Result",
-    ]
-
-    if selected_result is None:
-        lines.extend([
-            "- selected_result: none",
-            "",
-            "## Answer Instruction",
-            "Explain that no reliable answer anchor was found and suggest broadening or rephrasing the query.",
-        ])
-        return "\n".join(lines)
-
-    lines.extend([
-        f"- title: {selected_result.get('title', '')}",
-        f"- page_type: {selected_result.get('type', '')}",
-        f"- page_status: {selected_result.get('status', '')}",
-        f"- ready_state: {selected_result.get('ready_state', '')}",
-        f"- page_path: {selected_result.get('page_path', '')}",
-        f"- page_summary: {answer_context.get('page_summary', '')}",
-    ])
-    if answer_context.get("hierarchy_paths"):
-        lines.append(f"- hierarchy_anchor: {' | '.join(answer_context.get('hierarchy_paths', [])[:3])}")
-    if answer_context.get("hierarchy_hits"):
-        lines.append(f"- hierarchy_hits: {'/'.join(answer_context.get('hierarchy_hits', []))}")
-    if answer_context.get("hierarchy_anchor_reason_text"):
-        lines.append(f"- hierarchy_reason: {answer_context.get('hierarchy_anchor_reason_text')}")
-    elif answer_context.get("hierarchy_anchor_reason"):
-        lines.append(f"- hierarchy_reason: {answer_context.get('hierarchy_anchor_reason')}")
-    lines.extend([
-        "",
-        "## Key Claims",
-    ])
-
-    key_claims = answer_context.get("key_claims", [])
-    if key_claims:
-        for claim in key_claims:
-            lines.append(
-                f"- {claim.get('claim_id')}: {claim.get('text', '')} "
-                f"(type={claim.get('claim_type')}, status={claim.get('status')})"
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend([
-        "",
-        "## Key Chunks",
-    ])
-    key_chunks = answer_context.get("key_chunks", [])
-    if key_chunks:
-        for chunk in key_chunks:
-            lines.append(
-                f"- {chunk.get('chunk_id')}: {chunk.get('summary', '')} "
-                f"[section={chunk.get('section_path')}, lines={chunk.get('start_line')}-{chunk.get('end_line')}, source={chunk.get('source_path')}]"
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend([
-        "",
-        "## Key Sources",
-    ])
-    key_sources = answer_context.get("key_sources", [])
-    if key_sources:
-        for source in key_sources:
-            lines.append(
-                f"- source_id={source.get('source_id')} path={source.get('source_path')} "
-                f"section={source.get('section_path') or ''} chunk_id={source.get('chunk_id') or ''}".rstrip()
-            )
-    else:
-        lines.append("- none")
-
-    lines.extend([
-        "",
-        "## Answer Instruction",
-        "Write a concise answer for the user grounded only in the handoff above.",
-        "If `page_type_profile` is `guide` or `answer_shape` is `step_by_step`, prefer a procedural step-by-step answer.",
-        "If `page_type_profile` is `example` or `answer_shape` is `worked_example`, prefer explaining through a concrete example.",
-        "If `page_type_profile` is `topic` or `answer_shape` is `topic_orientation`, first orient the user to the topic, then cite the most relevant claims.",
-        "If `page_type_profile` is `reference` or `answer_shape` is `reference_sheet`, prefer a structured reference-style answer with concise keyed items.",
-        "If `page_type_profile` is `timeline` or `answer_shape` is `timeline_evidence`, present events in chronological order and foreground dated evidence.",
-        "If `answer_shape` is `evidence_trace`, foreground sources, chunks, and provenance instead of giving a bare summary.",
-        "If `answer_shape` is `concept_summary`, prefer a concise definition-first explanation.",
-        "If `should_cite_sources` is true, mention the supporting source paths or sections in the answer.",
-        "If `should_surface_uncertainty` is true, include a short uncertainty note.",
-        "If `fallback_action` is not `answer_from_summary_and_claims`, obey that fallback instead of overclaiming.",
-    ])
-    return "\n".join(lines)
+    return render_answer_ready_prompt_helper(answer_ready_payload)
 
 
 def build_answer_ready_messages(answer_ready_payload: dict) -> list[dict]:
-    prompt_text = render_answer_ready_prompt(answer_ready_payload)
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are the answer layer for a MyAgentWiki handoff. "
-                "Answer only from the provided context, surface uncertainty when required, "
-                "and do not invent unsupported claims or citations."
-            ),
-        },
-        {
-            "role": "user",
-            "content": prompt_text,
-        },
-    ]
+    return build_answer_ready_messages_helper(answer_ready_payload)
 
 
 def render_answer_ready_chatml(answer_ready_payload: dict) -> str:
-    messages = build_answer_ready_messages(answer_ready_payload)
-    blocks = []
-    for message in messages:
-        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
-    return "\n".join(blocks)
+    return render_answer_ready_chatml_helper(answer_ready_payload)
 
 
 def select_top_matches(query_tokens: list[str], field_tokens: list[str], limit: int = 5) -> list[str]:
-    # 返回具体命中的 token，方便 CLI 输出“为什么这条结果排这么前面”。
-    if not query_tokens or not field_tokens:
-        return []
-    field_counter = Counter(field_tokens)
-    matches = []
-    for token in query_tokens:
-        if field_counter.get(token, 0) > 0 and token not in matches:
-            matches.append(token)
-    return matches[:limit]
+    return select_top_matches_helper(query_tokens, field_tokens, limit=limit)
 
 
 def build_query_payload(
@@ -11562,591 +8370,107 @@ def build_query_payload(
     intent: str | None = None,
     link_expansion: str = "auto",
 ) -> dict:
-    # query 当前走“现算现查”策略：
-    # 直接读取 state/pages.jsonl + claims + wiki 页面，避免先做一层复杂索引器。
-    pages_path = target / "state" / "pages.jsonl"
-    claims_path = target / "state" / "claims.jsonl"
-    if not pages_path.exists():
-        raise FileNotFoundError(f"Missing pages index: {pages_path}")
-
-    page_records = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)]
-    claim_records = [ensure_claim_lifecycle_defaults(record) for record in (load_jsonl(claims_path) if claims_path.exists() else [])]
-    live_claim_records = filter_live_claim_records(claim_records)
-    claim_records_by_id = {record["claim_id"]: record for record in live_claim_records}
-    page_records_by_id = {
-        record["page_id"]: record
-        for record in page_records
-        if record.get("page_id")
-    }
-    chunk_records_by_id = load_chunks_by_id(target)
-    alias_index = load_alias_index(target)
-    page_links_index = load_page_links_index(target)
-    normalized_query_payload = expand_query_with_alias_registry(query_text, alias_index)
-
-    normalized_query = normalized_query_payload["normalized_query"]
-    query_tokens = normalized_query_payload["query_tokens"]
-    explicit_intent = str(intent or "").strip().lower()
-    query_intent = explicit_intent if explicit_intent in QUERY_INTENT_CHOICES else normalized_query_payload["intent"]
-    documents, document_source = ensure_query_documents(target, page_records, claim_records_by_id)
-
-    field_document_frequencies = {
-        field_name: compute_document_frequency(
-            [document["field_tokens"] for document in documents],
-            field_name,
-        )
-        for field_name in QUERY_FIELD_WEIGHTS
-    }
-    field_average_lengths = {
-        field_name: (
-            sum(len(document["field_tokens"].get(field_name, [])) for document in documents) / len(documents)
-            if documents else 0.0
-        )
-        for field_name in QUERY_FIELD_WEIGHTS
-    }
-
-    scored_results = []
-    for document in documents:
-        page_record = document["page_record"]
-        field_scores: dict[str, float] = {}
-        weighted_field_sum = 0.0
-        field_hits: dict[str, list[str]] = {}
-
-        for field_name, field_weight in QUERY_FIELD_WEIGHTS.items():
-            document_tokens = document["field_tokens"].get(field_name, [])
-            raw_score = bm25_score(
-                query_tokens=query_tokens,
-                document_tokens=document_tokens,
-                document_frequency=field_document_frequencies[field_name],
-                total_documents=len(documents),
-                average_length=field_average_lengths[field_name],
-            )
-            if raw_score <= 0:
-                continue
-            intent_field_multiplier = query_intent_field_multiplier(query_intent, field_name)
-            weighted_score = raw_score * field_weight * intent_field_multiplier
-            field_scores[field_name] = round(weighted_score, 6)
-            weighted_field_sum += weighted_score
-            field_hits[field_name] = select_top_matches(query_tokens, document_tokens)
-
-        if weighted_field_sum <= 0:
-            continue
-
-        page_type_weight = query_page_type_weight(page_record)
-        page_status_weight = query_page_status_weight(page_record)
-        exact_match_boost, exact_match_reasons = alias_match_boost(
-            page_record=page_record,
-            normalized_query=normalized_query,
-            alias_hits=normalized_query_payload["alias_hits"],
-        )
-        intent_boost, intent_boost_reason = query_intent_page_type_boost(query_intent, page_record)
-        final_score = weighted_field_sum * page_type_weight * page_status_weight * exact_match_boost * intent_boost
-        result_record = {
-            "page_id": page_record["page_id"],
-            "title": page_record.get("title", ""),
-            "page_path": page_record.get("page_path", ""),
-            "type": page_record.get("type", ""),
-            "canonical_id": page_record.get("canonical_id"),
-            "status": page_record.get("status", ""),
-            "summary": page_record.get("summary", ""),
-            "aliases": page_record.get("aliases", []),
-            "claim_ids": page_record.get("claim_ids", []),
-            "review_ids": page_record.get("review_ids", []),
-            "score": round(final_score, 6),
-            "field_scores": field_scores,
-            "field_hits": field_hits,
-            "page_type_weight": page_type_weight,
-            "page_status_weight": page_status_weight,
-            "exact_match_boost": round(exact_match_boost, 4),
-            "exact_match_reasons": exact_match_reasons,
-            "intent": query_intent,
-            "intent_boost": round(intent_boost, 4),
-            "intent_boost_reason": intent_boost_reason,
-            "reading_depth": reading_depth,
-        }
-        result_record["reading_pack"] = build_result_reading_pack(
-            result=result_record,
-            query_text=query_text,
-            normalized_query=normalized_query,
-            query_tokens=query_tokens,
-            claim_records_by_id=claim_records_by_id,
-            chunk_records_by_id=chunk_records_by_id,
-            page_records_by_id=page_records_by_id,
-            page_links_index=page_links_index,
-            claim_limit=claim_limit,
-            chunk_limit=chunk_limit,
-            query_intent=query_intent,
-            link_expansion=link_expansion,
-        )
-        scored_results.append(result_record)
-
-    scored_results.sort(key=lambda item: (item["score"], item["title"]), reverse=True)
-    return {
-        "workspace": str(target),
-        "workspace_summary": build_workspace_summary(target),
-        "contract_version": QUERY_ANSWER_HANDOFF_CONTRACT_VERSION,
-        "query": query_text,
-        "normalized_query": normalized_query,
-        "expanded_query": normalized_query_payload["expanded_query"],
-        "query_tokens": query_tokens,
-        "intent": query_intent,
-        "reading_depth": reading_depth,
-        "link_expansion": link_expansion,
-        "alias_hits": normalized_query_payload["alias_hits"],
-        "canonical_targets": normalized_query_payload["canonical_targets"],
-        "weights": {
-            "fields": QUERY_FIELD_WEIGHTS,
-            "intent_field_multipliers": QUERY_INTENT_FIELD_MULTIPLIERS,
-            "page_types": QUERY_PAGE_TYPE_WEIGHTS,
-            "page_status": QUERY_PAGE_STATUS_WEIGHTS,
-            "exact_match_max_boost": QUERY_EXACT_MATCH_MAX_BOOST,
-        },
-        "reading_depth_limits": {
-            "claim_limit": claim_limit,
-            "chunk_limit": chunk_limit,
-        },
-        "document_source": document_source,
-        "results": scored_results[:limit],
-        "summary": {
-            "candidate_page_count": len(documents),
-            "matched_page_count": len(scored_results),
-            "returned_page_count": min(limit, len(scored_results)),
-        },
-    }
+    return query_cli_component.build_query_payload(
+        build_query_cli_deps(),
+        target=target,
+        query_text=query_text,
+        limit=limit,
+        claim_limit=claim_limit,
+        chunk_limit=chunk_limit,
+        reading_depth=reading_depth,
+        intent=intent,
+        link_expansion=link_expansion,
+    )
 
 
 def command_query(args: argparse.Namespace) -> CommandResult:
-    # query 的 V1 目标是“先给出靠谱候选页 + 可解释排序原因”，而不是直接替用户写答案。
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
-    if reading_depth not in QUERY_READING_DEPTH_LIMITS:
-        reading_depth = "standard"
-    link_expansion = str(getattr(args, "link_expansion", "auto") or "auto").strip().lower()
-    if link_expansion not in QUERY_LINK_EXPANSION_CHOICES:
-        link_expansion = "auto"
-    depth_limits = QUERY_READING_DEPTH_LIMITS[reading_depth]
-    claim_limit = args.claim_limit if getattr(args, "claim_limit", None) is not None else depth_limits["claim_limit"]
-    chunk_limit = args.chunk_limit if getattr(args, "chunk_limit", None) is not None else depth_limits["chunk_limit"]
-    payload = build_query_payload(
-        target=target,
-        query_text=args.text,
-        limit=args.limit,
-        claim_limit=claim_limit,
-        chunk_limit=chunk_limit,
-        reading_depth=reading_depth,
-        intent=getattr(args, "intent", None),
-        link_expansion=link_expansion,
-    )
-    if getattr(args, "answer_ready", False):
-        answer_ready_payload = build_answer_ready_payload(payload)
-        answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
-        if answer_ready_format == "prompt":
-            answer_ready_payload["prompt_text"] = render_answer_ready_prompt(answer_ready_payload)
-        elif answer_ready_format == "messages":
-            answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
-        elif answer_ready_format == "chatml":
-            answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
-            answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
-        if args.json:
-            return CommandResult(
-                payload=answer_ready_payload,
-                message=render_workspace_summary_message(
-                    "Answer-ready query completed.",
-                    target_dir=target,
-                    extra_lines=[
-                        f"Query: {payload['query']}",
-                        f"Intent: {payload['intent']}",
-                        (
-                            "Summary: "
-                            f"candidates={payload['summary']['candidate_page_count']}, "
-                            f"matched={payload['summary']['matched_page_count']}, "
-                            f"returned={payload['summary']['returned_page_count']}"
-                        ),
-                    ],
-                ),
-            )
-        if answer_ready_format == "prompt":
-            return CommandResult(
-                payload=answer_ready_payload,
-                message=answer_ready_payload["prompt_text"],
-            )
-        if answer_ready_format == "messages":
-            return CommandResult(
-                payload=answer_ready_payload,
-                message=json.dumps(answer_ready_payload["messages"], ensure_ascii=False, indent=2),
-            )
-        if answer_ready_format == "chatml":
-            return CommandResult(
-                payload=answer_ready_payload,
-                message=answer_ready_payload["chatml_text"],
-            )
-        return CommandResult(
-            payload=answer_ready_payload,
-            message=render_workspace_summary_message(
-                "Answer-ready query completed.",
-                target_dir=target,
-                extra_lines=[
-                    f"Query: {payload['query']}",
-                    f"Intent: {payload['intent']}",
-                    "",
-                    render_answer_ready_message(answer_ready_payload),
-                ],
-            ),
-        )
-
-    if args.json:
-        return CommandResult(
-            payload=payload,
-            message=render_workspace_summary_message(
-                "Query completed.",
-                target_dir=target,
-                extra_lines=[
-                    f"Query: {payload['query']}",
-                    f"Intent: {payload['intent']}",
-                    (
-                        "Summary: "
-                        f"candidates={payload['summary']['candidate_page_count']}, "
-                        f"matched={payload['summary']['matched_page_count']}, "
-                        f"returned={payload['summary']['returned_page_count']}"
-                    ),
-                ],
-            ),
-        )
-
-    if not payload["results"]:
-        return CommandResult(
-            payload=payload,
-            message=render_workspace_summary_message(
-                f"No wiki results matched query: {args.text}",
-                target_dir=target,
-                extra_lines=[
-                    f"Intent: {payload['intent']}",
-                    (
-                        "Summary: "
-                        f"candidates={payload['summary']['candidate_page_count']}, "
-                        f"matched={payload['summary']['matched_page_count']}, "
-                        f"returned={payload['summary']['returned_page_count']}"
-                    ),
-                ],
-            ),
-        )
-
-    lines = [
-        render_workspace_summary_message(
-            "Query completed.",
-            target_dir=target,
-            extra_lines=[
-                f'Query: {payload["query"]}',
-                f'Normalized: {payload["normalized_query"]}',
-                f'Expanded: {payload["expanded_query"]}',
-                f'Intent: {payload["intent"]}',
-                (
-                    "Summary: "
-                    f"candidates={payload['summary']['candidate_page_count']}, "
-                    f"matched={payload['summary']['matched_page_count']}, "
-                    f"returned={payload['summary']['returned_page_count']}"
-                ),
-                "",
-                "Top Results:",
-            ],
-        )
-    ]
-    for index, result in enumerate(payload["results"], start=1):
-        lines.append(
-            f"{index}. {result['title']} [{result['type']}, status={result['status']}, score={result['score']:.4f}]"
-        )
-        lines.append(f"   path: {result['page_path']}")
-        lines.append(f"   summary: {result['summary']}")
-        if result["field_scores"]:
-            explanation = ", ".join(
-                f"{field}={score:.3f}"
-                for field, score in sorted(result["field_scores"].items(), key=lambda item: item[1], reverse=True)
-            )
-            lines.append(f"   field_scores: {explanation}")
-        if result.get("exact_match_reasons"):
-            lines.append(
-                f"   exact_match_boost: {result['exact_match_boost']:.3f} ({'/'.join(result['exact_match_reasons'])})"
-            )
-        if result.get("intent_boost_reason"):
-            lines.append(
-                f"   intent_boost: {result['intent_boost']:.3f} ({result['intent_boost_reason']})"
-            )
-        if result["field_hits"]:
-            hit_explanation = ", ".join(
-                f"{field}:{'/'.join(tokens)}"
-                for field, tokens in result["field_hits"].items()
-                if tokens
-            )
-            if hit_explanation:
-                lines.append(f"   hits: {hit_explanation}")
-        reading_pack = result.get("reading_pack", {})
-        hierarchy_hits = reading_pack.get("retrieval_context", {}).get("hierarchy_hits", [])
-        hierarchy_paths = reading_pack.get("retrieval_context", {}).get("hierarchy_paths", [])
-        hierarchy_anchor_reason = reading_pack.get("retrieval_context", {}).get("hierarchy_anchor_reason")
-        hierarchy_anchor_reason_text = reading_pack.get("retrieval_context", {}).get("hierarchy_anchor_reason_text")
-        if hierarchy_hits or hierarchy_paths:
-            hierarchy_explanation_parts = []
-            if hierarchy_hits:
-                hierarchy_explanation_parts.append(f"hits={'/'.join(hierarchy_hits)}")
-            if hierarchy_paths:
-                hierarchy_explanation_parts.append(f"paths={' | '.join(hierarchy_paths)}")
-            if hierarchy_anchor_reason_text:
-                hierarchy_explanation_parts.append(f"reason={hierarchy_anchor_reason_text}")
-            elif hierarchy_anchor_reason:
-                hierarchy_explanation_parts.append(f"reason={hierarchy_anchor_reason}")
-            lines.append(f"   hierarchy: {'; '.join(hierarchy_explanation_parts)}")
-        matched_claims = reading_pack.get("matched_claims", [])
-        matched_chunks = reading_pack.get("matched_chunks", [])
-        if matched_claims:
-            lines.append("   matched_claims:")
-            for claim in matched_claims:
-                lines.append(
-                    f"     - {claim['claim_id']} {format_claim_type_label(claim.get('claim_type'))} "
-                    f"{claim['text']} (hits={'/'.join(claim.get('matched_tokens', []))})"
-                )
-        if matched_chunks:
-            lines.append("   matched_chunks:")
-            for chunk in matched_chunks:
-                lines.append(
-                    f"     - {chunk['chunk_id']} {chunk['section_path']} "
-                    f"(lines {chunk['start_line']}-{chunk['end_line']}, hits={'/'.join(chunk.get('matched_tokens', []))})"
-                )
-                lines.append(
-                    f"       prev={chunk.get('previous_chunk')} next={chunk.get('next_chunk')}"
-                )
-        source_trail = reading_pack.get("source_trail", [])
-        if source_trail:
-            lines.append("   source_trail:")
-            for source in source_trail:
-                lines.append(
-                    f"     - {source['source_id']} "
-                    f"(claims={len(source.get('claim_ids', []))}, chunks={len(source.get('chunk_ids', []))}) "
-                    f"{source.get('source_path')}"
-                )
-    return CommandResult(payload=payload, message="\n".join(lines))
+    return query_cli_component.command_query(build_query_cli_deps(), args)
 
 
 def command_answer_query(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    reading_depth = str(getattr(args, "reading_depth", "standard") or "standard").strip().lower()
-    if reading_depth not in QUERY_READING_DEPTH_LIMITS:
-        reading_depth = "standard"
-    link_expansion = str(getattr(args, "link_expansion", "auto") or "auto").strip().lower()
-    if link_expansion not in QUERY_LINK_EXPANSION_CHOICES:
-        link_expansion = "auto"
-    depth_limits = QUERY_READING_DEPTH_LIMITS[reading_depth]
-    claim_limit = args.claim_limit if getattr(args, "claim_limit", None) is not None else depth_limits["claim_limit"]
-    chunk_limit = args.chunk_limit if getattr(args, "chunk_limit", None) is not None else depth_limits["chunk_limit"]
-    query_payload = build_query_payload(
-        target=target,
-        query_text=args.text,
-        limit=args.limit,
-        claim_limit=claim_limit,
-        chunk_limit=chunk_limit,
-        reading_depth=reading_depth,
-        intent=getattr(args, "intent", None),
-        link_expansion=link_expansion,
+    return query_cli_component.command_answer_query(build_query_cli_deps(), args)
+
+
+def build_query_cli_deps() -> QueryCliDeps:
+    return QueryCliDeps(
+        provider=sys.modules[__name__],
+        ensure_workspace_schema_supported=ensure_workspace_schema_supported,
+        render_workspace_summary_message=render_workspace_summary_message,
+        render_answer_ready_message=render_answer_ready_message,
+        format_claim_type_label=format_claim_type_label,
+        reading_depth_limits=QUERY_READING_DEPTH_LIMITS,
+        link_expansion_choices=QUERY_LINK_EXPANSION_CHOICES,
+        build_query_payload=build_query_payload,
+        build_answer_ready_payload=build_answer_ready_payload,
+        render_answer_ready_prompt=render_answer_ready_prompt,
+        build_answer_ready_messages=build_answer_ready_messages,
+        render_answer_ready_chatml=render_answer_ready_chatml,
     )
-    answer_ready_payload = build_answer_ready_payload(query_payload)
-    answer_ready_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
-    if answer_ready_format == "prompt":
-        answer_ready_payload["prompt_text"] = render_answer_ready_prompt(answer_ready_payload)
-    elif answer_ready_format == "messages":
-        answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
-    elif answer_ready_format == "chatml":
-        answer_ready_payload["messages"] = build_answer_ready_messages(answer_ready_payload)
-        answer_ready_payload["chatml_text"] = render_answer_ready_chatml(answer_ready_payload)
-    if args.json:
-        return CommandResult(
-            payload=answer_ready_payload,
-            message=render_workspace_summary_message(
-                "Answer-ready query completed.",
-                target_dir=target,
-                extra_lines=[
-                    f"Query: {query_payload['query']}",
-                    f"Intent: {query_payload['intent']}",
-                    (
-                        "Summary: "
-                        f"candidates={query_payload['summary']['candidate_page_count']}, "
-                        f"matched={query_payload['summary']['matched_page_count']}, "
-                        f"returned={query_payload['summary']['returned_page_count']}"
-                    ),
-                ],
+
+
+def build_review_cli_deps() -> ReviewCliDeps:
+    return ReviewCliDeps(
+        ensure_workspace_schema_supported=ensure_workspace_schema_supported,
+        load_claim_state_maps=load_claim_state_maps,
+        load_review_state_maps=load_review_state_maps,
+        build_claim_lookup_by_any_id=build_claim_lookup_by_any_id,
+        refresh_alias_conflict_reviews=refresh_alias_conflict_reviews,
+        persist_ordered_review_state=lambda workspace_target, live_reviews_by_id, historical_reviews_by_id: repo_persist_ordered_review_state(
+            workspace_target,
+            live_reviews_by_id=live_reviews_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+            build_ordered_review_state_records=build_ordered_review_state_records,
+            persist_review_records=lambda target_for_repo, review_records: repo_persist_review_records(
+                target_for_repo,
+                review_records=review_records,
+                write_jsonl=write_jsonl,
+                write_review_file=write_review_file,
             ),
-        )
-    if answer_ready_format == "prompt":
-        return CommandResult(
-            payload=answer_ready_payload,
-            message=answer_ready_payload["prompt_text"],
-        )
-    if answer_ready_format == "messages":
-        return CommandResult(
-            payload=answer_ready_payload,
-            message=json.dumps(answer_ready_payload["messages"], ensure_ascii=False, indent=2),
-        )
-    if answer_ready_format == "chatml":
-        return CommandResult(
-            payload=answer_ready_payload,
-            message=answer_ready_payload["chatml_text"],
-        )
-    return CommandResult(
-        payload=answer_ready_payload,
-        message=render_workspace_summary_message(
-            "Answer-ready query completed.",
-            target_dir=target,
-            extra_lines=[
-                f"Query: {query_payload['query']}",
-                f"Intent: {query_payload['intent']}",
-                "",
-                render_answer_ready_message(answer_ready_payload),
-            ],
         ),
-    )
-
-
-def build_review_list_payload(target: Path, status_filter: str | None = None) -> dict:
-    live_reviews_by_id, historical_reviews_by_id, all_review_records = load_review_state_maps(target)
-    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
-    claim_lookup = build_claim_lookup_by_any_id(live_claims_by_id, historical_claims_by_id)
-    refresh_alias_conflict_reviews(
-        target=target,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    all_review_records = build_ordered_review_state_records(
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    write_jsonl(target / "state" / "reviews.jsonl", all_review_records)
-    for review_record in all_review_records:
-        write_review_file(target, review_record)
-    cleanup_superseded_record_files(
-        target=target,
-        historical_claims_by_id=historical_claims_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-
-    review_records = all_review_records
-    if status_filter:
-        review_records = [
-            record for record in review_records
-            if record.get("status") == status_filter
-        ]
-    else:
-        review_records = [
-            record for record in review_records
-            if record.get("lifecycle_status") == "active" and record.get("status") == "open"
-        ]
-
-    items = []
-    for review_record in sorted(
-        review_records,
-        key=lambda item: (
-            1 if item.get("lifecycle_status") == "active" else 0,
-            1 if item.get("status") == "open" else 0,
-            item.get("created_at", ""),
-            review_display_id(item),
+        persist_ordered_claim_state=lambda workspace_target, live_claims_by_id, historical_claims_by_id: repo_persist_ordered_claim_state(
+            workspace_target,
+            live_claims_by_id=live_claims_by_id,
+            historical_claims_by_id=historical_claims_by_id,
+            build_ordered_claim_state_records=build_ordered_claim_state_records,
+            persist_claim_records=lambda target_for_repo, claim_records: repo_persist_claim_records(
+                target_for_repo,
+                claim_records=claim_records,
+                write_jsonl=write_jsonl,
+                write_claim_file=write_claim_file,
+            ),
         ),
-        reverse=True,
-    ):
-        candidate_claims = []
-        for claim_id in review_record.get("candidate_claim_ids", []):
-            claim_record = claim_lookup.get(claim_id)
-            if claim_record is None:
-                continue
-            candidate_claims.append({
-                "claim_id": claim_id,
-                "display_id": claim_display_id(claim_record),
-                "lifecycle_status": claim_record.get("lifecycle_status"),
-                "status": claim_record.get("status"),
-                "text": claim_record.get("text", ""),
-                "source_count": len(claim_record.get("source_ids", [])),
-                "page_count": len(claim_record.get("page_ids", [])),
-            })
-
-        items.append({
-            "review_id": review_display_id(review_record),
-            "state_review_id": review_record["review_id"],
-            "display_id": review_display_id(review_record),
-            "kind": review_record.get("kind"),
-            "status": review_record.get("status"),
-            "lifecycle_status": review_record.get("lifecycle_status"),
-            "reason": review_record.get("reason"),
-            "recommended_action": review_record.get("recommended_action"),
-            "allowed_actions": review_record.get("allowed_actions", []),
-            "candidate_page_ids": review_record.get("candidate_page_ids", []),
-            "candidate_claims": candidate_claims,
-            "created_at": review_record.get("created_at"),
-            "resolved_at": review_record.get("resolved_at"),
-            "archived_at": review_record.get("archived_at"),
-        })
-
-    return {
-        "workspace": str(target),
-        "workspace_summary": build_workspace_summary(target),
-        "items": items,
-        "summary": {
-            "review_count": len(items),
-            "live_review_count": len(live_reviews_by_id),
-            "historical_review_count": len(historical_reviews_by_id),
-        },
-    }
+        cleanup_review_related_record_files=lambda workspace_target, historical_claims_by_id, historical_reviews_by_id: repo_cleanup_review_related_record_files(
+            workspace_target,
+            historical_claims_by_id=historical_claims_by_id,
+            historical_reviews_by_id=historical_reviews_by_id,
+            cleanup_superseded_record_files=cleanup_superseded_record_files,
+        ),
+        review_display_id=review_display_id,
+        claim_display_id=claim_display_id,
+        apply_review_action=apply_review_action,
+        build_ordered_claim_state_records=build_ordered_claim_state_records,
+        rebuild_review_affected_pages=rebuild_review_affected_pages,
+        build_workspace_summary=build_workspace_summary,
+        render_workspace_summary_message=render_workspace_summary_message,
+        load_workspace_config=load_workspace_config,
+        load_automation_target_config=load_automation_target_config,
+        propose_review_auto_action=propose_review_auto_action,
+        is_actionable_review_record=is_actionable_review_record,
+        claim_record_is_safe_auto_stable_candidate=claim_record_is_safe_auto_stable_candidate,
+        maybe_get_agent_assisted_stable_promotion=maybe_get_agent_assisted_stable_promotion,
+        utc_now_iso=utc_now_iso,
+        build_review_auto_escalation_entry=build_review_auto_escalation_entry,
+        build_review_auto_agent_handoff=build_review_auto_agent_handoff,
+        review_auto_handoff_contract_version=REVIEW_AUTO_HANDOFF_CONTRACT_VERSION,
+        render_review_auto_prompt=render_review_auto_prompt,
+        build_review_auto_messages=build_review_auto_messages,
+        render_review_auto_chatml=render_review_auto_chatml,
+        render_review_auto_message=render_review_auto_message,
+    )
 
 
 def command_review_list(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    payload = build_review_list_payload(target, status_filter=args.status)
-    if args.json:
-        return CommandResult(
-            payload=payload,
-            message=render_workspace_summary_message(
-                "Review list completed.",
-                target_dir=target,
-                extra_lines=[
-                    f"Status filter: {args.status or 'all'}",
-                    (
-                        "Summary: "
-                        f"reviews={payload['summary']['review_count']}, "
-                        f"live={payload['summary']['live_review_count']}, "
-                        f"historical={payload['summary']['historical_review_count']}"
-                    ),
-                ],
-            ),
-        )
-
-    lines = [
-        render_workspace_summary_message(
-            "Review list completed.",
-            target_dir=target,
-            extra_lines=[
-                f"Status filter: {args.status or 'all'}",
-                (
-                    "Summary: "
-                    f"reviews={payload['summary']['review_count']}, "
-                    f"live={payload['summary']['live_review_count']}, "
-                    f"historical={payload['summary']['historical_review_count']}"
-                ),
-                "",
-                "Review Items:",
-            ],
-        )
-    ]
-    for index, item in enumerate(payload["items"], start=1):
-        lines.append(
-            f"{index}. {item['display_id']} [{item['kind']}, status={item['status']}, lifecycle={item['lifecycle_status']}]"
-        )
-        lines.append(f"   reason: {item['reason']}")
-        lines.append(f"   recommended: {item['recommended_action']}")
-        lines.append(f"   allowed: {', '.join(item['allowed_actions'])}")
-        for claim in item["candidate_claims"][:4]:
-            lines.append(
-                f"   - {claim['display_id']} [{claim['lifecycle_status']}/{claim['status']}] {claim['text']}"
-            )
-    if len(lines) == 1:
-        lines.append("No review items found.")
-    return CommandResult(payload=payload, message="\n".join(lines))
+    return review_cli_component.command_review_list(build_review_cli_deps(), args)
 
 
 def choose_auto_merge_primary_claim_id(candidate_claim_ids: list[str], live_claims_by_id: dict[str, dict]) -> str | None:
@@ -12173,68 +8497,15 @@ def build_review_auto_decision_payload(
     live_claims_by_id: dict[str, dict],
     target: Path,
 ) -> dict:
-    candidate_claims = []
-    for claim_id in review_record.get("candidate_claim_ids", []):
-        claim_record = live_claims_by_id.get(claim_id)
-        if claim_record is None:
-            continue
-        candidate_claims.append({
-            "claim_id": claim_id,
-            "text": claim_record.get("text", ""),
-            "status": claim_record.get("status"),
-            "claim_type": claim_record.get("claim_type"),
-            "source_count": len(set(claim_record.get("source_ids", []))),
-            "source_ref_count": len(claim_record.get("source_refs", [])),
-            "duplicate_candidates": claim_record.get("duplicate_candidates", []),
-            "conflict_group": claim_record.get("conflict_group"),
-        })
-    payload = {
-        "task": "review_auto_decision",
-        "review": {
-            "review_id": review_record.get("review_id"),
-            "kind": review_record.get("kind"),
-            "reason": review_record.get("reason"),
-            "recommended_action": review_record.get("recommended_action"),
-            "allowed_actions": review_record.get("allowed_actions", []),
-            "candidate_claim_ids": review_record.get("candidate_claim_ids", []),
-            "candidate_page_ids": review_record.get("candidate_page_ids", []),
-            "evidence": review_record.get("evidence", []),
-        },
-        "candidate_claims": candidate_claims,
-        "candidate_pages": [],
-    }
-    candidate_page_ids = review_record.get("candidate_page_ids", [])
-    if candidate_page_ids:
-        pages_path = target / "state" / "pages.jsonl"
-        if pages_path.exists():
-            page_records = [
-                ensure_page_lifecycle_defaults(record)
-                for record in load_jsonl(pages_path)
-            ]
-            page_lookup = {record.get("page_id"): record for record in page_records}
-            for page_id in candidate_page_ids:
-                page_record = page_lookup.get(page_id)
-                if page_record is None:
-                    continue
-                payload["candidate_pages"].append({
-                    "page_id": page_id,
-                    "canonical_id": page_record.get("canonical_id") or page_id,
-                    "title": page_record.get("title", ""),
-                    "aliases": page_record.get("aliases", []),
-                    "type": page_record.get("type"),
-                    "status": page_record.get("status"),
-                })
-    if review_record.get("kind") == "alias_conflict":
-        evidence = review_record.get("evidence", [])
-        alias_value = str(evidence[0].get("alias", "")).strip() if evidence else ""
-        alias_index = load_alias_index(target)
-        alias_matches = alias_index_matches_for_value(alias_index, alias_value) if alias_value else []
-        payload["alias_conflict_context"] = {
-            "alias_value": alias_value,
-            "canonical_ids": evidence[0].get("canonical_ids", []) if evidence else [],
-            "matched_pages": alias_matches,
-        }
-    return payload
+    return build_review_auto_decision_payload_helper(
+        review_record,
+        live_claims_by_id,
+        target,
+        ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+        load_jsonl=load_jsonl,
+        load_alias_index=load_alias_index,
+        alias_index_matches_for_value=alias_index_matches_for_value,
+    )
 
 
 def normalize_review_auto_hook_plan(
@@ -12244,60 +8515,15 @@ def normalize_review_auto_hook_plan(
     live_claims_by_id: dict[str, dict],
     min_confidence: float,
 ) -> dict | None:
-    decision = str(hook_result.get("decision", "")).strip().lower()
-    if decision != "auto_apply":
-        return None
-
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
-    if confidence < min_confidence:
-        return None
-
-    action = str(hook_result.get("action", "")).strip()
-    allowed_actions = set(review_record.get("allowed_actions", []))
-    if action not in allowed_actions:
-        return None
-
-    candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
-    candidate_page_ids = list(review_record.get("candidate_page_ids", []))
-    plan = dict(base_plan)
-    plan.update({
-        "decision": "auto_apply",
-        "action": action,
-        "reason": str(hook_result.get("reason", "agent_hook_auto_apply")).strip() or "agent_hook_auto_apply",
-        "confidence": confidence,
-    })
-
-    if action in {"merge", "archive_one"}:
-        primary_claim_id = str(hook_result.get("primary_claim_id", "")).strip()
-        if primary_claim_id not in candidate_claim_ids:
-            return None
-        plan["primary_claim_id"] = primary_claim_id
-        if action == "merge":
-            secondary_claim_id = str(hook_result.get("secondary_claim_id", "")).strip()
-            if secondary_claim_id not in candidate_claim_ids or secondary_claim_id == primary_claim_id:
-                ranked_primary = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
-                if ranked_primary is None:
-                    return None
-                primary_claim_id = ranked_primary
-                secondary_claim_id = next(
-                    claim_id for claim_id in candidate_claim_ids
-                    if claim_id != primary_claim_id
-                )
-                plan["primary_claim_id"] = primary_claim_id
-            plan["secondary_claim_id"] = secondary_claim_id
-    elif action in {"assign_alias", "remove_alias"}:
-        primary_page_id = str(hook_result.get("primary_page_id", "")).strip()
-        if primary_page_id not in candidate_page_ids:
-            return None
-        alias_value = str(hook_result.get("alias_value", "")).strip()
-        if not alias_value:
-            evidence = review_record.get("evidence", [])
-            alias_value = str(evidence[0].get("alias", "")).strip() if evidence else ""
-        if not alias_value:
-            return None
-        plan["primary_page_id"] = primary_page_id
-        plan["alias_value"] = alias_value
-    return plan
+    return normalize_review_auto_hook_plan_helper(
+        hook_result,
+        review_record,
+        base_plan,
+        live_claims_by_id,
+        min_confidence,
+        coerce_float=coerce_float,
+        choose_auto_merge_primary_claim_id=choose_auto_merge_primary_claim_id,
+    )
 
 
 def maybe_get_agent_assisted_review_plan(
@@ -12307,100 +8533,41 @@ def maybe_get_agent_assisted_review_plan(
     automation_config: dict,
     base_plan: dict,
 ) -> dict | None:
-    if not automation_config.get("enabled"):
-        return None
-
-    payload = build_review_auto_decision_payload(
-        review_record=review_record,
-        live_claims_by_id=live_claims_by_id,
-        target=target,
-    )
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=payload,
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
-    )
-    if hook_result is None:
-        return None
-
-    return normalize_review_auto_hook_plan(
-        hook_result=hook_result,
-        review_record=review_record,
-        base_plan=base_plan,
-        live_claims_by_id=live_claims_by_id,
-        min_confidence=automation_config.get("min_confidence", 0.8),
+    return maybe_get_agent_assisted_review_plan_helper(
+        target,
+        review_record,
+        live_claims_by_id,
+        automation_config,
+        base_plan,
+        build_review_auto_decision_payload=build_review_auto_decision_payload,
+        run_json_automation_command=run_json_automation_command,
+        normalize_review_auto_hook_plan=normalize_review_auto_hook_plan,
     )
 
 
 def review_action_plain_label(action: str) -> str:
-    labels = {
-        "merge": "合并成一条更清楚的结论",
-        "keep_both": "两条都保留",
-        "archive_one": "保留一条并归档另一条",
-        "edit_then_resume": "先手工修改再继续",
-        "assign_alias": "把别名指定给某个页面",
-        "remove_alias": "移除这个别名",
-    }
-    return labels.get(action, action)
+    return review_action_plain_label_helper(action)
 
 
 def claim_record_is_safe_auto_stable_candidate(
     claim_record: dict,
     live_reviews_by_id: dict[str, dict],
 ) -> tuple[bool, str | None]:
-    if claim_record.get("lifecycle_status") != "active":
-        return False, "claim_not_active"
-    if claim_record.get("status") != "draft":
-        return False, f"claim_status_is_{claim_record.get('status')}"
-    if not claim_record.get("source_ids") or not claim_record.get("source_refs"):
-        return False, "claim_missing_source_traceability"
-    active_review_ids = [
-        review_record["review_id"]
-        for review_record in live_reviews_by_id.values()
-        if is_actionable_review_record(review_record)
-        and claim_record["claim_id"] in review_record.get("candidate_claim_ids", [])
-    ]
-    if active_review_ids:
-        return False, "claim_still_attached_to_open_review"
-    if claim_record.get("duplicate_candidates"):
-        return False, "claim_still_has_duplicate_candidates"
-    if claim_record.get("conflict_group"):
-        return False, "claim_still_has_conflict_group"
-    cleaned_text = clean_claim_candidate_text(claim_record.get("text", ""))
-    if claim_candidate_is_noise(cleaned_text):
-        return False, "claim_text_is_noise"
-    if claim_starts_with_dependent_prefix(cleaned_text):
-        return False, "claim_text_is_dependent_fragment"
-    if text_is_question_like(cleaned_text):
-        return False, "claim_text_is_question_like"
-    quality_label = str(claim_record.get("quality_label") or "").strip().lower()
-    if quality_label in {"noise", "fragment", "title_shell"}:
-        return False, f"claim_quality_label_is_{quality_label}"
-    if claim_candidate_has_short_gray_zone(cleaned_text):
-        if claim_record.get("quality_safe_auto_ready") is True:
-            return True, "semantic_quality_marked_short_claim_safe_auto_ready"
-        return False, "short_claim_requires_semantic_quality_clearance"
-    if not claim_can_stand_alone(cleaned_text) and claim_record.get("claim_type") != "definition":
-        return False, "claim_text_not_standalone_enough"
-    return True, None
+    return claim_record_is_safe_auto_stable_candidate_helper(
+        claim_record,
+        live_reviews_by_id,
+        is_actionable_review_record=is_actionable_review_record,
+        clean_claim_candidate_text=clean_claim_candidate_text,
+        claim_candidate_is_noise=claim_candidate_is_noise,
+        claim_starts_with_dependent_prefix=claim_starts_with_dependent_prefix,
+        text_is_question_like=text_is_question_like,
+        claim_candidate_has_short_gray_zone=claim_candidate_has_short_gray_zone,
+        claim_can_stand_alone=claim_can_stand_alone,
+    )
 
 
 def build_stable_promotion_payload(claim_record: dict) -> dict:
-    return {
-        "task": "claim_stable_promotion",
-        "claim": {
-            "claim_id": claim_record.get("claim_id"),
-            "text": claim_record.get("text", ""),
-            "status": claim_record.get("status"),
-            "claim_type": claim_record.get("claim_type"),
-            "source_ids": claim_record.get("source_ids", []),
-            "source_refs": claim_record.get("source_refs", []),
-            "duplicate_candidates": claim_record.get("duplicate_candidates", []),
-            "conflict_group": claim_record.get("conflict_group"),
-            "page_ids": claim_record.get("page_ids", []),
-        },
-    }
+    return build_stable_promotion_payload_helper(claim_record)
 
 
 def maybe_get_agent_assisted_stable_promotion(
@@ -12408,24 +8575,14 @@ def maybe_get_agent_assisted_stable_promotion(
     claim_record: dict,
     automation_config: dict,
 ) -> tuple[bool, str | None]:
-    if not automation_config.get("enabled"):
-        return False, None
-
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=build_stable_promotion_payload(claim_record),
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
+    return maybe_get_agent_assisted_stable_promotion_helper(
+        target,
+        claim_record,
+        automation_config,
+        run_json_automation_command=run_json_automation_command,
+        build_stable_promotion_payload=build_stable_promotion_payload,
+        coerce_float=coerce_float,
     )
-    if hook_result is None:
-        return False, None
-
-    decision = str(hook_result.get("decision", "")).strip().lower()
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
-    if decision != "promote" or confidence < automation_config.get("min_confidence", 0.8):
-        return False, None
-    reason = str(hook_result.get("reason", "agent_hook_promoted_to_stable")).strip() or "agent_hook_promoted_to_stable"
-    return True, reason
 
 
 def build_review_auto_escalation_entry(
@@ -12433,63 +8590,12 @@ def build_review_auto_escalation_entry(
     plan: dict,
     live_claims_by_id: dict[str, dict],
 ) -> dict:
-    candidate_claims = []
-    for claim_id in review_record.get("candidate_claim_ids", [])[:3]:
-        claim_record = live_claims_by_id.get(claim_id)
-        if claim_record is None:
-            continue
-        candidate_claims.append({
-            "claim_id": claim_id,
-            "text": claim_record.get("text", ""),
-            "status": claim_record.get("status"),
-            "source_count": len(claim_record.get("source_ids", [])),
-        })
-
-    choice_options = [
-        {
-            "action": action,
-            "label": review_action_plain_label(action),
-            "is_recommended": action == review_record.get("recommended_action"),
-        }
-        for action in review_record.get("allowed_actions", [])
-    ]
-
-    if review_record.get("kind") == "alias_conflict":
-        evidence = review_record.get("evidence", [])
-        alias_value = evidence[0].get("alias") if evidence else None
-        issue_summary = (
-            f"别名 `{alias_value}` 同时指向多个页面，当前还不能安全地自动决定归属。"
-            if alias_value
-            else "有一个别名同时指向多个页面，当前还不能安全地自动决定归属。"
-        )
-    elif review_record.get("kind") == "claim_duplicate":
-        issue_summary = "这组 claim 可能在说同一件事，但当前仍需要人确认是否真的该合并。"
-    else:
-        issue_summary = "这条 review 超出了当前保守自动规则，需要人进一步判断。"
-
-    if plan.get("reason") == "alias_conflict_needs_human_owner_choice":
-        why_human_needed = "多个页面都可能拥有这个 alias，自动分配存在误伤风险。"
-    elif plan.get("reason") == "duplicate_review_needs_human_merge_choice":
-        why_human_needed = "候选 claim 不止两条，或主次关系不够明确，自动合并风险偏高。"
-    else:
-        why_human_needed = "当前证据还不足以支持保守自动裁决。"
-
-    entry = {
-        "review_id": review_record["review_id"],
-        "display_id": review_display_id(review_record),
-        "kind": review_record.get("kind"),
-        "issue_summary": issue_summary,
-        "why_human_needed": why_human_needed,
-        "recommended_action": review_record.get("recommended_action"),
-        "choice_options": choice_options,
-        "candidate_claims": candidate_claims,
-        "candidate_page_ids": review_record.get("candidate_page_ids", []),
-        "suggested_user_prompt": (
-            f"请帮我判断审核单 {review_display_id(review_record)}。"
-            "如果你已经知道怎么处理，可以直接告诉我保留、合并、归档，或先手工修改再继续。"
-        ),
-    }
-    return entry
+    return build_review_auto_escalation_entry_helper(
+        review_record,
+        plan,
+        live_claims_by_id,
+        review_display_id=review_display_id,
+    )
 
 
 def build_review_auto_agent_handoff(
@@ -12499,178 +8605,33 @@ def build_review_auto_agent_handoff(
     review_automation_config: dict,
     stable_automation_config: dict,
 ) -> tuple[dict, str]:
-    should_ask_user = bool(escalated_entries)
-    next_action = (
-        "ask_user_to_decide_escalated_reviews"
-        if should_ask_user
-        else "continue_with_normal_workflow"
+    return build_review_auto_agent_handoff_helper(
+        auto_apply_plans,
+        escalated_entries,
+        promoted_claims,
+        review_automation_config,
+        stable_automation_config,
     )
-    agent_brief = {
-        "mode": "needs_user_decision" if should_ask_user else "auto_resolved_all_safe_reviews",
-        "should_ask_user": should_ask_user,
-        "next_action": next_action,
-        "auto_apply_review_count": len(auto_apply_plans),
-        "escalated_review_count": len(escalated_entries),
-        "promoted_claim_count": len(promoted_claims),
-        "review_auto_strategy": review_automation_config.get("strategy"),
-        "stable_promotion_strategy": stable_automation_config.get("strategy"),
-    }
-    if should_ask_user:
-        first_item = escalated_entries[0]
-        agent_summary = (
-            f"已自动处理 {len(auto_apply_plans)} 条高把握 review"
-            f"（review_auto={review_automation_config.get('strategy')}），"
-            f"但还有 {len(escalated_entries)} 条需要用户判断。"
-            f"优先向用户解释 `{first_item['display_id']}`：{first_item['issue_summary']}"
-        )
-    else:
-        agent_summary = (
-            f"本轮高把握 review 已全部自动收口，共处理 {len(auto_apply_plans)} 条，"
-            f"并额外提升了 {len(promoted_claims)} 条 claim 为 stable"
-            f"（stable_promotion={stable_automation_config.get('strategy')}）。"
-        )
-    return agent_brief, agent_summary
 
 
 def render_review_auto_message(review_auto_payload: dict) -> str:
-    lines = [
-        "Review Auto Summary:",
-        f"  dry_run: {review_auto_payload.get('dry_run')}",
-        (
-            "  counts: "
-            f"planned={review_auto_payload['summary']['planned_review_count']}, "
-            f"auto_apply={review_auto_payload['summary']['auto_apply_count']}, "
-            f"escalated={review_auto_payload['summary']['escalated_count']}, "
-            f"applied={review_auto_payload['summary']['applied_count']}, "
-            f"promoted_claims={review_auto_payload['summary']['promoted_claim_count']}"
-        ),
-        f"  next_action: {review_auto_payload.get('agent_brief', {}).get('next_action')}",
-        f"  agent_summary: {review_auto_payload.get('agent_summary', '')}",
-    ]
-    applied_actions = review_auto_payload.get("applied_actions", [])
-    if applied_actions:
-        lines.append("  applied_actions:")
-        for item in applied_actions[:5]:
-            lines.append(
-                f"    - {item.get('display_id')} [{item.get('kind')}] action={item.get('action')} reason={item.get('reason')}"
-            )
-    escalations = review_auto_payload.get("escalation_handoff", [])
-    if escalations:
-        lines.append("  escalations:")
-        for item in escalations[:5]:
-            lines.append(
-                f"    - {item.get('display_id')} [{item.get('kind')}] {item.get('issue_summary')}"
-            )
-            lines.append(f"      why_human_needed: {item.get('why_human_needed')}")
-    return "\n".join(lines)
+    return render_review_auto_message_helper(review_auto_payload)
 
 
 def render_review_auto_prompt(review_auto_payload: dict) -> str:
-    agent_brief = review_auto_payload.get("agent_brief", {})
-    lines = [
-        "You are the workflow layer for a MyAgentWiki review-auto handoff.",
-        "Use the handoff below to decide whether to continue automatically or ask the user for a focused review decision.",
-        "Do not invent review outcomes that are not supported by the handoff.",
-        "",
-        "## Review Auto Run",
-        f"- contract_version: {review_auto_payload.get('contract_version', '')}",
-        f"- dry_run: {review_auto_payload.get('dry_run')}",
-        f"- workspace: {review_auto_payload.get('workspace', '')}",
-        f"- planned_review_count: {review_auto_payload.get('summary', {}).get('planned_review_count')}",
-        f"- auto_apply_count: {review_auto_payload.get('summary', {}).get('auto_apply_count')}",
-        f"- escalated_count: {review_auto_payload.get('summary', {}).get('escalated_count')}",
-        f"- applied_count: {review_auto_payload.get('summary', {}).get('applied_count')}",
-        f"- promoted_claim_count: {review_auto_payload.get('summary', {}).get('promoted_claim_count')}",
-        "",
-        "## Agent Brief",
-        f"- mode: {agent_brief.get('mode')}",
-        f"- should_ask_user: {agent_brief.get('should_ask_user')}",
-        f"- next_action: {agent_brief.get('next_action')}",
-        f"- agent_summary: {review_auto_payload.get('agent_summary', '')}",
-        "",
-        "## Applied Actions",
-    ]
-    applied_actions = review_auto_payload.get("applied_actions", [])
-    if applied_actions:
-        for item in applied_actions:
-            lines.append(
-                f"- {item.get('display_id')}: kind={item.get('kind')} action={item.get('action')} "
-                f"reason={item.get('reason')} changed_claim_ids={','.join(item.get('changed_claim_ids', [])) or 'none'} "
-                f"changed_page_ids={','.join(item.get('changed_page_ids', [])) or 'none'}"
-            )
-    else:
-        lines.append("- none")
-    lines.extend([
-        "",
-        "## Escalations",
-    ])
-    escalations = review_auto_payload.get("escalation_handoff", [])
-    if escalations:
-        for item in escalations:
-            lines.append(
-                f"- {item.get('display_id')}: kind={item.get('kind')} issue={item.get('issue_summary')} "
-                f"why_human_needed={item.get('why_human_needed')} recommended_action={item.get('recommended_action')}"
-            )
-            if item.get("candidate_claims"):
-                for claim in item["candidate_claims"]:
-                    lines.append(
-                        f"  candidate_claim: {claim.get('claim_id')} status={claim.get('status')} "
-                        f"sources={claim.get('source_count')} text={claim.get('text')}"
-                    )
-            if item.get("candidate_page_ids"):
-                lines.append(f"  candidate_page_ids: {', '.join(item['candidate_page_ids'])}")
-            if item.get("choice_options"):
-                for option in item["choice_options"]:
-                    lines.append(
-                        f"  option: action={option.get('action')} label={option.get('label')} "
-                        f"recommended={option.get('is_recommended')}"
-                    )
-            lines.append(f"  suggested_user_prompt: {item.get('suggested_user_prompt')}")
-    else:
-        lines.append("- none")
-    lines.extend([
-        "",
-        "## Instruction",
-        "If `should_ask_user` is false, continue the broader workflow without asking the user to re-judge already resolved reviews.",
-        "If `should_ask_user` is true, ask only about the escalated reviews and explain the options in plain language.",
-        "Prefer the recommended action when presenting options, but make uncertainty explicit when the handoff says human judgment is needed.",
-    ])
-    return "\n".join(lines)
+    return render_review_auto_prompt_helper(review_auto_payload)
 
 
 def build_review_auto_messages(review_auto_payload: dict) -> list[dict]:
-    prompt_text = render_review_auto_prompt(review_auto_payload)
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are the workflow layer for a MyAgentWiki review-auto handoff. "
-                "Continue automatically when the handoff says it is safe, and ask the user only for escalated decisions."
-            ),
-        },
-        {
-            "role": "user",
-            "content": prompt_text,
-        },
-    ]
+    return build_review_auto_messages_helper(review_auto_payload)
 
 
 def render_review_auto_chatml(review_auto_payload: dict) -> str:
-    messages = build_review_auto_messages(review_auto_payload)
-    blocks = []
-    for message in messages:
-        blocks.append(f"<|im_start|>{message['role']}\n{message['content']}\n<|im_end|>")
-    return "\n".join(blocks)
+    return render_review_auto_chatml_helper(review_auto_payload)
 
 
 def run_post_ingest_review_auto(target: Path) -> dict:
-    review_auto_result = command_review_auto(argparse.Namespace(
-        target_dir=str(target),
-        dry_run=False,
-        format="summary",
-        json=True,
-    ))
-    return review_auto_result.payload
+    return review_cli_component.run_post_ingest_review_auto(build_review_cli_deps(), target)
 
 
 def render_post_ingest_review_auto_summary(review_auto_payload: dict | None) -> str | None:
@@ -12693,429 +8654,20 @@ def propose_review_auto_action(
     live_claims_by_id: dict[str, dict],
     automation_config: dict,
 ) -> dict:
-    review_id = review_record["review_id"]
-    kind = review_record.get("kind")
-    recommended_action = review_record.get("recommended_action")
-    allowed_actions = set(review_record.get("allowed_actions", []))
-
-    plan = {
-        "review_id": review_id,
-        "display_id": review_display_id(review_record),
-        "kind": kind,
-        "recommended_action": recommended_action,
-        "decision": "escalate",
-        "reason": "review_requires_human_judgment",
-        "action": None,
-        "primary_claim_id": None,
-        "secondary_claim_id": None,
-        "primary_page_id": None,
-        "alias_value": None,
-        "confidence": None,
-    }
-
-    if not is_actionable_review_record(review_record):
-        plan["reason"] = "review_not_actionable"
-        return plan
-
-    if kind == "alias_conflict":
-        evidence = review_record.get("evidence", [])
-        alias_value = evidence[0].get("alias") if evidence else None
-        candidate_page_ids = list(review_record.get("candidate_page_ids", []))
-        if (
-            recommended_action == "remove_alias"
-            and "remove_alias" in allowed_actions
-            and alias_value
-            and len(candidate_page_ids) >= 1
-        ):
-            plan.update({
-                "decision": "auto_apply",
-                "reason": "alias_conflict_can_safely_remove_shared_alias",
-                "action": "remove_alias",
-                "primary_page_id": candidate_page_ids[0],
-                "alias_value": alias_value,
-            })
-            return plan
-        if (
-            recommended_action == "assign_alias"
-            and "assign_alias" in allowed_actions
-            and alias_value
-            and len(candidate_page_ids) == 1
-        ):
-            plan.update({
-                "decision": "auto_apply",
-                "reason": "alias_conflict_has_single_candidate_owner",
-                "action": "assign_alias",
-                "primary_page_id": candidate_page_ids[0],
-                "alias_value": alias_value,
-            })
-            return plan
-        plan["reason"] = "alias_conflict_needs_human_owner_choice"
-        agent_plan = maybe_get_agent_assisted_review_plan(
-            target=target,
-            review_record=review_record,
-            live_claims_by_id=live_claims_by_id,
-            automation_config=automation_config,
-            base_plan=plan,
-        )
-        return agent_plan or plan
-
-    if kind == "claim_duplicate" and recommended_action == "merge" and "merge" in allowed_actions:
-        candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
-        primary_claim_id = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
-        if primary_claim_id is None:
-            plan["reason"] = "duplicate_review_needs_human_merge_choice"
-            agent_plan = maybe_get_agent_assisted_review_plan(
-                target=target,
-                review_record=review_record,
-                live_claims_by_id=live_claims_by_id,
-                automation_config=automation_config,
-                base_plan=plan,
-            )
-            return agent_plan or plan
-        secondary_claim_id = next(
-            claim_id for claim_id in candidate_claim_ids
-            if claim_id != primary_claim_id
-        )
-        plan.update({
-            "decision": "auto_apply",
-            "reason": "duplicate_review_has_safe_two_claim_merge",
-            "action": "merge",
-            "primary_claim_id": primary_claim_id,
-            "secondary_claim_id": secondary_claim_id,
-        })
-        return plan
-
-    if kind == "claim_conflict":
-        agent_plan = maybe_get_agent_assisted_review_plan(
-            target=target,
-            review_record=review_record,
-            live_claims_by_id=live_claims_by_id,
-            automation_config=automation_config,
-            base_plan=plan,
-        )
-        return agent_plan or plan
-
-    agent_plan = maybe_get_agent_assisted_review_plan(
-        target=target,
-        review_record=review_record,
-        live_claims_by_id=live_claims_by_id,
-        automation_config=automation_config,
-        base_plan=plan,
+    return propose_review_auto_action_helper(
+        target,
+        review_record,
+        live_claims_by_id,
+        automation_config,
+        review_display_id=review_display_id,
+        is_actionable_review_record=is_actionable_review_record,
+        maybe_get_agent_assisted_review_plan=maybe_get_agent_assisted_review_plan,
+        choose_auto_merge_primary_claim_id=choose_auto_merge_primary_claim_id,
     )
-    if agent_plan is not None:
-        return agent_plan
-    plan["reason"] = "review_kind_or_action_not_in_safe_auto_rules"
-    return plan
 
 
 def command_review_auto(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    claims_path = target / "state" / "claims.jsonl"
-    reviews_path = target / "state" / "reviews.jsonl"
-    config = load_workspace_config(target)
-    review_automation_config = load_automation_target_config(config, "review_auto")
-    stable_automation_config = load_automation_target_config(config, "stable_promotion")
-
-    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
-    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
-    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
-        target=target,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    if archived_alias_review_ids:
-        refreshed_review_state_records = build_ordered_review_state_records(
-            live_reviews_by_id=live_reviews_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-        write_jsonl(reviews_path, refreshed_review_state_records)
-        for review_state_record in refreshed_review_state_records:
-            write_review_file(target, review_state_record)
-        cleanup_superseded_record_files(
-            target=target,
-            historical_claims_by_id=historical_claims_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-
-    planned_actions = [
-        propose_review_auto_action(
-            target=target,
-            review_record=review_record,
-            live_claims_by_id=live_claims_by_id,
-            automation_config=review_automation_config,
-        )
-        for review_record in sorted(
-            live_reviews_by_id.values(),
-            key=lambda item: (item.get("created_at", ""), review_display_id(item)),
-        )
-        if is_actionable_review_record(review_record)
-    ]
-
-    auto_apply_plans = [item for item in planned_actions if item["decision"] == "auto_apply"]
-    escalated_plans = [item for item in planned_actions if item["decision"] != "auto_apply"]
-    applied_actions: list[dict] = []
-    promoted_claims: list[dict] = []
-
-    auto_apply_failures: list[dict] = []
-
-    if not args.dry_run:
-        for plan in auto_apply_plans:
-            review_record = live_reviews_by_id.get(plan["review_id"])
-            if review_record is None:
-                continue
-            current_plan = propose_review_auto_action(
-                target=target,
-                review_record=review_record,
-                live_claims_by_id=live_claims_by_id,
-                automation_config=review_automation_config,
-            )
-            if current_plan.get("decision") != "auto_apply":
-                continue
-            try:
-                result = apply_review_action(
-                    target=target,
-                    review_record=review_record,
-                    action=current_plan["action"],
-                    primary_claim_id=current_plan["primary_claim_id"],
-                    secondary_claim_id=current_plan["secondary_claim_id"],
-                    primary_page_id=current_plan["primary_page_id"],
-                    alias_value=current_plan["alias_value"],
-                    live_claims_by_id=live_claims_by_id,
-                    historical_claims_by_id=historical_claims_by_id,
-                    live_reviews_by_id=live_reviews_by_id,
-                    historical_reviews_by_id=historical_reviews_by_id,
-                )
-            except ValueError as exc:
-                auto_apply_failures.append({
-                    "review_id": current_plan["review_id"],
-                    "display_id": current_plan["display_id"],
-                    "kind": current_plan["kind"],
-                    "reason": "auto_apply_failed_validation",
-                    "validation_error": str(exc),
-                })
-                continue
-            live_reviews_by_id[review_record["review_id"]] = review_record
-            applied_actions.append({
-                "review_id": current_plan["review_id"],
-                "display_id": current_plan["display_id"],
-                "kind": current_plan["kind"],
-                "reason": current_plan["reason"],
-                "action": result.get("action"),
-                "changed_claim_ids": result.get("changed_claim_ids", []),
-                "changed_page_ids": result.get("changed_page_ids", []),
-            })
-
-        for claim_record in sorted(live_claims_by_id.values(), key=lambda item: item["claim_id"]):
-            is_safe, reason = claim_record_is_safe_auto_stable_candidate(claim_record, live_reviews_by_id)
-            if not is_safe:
-                promoted_by_hook, hook_reason = maybe_get_agent_assisted_stable_promotion(
-                    target=target,
-                    claim_record=claim_record,
-                    automation_config=stable_automation_config,
-                )
-                if not promoted_by_hook:
-                    continue
-                reason = hook_reason
-            claim_record["status"] = "stable"
-            claim_record["review_reason"] = None
-            claim_record["updated_at"] = utc_now_iso()
-            promoted_claims.append({
-                "claim_id": claim_record["claim_id"],
-                "reason": reason or "safe_auto_promoted_to_stable",
-            })
-
-        write_jsonl(
-            claims_path,
-            build_ordered_claim_state_records(
-                live_claims_by_id=live_claims_by_id,
-                historical_claims_by_id=historical_claims_by_id,
-            ),
-        )
-        for claim_record in [*live_claims_by_id.values(), *historical_claims_by_id.values()]:
-            write_claim_file(target, claim_record)
-
-        write_jsonl(
-            reviews_path,
-            build_ordered_review_state_records(
-                live_reviews_by_id=live_reviews_by_id,
-                historical_reviews_by_id=historical_reviews_by_id,
-            ),
-        )
-        for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
-            write_review_file(target, review_state_record)
-        cleanup_superseded_record_files(
-            target=target,
-            historical_claims_by_id=historical_claims_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-
-        rebuild_review_affected_pages(
-            target=target,
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-        _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
-            target=target,
-            live_reviews_by_id=live_reviews_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-        if archived_alias_review_ids:
-            write_jsonl(
-                reviews_path,
-                build_ordered_review_state_records(
-                    live_reviews_by_id=live_reviews_by_id,
-                    historical_reviews_by_id=historical_reviews_by_id,
-                ),
-            )
-            for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
-                write_review_file(target, review_state_record)
-            cleanup_superseded_record_files(
-                target=target,
-                historical_claims_by_id=historical_claims_by_id,
-                historical_reviews_by_id=historical_reviews_by_id,
-            )
-
-    failure_plan_by_review_id = {
-        item["review_id"]: item
-        for item in auto_apply_failures
-    }
-    final_escalated_plans = list(escalated_plans) + [
-        {
-            "review_id": item["review_id"],
-            "display_id": item["display_id"],
-            "kind": item["kind"],
-            "recommended_action": None,
-            "decision": "escalate",
-            "reason": item["reason"],
-            "action": None,
-            "primary_claim_id": None,
-            "secondary_claim_id": None,
-            "primary_page_id": None,
-            "alias_value": None,
-            "confidence": None,
-        }
-        for item in auto_apply_failures
-        if item["review_id"] in live_reviews_by_id
-    ]
-
-    escalated_entries = [
-        build_review_auto_escalation_entry(
-            review_record=live_reviews_by_id[plan["review_id"]],
-            plan=plan,
-            live_claims_by_id=live_claims_by_id,
-        )
-        for plan in final_escalated_plans
-        if plan["review_id"] in live_reviews_by_id
-    ]
-    for entry in escalated_entries:
-        failure_meta = failure_plan_by_review_id.get(entry["review_id"])
-        if failure_meta is not None:
-            entry["why_human_needed"] = (
-                "自动裁决在最终收敛校验时失败，需要人工确认别名归属或改为保留多义并存。"
-            )
-            entry["validation_error"] = failure_meta["validation_error"]
-    agent_brief, agent_summary = build_review_auto_agent_handoff(
-        auto_apply_plans=auto_apply_plans,
-        escalated_entries=escalated_entries,
-        promoted_claims=promoted_claims,
-        review_automation_config=review_automation_config,
-        stable_automation_config=stable_automation_config,
-    )
-
-    payload = {
-        "contract_version": REVIEW_AUTO_HANDOFF_CONTRACT_VERSION,
-        "workspace": str(target),
-        "workspace_summary": build_workspace_summary(target),
-        "dry_run": bool(args.dry_run),
-        "planned_actions": planned_actions,
-        "applied_actions": applied_actions,
-        "escalated_reviews": final_escalated_plans,
-        "escalation_handoff": escalated_entries,
-        "auto_apply_failures": auto_apply_failures,
-        "promoted_claims": promoted_claims,
-        "agent_brief": agent_brief,
-        "agent_summary": agent_summary,
-        "summary": {
-            "planned_review_count": len(planned_actions),
-            "auto_apply_count": len(auto_apply_plans),
-            "escalated_count": len(final_escalated_plans),
-            "applied_count": len(applied_actions),
-            "auto_apply_failure_count": len(auto_apply_failures),
-            "promoted_claim_count": len(promoted_claims),
-        },
-        "automation": {
-            "review_auto": {
-                "strategy": review_automation_config.get("strategy"),
-                "enabled": review_automation_config.get("enabled"),
-                "min_confidence": review_automation_config.get("min_confidence"),
-            },
-            "stable_promotion": {
-                "strategy": stable_automation_config.get("strategy"),
-                "enabled": stable_automation_config.get("enabled"),
-                "min_confidence": stable_automation_config.get("min_confidence"),
-            },
-        },
-    }
-    handoff_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
-    if handoff_format == "prompt":
-        payload["prompt_text"] = render_review_auto_prompt(payload)
-    elif handoff_format == "messages":
-        payload["messages"] = build_review_auto_messages(payload)
-    elif handoff_format == "chatml":
-        payload["messages"] = build_review_auto_messages(payload)
-        payload["chatml_text"] = render_review_auto_chatml(payload)
-
-    if args.json:
-        return CommandResult(
-            payload=payload,
-            message=render_workspace_summary_message(
-                "Review auto pass completed." if not args.dry_run else "Review auto dry-run completed.",
-                target_dir=target,
-                extra_lines=[
-                    f"Dry run: {bool(args.dry_run)}",
-                    f"Format: {handoff_format}",
-                    (
-                        "Summary: "
-                        f"planned={payload['summary']['planned_review_count']}, "
-                        f"auto_apply={payload['summary']['auto_apply_count']}, "
-                        f"escalated={payload['summary']['escalated_count']}, "
-                        f"applied={payload['summary']['applied_count']}, "
-                        f"promoted_claims={payload['summary']['promoted_claim_count']}"
-                    ),
-                ],
-            ),
-        )
-    if handoff_format == "prompt":
-        return CommandResult(payload=payload, message=payload["prompt_text"])
-    if handoff_format == "messages":
-        return CommandResult(
-            payload=payload,
-            message=json.dumps(payload["messages"], ensure_ascii=False, indent=2),
-        )
-    if handoff_format == "chatml":
-        return CommandResult(payload=payload, message=payload["chatml_text"])
-
-    return CommandResult(
-        payload=payload,
-        message=render_workspace_summary_message(
-            "Review auto pass completed." if not args.dry_run else "Review auto dry-run completed.",
-            target_dir=target,
-            extra_lines=[
-                f"Dry run: {bool(args.dry_run)}",
-                (
-                    "Summary: "
-                    f"planned={payload['summary']['planned_review_count']}, "
-                    f"auto_apply={payload['summary']['auto_apply_count']}, "
-                    f"escalated={payload['summary']['escalated_count']}, "
-                    f"applied={payload['summary']['applied_count']}, "
-                    f"promoted_claims={payload['summary']['promoted_claim_count']}"
-                ),
-                "",
-                render_review_auto_message(payload),
-            ],
-        ),
-    )
+    return review_cli_component.command_review_auto(build_review_cli_deps(), args)
 
 
 def rebuild_review_affected_pages(
@@ -13153,306 +8705,81 @@ def rebuild_review_affected_pages(
     page_records = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)]
     page_records_by_id = {record["page_id"]: record for record in page_records}
     active_source_ids = choose_active_source_ids(sources_by_id)
-    live_claim_records = list(live_claims_by_id.values())
-    live_review_records = [
-        record for record in live_reviews_by_id.values()
-        if is_actionable_review_record(record)
-    ]
-
-    # 先把旧的自动页反链从 live claim / review 中清掉，再按当前 live 集合重建。
-    for page_record in list(page_records_by_id.values()):
-        if page_record.get("type") not in {"source-summary", "concept", "overview"}:
-            continue
-        page_id = page_record["page_id"]
-        for claim_record in live_claim_records:
-            if page_id in claim_record.get("page_ids", []):
-                claim_record["page_ids"] = [item for item in claim_record["page_ids"] if item != page_id]
-                claim_record["updated_at"] = utc_now_iso()
-        for review_record in live_review_records:
-            if page_id in review_record.get("candidate_page_ids", []):
-                review_record["candidate_page_ids"] = [
-                    item for item in review_record["candidate_page_ids"] if item != page_id
-                ]
-
-    claims_by_source_id: dict[str, list[dict]] = {}
-    for claim_record in live_claim_records:
-        for source_id in claim_record.get("source_ids", []):
-            if source_id in active_source_ids:
-                claims_by_source_id.setdefault(source_id, []).append(claim_record)
-
-    for source_id in sorted(active_source_ids):
-        source_record = sources_by_id.get(source_id)
-        if source_record is None or source_record.get("status") == "failed":
-            continue
-        source_claims = claims_by_source_id.get(source_id, [])
-        source_chunks = chunks_by_source_id.get(source_id, [])
-        if not source_claims and not source_chunks:
-            continue
-        source_record_for_page = dict(source_record)
-        source_record_for_page["status"] = "generated"
-        normalized_record = normalized_records_by_source.get(source_id)
-        page_rel_path = source_summary_page_path(source_id, normalized_record["title"] if normalized_record else Path(source_record["source_path"]).stem)
-        page_text, page_record = build_source_summary_page(
-            source_record=source_record_for_page,
-            page_rel_path=page_rel_path,
-            normalized_record=normalized_record,
-            claim_records=source_claims,
-            chunk_records=source_chunks,
-        )
-        page_record = apply_page_alias_overrides(target, page_record)
-        page_record["page_path"] = str(page_rel_path)
-        stored_page_record, _ = upsert_wiki_page(
+    run_review_rebuild_page_regeneration(
+        ReviewRebuildPageContext(
             target=target,
+            config=config,
+            readable_concept_render_config=readable_concept_render_config,
+            overview_render_config=overview_render_config,
+            page_intent_config=page_intent_config,
+            sources_by_id=sources_by_id,
+            normalized_records_by_source=normalized_records_by_source,
+            chunks_by_source_id=chunks_by_source_id,
             page_records_by_id=page_records_by_id,
-            page_record=page_record,
-            page_text=page_text,
-        )
-        link_claims_to_page_in_memory(source_claims, stored_page_record["page_id"], live_claims_by_id)
-
-    concept_claim_groups: dict[str, list[dict]] = {}
-    for claim_record in live_claim_records:
-        active_claim_source_ids = [
-            source_id for source_id in claim_record.get("source_ids", [])
-            if source_id in active_source_ids
-        ]
-        if not active_claim_source_ids:
-            continue
-        bucket_key = build_concept_group_key(claim_record)
-        concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
-    concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
-    page_routes_by_bucket = apply_page_intent_decisions_to_claim_groups(
-        target=target,
-        concept_claim_groups=concept_claim_groups,
-        task_config=page_intent_config,
-    )
-
-    for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
-        page_route = page_route_for_bucket(page_routes_by_bucket, bucket_key)
-        page_intent = preferred_page_intent_for_claim_group(
-            grouped_claims,
-            page_route.get("page_intent", "topic"),
-        )
-        page_route["page_intent"] = page_intent
-        page_route["route_target"] = page_intent
-        if page_intent == "reject":
-            continue
-        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
-            group_topic_label = choose_group_topic_label(grouped_claims)
-            canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
-            concept_page_id = build_concept_page_id(bucket_key)
-            concept_title, concept_title_quality = resolve_concept_title_candidate(
-                target=target,
-                config=config,
-                canonical_claim=canonical_claim,
-                claim_records=grouped_claims,
-                preferred_section_label=group_topic_label,
-            )
-            if concept_title_quality["classification"] == "reject":
-                stable_claims = filter_live_stable_claim_records(grouped_claims)
-                if not stable_claims:
-                    continue
-            page_rel_path = concept_summary_page_path(
-                concept_page_id,
-                concept_title,
-            )
-            page_text, page_record = build_concept_page(
-                target=target,
-                bucket_key=bucket_key,
-                page_rel_path=page_rel_path,
-                claim_records=grouped_claims,
-                page_records_by_id=page_records_by_id,
-                review_records=live_review_records,
-                render_config=readable_concept_render_config,
-            )
-            page_record = apply_page_route_to_page_record(page_record, page_route)
-            page_record = apply_page_alias_overrides(target, page_record)
-            page_record["page_path"] = str(page_rel_path)
-            stored_page_record, _ = upsert_wiki_page(
-                target=target,
-                page_records_by_id=page_records_by_id,
-                page_record=page_record,
-                page_text=page_text,
-            )
-            link_claims_to_page_in_memory(grouped_claims, stored_page_record["page_id"], live_claims_by_id)
-            link_reviews_to_page_in_memory(
-                review_records=live_review_records,
-                page_id=stored_page_record["page_id"],
-                claim_ids=stored_page_record["claim_ids"],
-                reviews_by_id=live_reviews_by_id,
-            )
-        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
-            page_title_source = choose_group_topic_label(grouped_claims) or choose_canonical_claim(grouped_claims).get("text", "")
-            page_rel_path = page_intent_page_path(page_intent, page_intent_page_id(bucket_key, page_intent), page_title_source)
-            page_text, page_record = build_intent_routed_page(
-                target=target,
-                config=config,
-                bucket_key=bucket_key,
-                page_intent=page_intent,
-                page_rel_path=page_rel_path,
-                claim_records=grouped_claims,
-                page_records_by_id=page_records_by_id,
-                review_records=live_review_records,
-            )
-            page_record = apply_page_route_to_page_record(page_record, page_route)
-            page_record = apply_page_alias_overrides(target, page_record)
-            page_record["page_path"] = str(page_rel_path)
-            stored_page_record, _ = upsert_wiki_page(
-                target=target,
-                page_records_by_id=page_records_by_id,
-                page_record=page_record,
-                page_text=page_text,
-            )
-            link_claims_to_page_in_memory(grouped_claims, stored_page_record["page_id"], live_claims_by_id)
-            link_reviews_to_page_in_memory(
-                review_records=live_review_records,
-                page_id=stored_page_record["page_id"],
-                claim_ids=stored_page_record["claim_ids"],
-                reviews_by_id=live_reviews_by_id,
-            )
-
-    overview_concept_pages = collect_workspace_overview_concept_pages(
-        claims_by_similarity_bucket=concept_claim_groups,
-        page_records_by_id=page_records_by_id,
-    )
-    if should_generate_workspace_overview_page(overview_concept_pages):
-        overview_page_rel_path = workspace_overview_page_path()
-        overview_page_text, overview_page_record = build_workspace_overview_page(
-            target=target,
-            page_rel_path=overview_page_rel_path,
-            concept_pages=overview_concept_pages,
-            page_records_by_id=page_records_by_id,
-            claim_records_by_id=live_claims_by_id,
-            render_config=overview_render_config,
-        )
-        overview_page_record = apply_page_alias_overrides(target, overview_page_record)
-        overview_page_record["page_path"] = str(overview_page_rel_path)
-        stored_overview_page, _ = upsert_wiki_page(
-            target=target,
-            page_records_by_id=page_records_by_id,
-            page_record=overview_page_record,
-            page_text=overview_page_text,
-        )
-        link_claims_to_page_in_memory(
-            [
-                live_claims_by_id[claim_id]
-                for claim_id in stored_overview_page["claim_ids"]
-                if claim_id in live_claims_by_id
-            ],
-            stored_overview_page["page_id"],
-            live_claims_by_id,
-        )
-        link_reviews_to_page_in_memory(
-            review_records=live_review_records,
-            page_id=stored_overview_page["page_id"],
-            claim_ids=stored_overview_page["claim_ids"],
-            reviews_by_id=live_reviews_by_id,
-        )
-
-    desired_auto_page_ids = {
-        expected_source_summary_page_id(source_id)
-        for source_id in active_source_ids
-        if claims_by_source_id.get(source_id) or chunks_by_source_id.get(source_id)
-    }
-    forced_stale_page_ids: set[str] = set()
-    for bucket_key, grouped_claims in concept_claim_groups.items():
-        page_route = page_route_for_bucket(page_routes_by_bucket, bucket_key)
-        page_intent = preferred_page_intent_for_claim_group(
-            grouped_claims,
-            page_route.get("page_intent", "topic"),
-        )
-        forced_stale_page_ids.update(
-            {
-                build_concept_page_id(bucket_key),
-                *{
-                    page_intent_page_id(bucket_key, stale_intent)
-                    for stale_intent in {"guide", "example", "topic", "reference", "timeline"}
-                    if stale_intent != page_intent
-                },
-            }
-        )
-        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
-            desired_auto_page_ids.add(build_concept_page_id(bucket_key))
-        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
-            desired_auto_page_ids.add(page_intent_page_id(bucket_key, page_intent))
-    if should_generate_workspace_overview_page(overview_concept_pages):
-        desired_auto_page_ids.add(build_workspace_overview_page_id())
-
-    prune_stale_auto_pages(
-        target=target,
-        page_records_by_id=page_records_by_id,
-        desired_auto_page_ids=desired_auto_page_ids,
-        claims_by_id=live_claims_by_id,
-        reviews_by_id=live_reviews_by_id,
-        forced_stale_page_ids=forced_stale_page_ids - desired_auto_page_ids,
-    )
-
-    write_jsonl(
-        target / "state" / "claims.jsonl",
-        build_ordered_claim_state_records(
+            active_source_ids=active_source_ids,
             live_claims_by_id=live_claims_by_id,
-            historical_claims_by_id={
-                record["claim_id"]: record
-                for record in load_jsonl(target / "state" / "claims.jsonl")
-                if ensure_claim_lifecycle_defaults(record).get("lifecycle_status") != "active"
-            },
+            live_reviews_by_id=live_reviews_by_id,
+        ),
+        deps=ReviewRebuildPageDeps(
+            is_actionable_review_record=is_actionable_review_record,
+            utc_now_iso=utc_now_iso,
+            source_summary_page_path=source_summary_page_path,
+            build_source_summary_page=build_source_summary_page,
+            apply_page_alias_overrides=apply_page_alias_overrides,
+            upsert_wiki_page=upsert_wiki_page,
+            link_claims_to_page_in_memory=link_claims_to_page_in_memory,
+            build_concept_group_key=build_concept_group_key,
+            regroup_concept_claims_by_canonical_topic=regroup_concept_claims_by_canonical_topic,
+            apply_page_intent_decisions_to_claim_groups=apply_page_intent_decisions_to_claim_groups,
+            page_route_for_bucket=page_route_for_bucket,
+            preferred_page_intent_for_claim_group=preferred_page_intent_for_claim_group,
+            should_generate_concept_page=should_generate_concept_page,
+            choose_group_topic_label=choose_group_topic_label,
+            choose_canonical_claim=choose_canonical_claim,
+            resolve_concept_title_candidate=resolve_concept_title_candidate,
+            build_concept_page_id=build_concept_page_id,
+            concept_summary_page_path=concept_summary_page_path,
+            build_concept_page=build_concept_page,
+            apply_page_route_to_page_record=apply_page_route_to_page_record,
+            link_reviews_to_page_in_memory=link_reviews_to_page_in_memory,
+            page_intent_page_id=page_intent_page_id,
+            page_intent_page_path=page_intent_page_path,
+            build_intent_routed_page=build_intent_routed_page,
+            collect_workspace_overview_concept_pages=collect_workspace_overview_concept_pages,
+            should_generate_workspace_overview_page=should_generate_workspace_overview_page,
+            workspace_overview_page_path=workspace_overview_page_path,
+            build_workspace_overview_page=build_workspace_overview_page,
+            build_workspace_overview_page_id=build_workspace_overview_page_id,
+            expected_source_summary_page_id=expected_source_summary_page_id,
+            prune_stale_auto_pages=prune_stale_auto_pages,
         ),
     )
-    for claim_record in load_jsonl(target / "state" / "claims.jsonl"):
-        write_claim_file(target, claim_record)
-
-    existing_historical_reviews_by_id = {
-        record["review_id"]: ensure_review_lifecycle_defaults(record)
-        for record in load_jsonl(target / "state" / "reviews.jsonl")
-        if not is_live_review_record(ensure_review_lifecycle_defaults(record))
-    }
-    review_state_records = build_ordered_review_state_records(
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=existing_historical_reviews_by_id,
-    )
-    write_jsonl(target / "state" / "reviews.jsonl", review_state_records)
-    for review_record in review_state_records:
-        write_review_file(target, review_record)
-
-    write_jsonl(pages_path, list(page_records_by_id.values()))
-    page_links_index = write_page_links_index(target, list(page_records_by_id.values()))
-    for page_id, link_entry in page_links_index.get("pages", {}).items():
-        page_record = page_records_by_id.get(page_id)
-        if page_record is None:
-            continue
-        page_record["outgoing_page_ids"] = link_entry.get("outgoing_page_ids", [])
-        page_record["incoming_page_ids"] = link_entry.get("incoming_page_ids", [])
-        page_record["related_page_ids"] = link_entry.get("related_page_ids", [])
-    write_jsonl(pages_path, list(page_records_by_id.values()))
-    rebuild_wiki_index(target, list(page_records_by_id.values()))
-    write_alias_index(target, list(page_records_by_id.values()))
-    refresh_alias_conflict_reviews(
-        target=target,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=existing_historical_reviews_by_id,
-        page_records=list(page_records_by_id.values()),
-    )
-    updated_review_state_records = build_ordered_review_state_records(
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=existing_historical_reviews_by_id,
-    )
-    write_jsonl(target / "state" / "reviews.jsonl", updated_review_state_records)
-    for review_record in updated_review_state_records:
-        write_review_file(target, review_record)
-    cleanup_superseded_record_files(
-        target=target,
-        historical_claims_by_id={
-            record["claim_id"]: ensure_claim_lifecycle_defaults(record)
-            for record in load_jsonl(target / "state" / "claims.jsonl")
-            if ensure_claim_lifecycle_defaults(record).get("lifecycle_status") != "active"
-        },
-        historical_reviews_by_id=existing_historical_reviews_by_id,
-    )
-    previous_search_index_records = load_search_pages_index(target)
-    write_search_pages_index(
-        target=target,
-        page_records=list(page_records_by_id.values()),
-        claim_records_by_id=live_claims_by_id,
-        previous_records=previous_search_index_records,
+    run_review_rebuild_persistence(
+        ReviewRebuildPersistContext(
+            target=target,
+            page_records_by_id=page_records_by_id,
+            live_claims_by_id=live_claims_by_id,
+            live_reviews_by_id=live_reviews_by_id,
+        ),
+        deps=ReviewRebuildPersistDeps(
+            load_claim_state_records=lambda workspace_target: load_jsonl(workspace_target / "state" / "claims.jsonl"),
+            ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+            build_ordered_claim_state_records=build_ordered_claim_state_records,
+            write_jsonl=write_jsonl,
+            write_claim_file=write_claim_file,
+            load_review_state_records=lambda workspace_target: load_jsonl(workspace_target / "state" / "reviews.jsonl"),
+            ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+            is_live_review_record=is_live_review_record,
+            build_ordered_review_state_records=build_ordered_review_state_records,
+            write_review_file=write_review_file,
+            write_page_links_index=write_page_links_index,
+            rebuild_wiki_index=rebuild_wiki_index,
+            write_alias_index=write_alias_index,
+            refresh_alias_conflict_reviews=refresh_alias_conflict_reviews,
+            cleanup_superseded_record_files=cleanup_superseded_record_files,
+            load_search_pages_index=load_search_pages_index,
+            write_search_pages_index=write_search_pages_index,
+        ),
     )
 
 def resolve_claim_record_for_action(
@@ -13460,10 +8787,12 @@ def resolve_claim_record_for_action(
     live_claims_by_id: dict[str, dict],
     historical_claims_by_id: dict[str, dict],
 ) -> dict:
-    claim_record = build_claim_lookup_by_any_id(live_claims_by_id, historical_claims_by_id).get(claim_id)
-    if claim_record is None:
-        raise KeyError(f"Unknown claim_id: {claim_id}")
-    return claim_record
+    return resolve_claim_record_for_action_helper(
+        claim_id,
+        live_claims_by_id,
+        historical_claims_by_id,
+        build_claim_lookup_by_any_id=build_claim_lookup_by_any_id,
+    )
 
 
 def archive_live_claim(
@@ -13472,35 +8801,22 @@ def archive_live_claim(
     historical_claims_by_id: dict[str, dict],
     archived_by_claim_id: str | None = None,
 ) -> dict:
-    # archive_one / merge 都会复用这段逻辑：
-    # 把在线 claim 迁到历史态，并保留被谁替代的线索。
-    live_claims_by_id.pop(claim_record["claim_id"], None)
-    claim_record = dict(claim_record)
-    claim_record["lifecycle_status"] = "superseded"
-    claim_record["archived_at"] = utc_now_iso()
-    claim_record["updated_at"] = utc_now_iso()
-    if archived_by_claim_id:
-        append_unique(claim_record.setdefault("superseded_by", []), archived_by_claim_id)
-    historical_claim_record = convert_claim_record_to_historical(claim_record)
-    historical_claims_by_id[historical_claim_record["claim_id"]] = historical_claim_record
-    return historical_claim_record
+    return archive_live_claim_helper(
+        claim_record,
+        live_claims_by_id,
+        historical_claims_by_id,
+        utc_now_iso=utc_now_iso,
+        append_unique=append_unique,
+        convert_claim_record_to_historical=convert_claim_record_to_historical,
+        archived_by_claim_id=archived_by_claim_id,
+    )
 
 
 def normalize_claim_review_flags(claim_record: dict) -> None:
-    # claim 上的 review 标志位要和当前人工状态同步。
-    # 如果重复候选、冲突组都已经不再存在，就把它还原成普通 draft。
-    duplicate_candidates = [
-        item for item in claim_record.get("duplicate_candidates", [])
-        if item != claim_record["claim_id"]
-    ]
-    claim_record["duplicate_candidates"] = sorted(set(duplicate_candidates))
-    if claim_record.get("status") == "needs_review":
-        has_duplicate_signal = bool(claim_record.get("duplicate_candidates"))
-        has_conflict_signal = bool(claim_record.get("conflict_group"))
-        if not has_duplicate_signal and not has_conflict_signal:
-            claim_record["status"] = "draft"
-            claim_record["review_reason"] = None
-    claim_record["updated_at"] = utc_now_iso()
+    normalize_claim_review_flags_helper(
+        claim_record,
+        utc_now_iso=utc_now_iso,
+    )
 
 
 def sync_claim_review_state_from_open_reviews(
@@ -13508,46 +8824,13 @@ def sync_claim_review_state_from_open_reviews(
     live_claims_by_id: dict[str, dict],
     live_reviews_by_id: dict[str, dict],
 ) -> set[str]:
-    # 某条 review 被处理后，相关 claim 的“待审状态”不能只看旧标记，
-    # 要重新基于当前仍然 open 的 review 集合计算一次。
-    dirty_claim_ids: set[str] = set()
-    target_claim_ids = {claim_id for claim_id in claim_ids if claim_id in live_claims_by_id}
-
-    for claim_id in sorted(target_claim_ids):
-        claim_record = live_claims_by_id.get(claim_id)
-        if claim_record is None:
-            continue
-
-        duplicate_candidates: set[str] = set()
-        conflict_group = claim_record.get("conflict_group")
-        review_reason = None
-
-        for review_record in live_reviews_by_id.values():
-            if not is_actionable_review_record(review_record):
-                continue
-            candidate_claim_ids = set(review_record.get("candidate_claim_ids", []))
-            if claim_id not in candidate_claim_ids:
-                continue
-
-            if review_record.get("kind") == "claim_duplicate":
-                duplicate_candidates.update(candidate_claim_ids - {claim_id})
-                review_reason = "possible_duplicate_claim"
-            elif review_record.get("kind") == "claim_conflict":
-                if not conflict_group:
-                    conflict_group = claim_record.get("conflict_group")
-                review_reason = "conflicting_claims_detected"
-
-        claim_record["duplicate_candidates"] = sorted(duplicate_candidates)
-        claim_record["conflict_group"] = conflict_group if review_reason == "conflicting_claims_detected" else None
-        if review_reason:
-            claim_record["status"] = "needs_review"
-            claim_record["review_reason"] = review_reason
-        else:
-            claim_record["review_reason"] = None
-        normalize_claim_review_flags(claim_record)
-        dirty_claim_ids.add(claim_id)
-
-    return dirty_claim_ids
+    return sync_claim_review_state_from_open_reviews_helper(
+        claim_ids,
+        live_claims_by_id,
+        live_reviews_by_id,
+        is_actionable_review_record=is_actionable_review_record,
+        normalize_claim_review_flags=normalize_claim_review_flags,
+    )
 
 
 def rewrite_open_reviews_for_claim_change(
@@ -13557,54 +8840,16 @@ def rewrite_open_reviews_for_claim_change(
     live_claims_by_id: dict[str, dict],
     live_reviews_by_id: dict[str, dict],
 ) -> tuple[set[str], set[str]]:
-    # review 动作会改变候选 claim 集合：
-    # - archive_one: 某个候选 claim 彻底退出
-    # - merge: 某个候选 claim 被并入另一个仍存活的 claim
-    # 这里把其他 open review 里对旧 claim 的引用一并修正，
-    # 避免 review 队列继续挂着已经失效的候选项。
-    dirty_review_ids: set[str] = set()
-    touched_live_claim_ids: set[str] = set()
-
-    for review_id, candidate_review in live_reviews_by_id.items():
-        if review_id == changed_review_id:
-            continue
-        if candidate_review.get("status") != "open":
-            continue
-
-        original_claim_ids = list(candidate_review.get("candidate_claim_ids", []))
-        if removed_claim_id not in original_claim_ids:
-            continue
-
-        rewritten_claim_ids: list[str] = []
-        for claim_id in original_claim_ids:
-            if claim_id != removed_claim_id:
-                if claim_id not in rewritten_claim_ids:
-                    rewritten_claim_ids.append(claim_id)
-                continue
-            if replacement_claim_id and replacement_claim_id not in rewritten_claim_ids:
-                rewritten_claim_ids.append(replacement_claim_id)
-
-        if rewritten_claim_ids == original_claim_ids:
-            continue
-
-        candidate_review["candidate_claim_ids"] = rewritten_claim_ids
-        candidate_review["candidate_page_ids"] = []
-
-        if len(rewritten_claim_ids) < 2:
-            candidate_review["status"] = "resolved"
-            candidate_review["resolved_at"] = utc_now_iso()
-        candidate_review["lifecycle_status"] = review_lifecycle_status_for_record(candidate_review)
-        dirty_review_ids.add(review_id)
-
-        touched_live_claim_ids.update(set(original_claim_ids) | set(rewritten_claim_ids))
-
-    sync_claim_review_state_from_open_reviews(
-        claim_ids=sorted(touched_live_claim_ids),
-        live_claims_by_id=live_claims_by_id,
-        live_reviews_by_id=live_reviews_by_id,
+    return rewrite_open_reviews_for_claim_change_helper(
+        changed_review_id,
+        removed_claim_id,
+        replacement_claim_id,
+        live_claims_by_id,
+        live_reviews_by_id,
+        utc_now_iso=utc_now_iso,
+        review_lifecycle_status_for_record=review_lifecycle_status_for_record,
+        sync_claim_review_state_from_open_reviews=sync_claim_review_state_from_open_reviews,
     )
-
-    return dirty_review_ids, touched_live_claim_ids
 
 
 def cleanup_superseded_record_files(
@@ -13612,23 +8857,13 @@ def cleanup_superseded_record_files(
     historical_claims_by_id: dict[str, dict],
     historical_reviews_by_id: dict[str, dict],
 ) -> None:
-    # state/*.jsonl 才是账本真相，但磁盘上的旧文件也要跟着收口。
-    # 否则同一个 claim/review 在进入历史态后，会同时留下“旧活跃文件 + 新历史文件”两份。
-    for claim_record in historical_claims_by_id.values():
-        original_claim_id = claim_record.get("original_claim_id")
-        if not original_claim_id or original_claim_id == claim_record["claim_id"]:
-            continue
-        stale_claim_path = claim_file_path(target, original_claim_id)
-        if stale_claim_path.exists():
-            stale_claim_path.unlink()
-
-    for review_record in historical_reviews_by_id.values():
-        original_review_id = review_record.get("original_review_id")
-        if not original_review_id or original_review_id == review_record["review_id"]:
-            continue
-        stale_review_path = review_file_path(target, original_review_id)
-        if stale_review_path.exists():
-            stale_review_path.unlink()
+    cleanup_superseded_record_files_helper(
+        target,
+        historical_claims_by_id,
+        historical_reviews_by_id,
+        claim_file_path=claim_file_path,
+        review_file_path=review_file_path,
+    )
 
 
 def reload_claims_from_disk_for_review(
@@ -13636,24 +8871,14 @@ def reload_claims_from_disk_for_review(
     claim_ids: list[str],
     live_claims_by_id: dict[str, dict],
 ) -> set[str]:
-    # edit_then_resume 的前提是“人已经先改了 claim 文件”。
-    # 这里把指定 claim 的磁盘内容重新加载回内存账本。
-    reloaded_claim_ids: set[str] = set()
-
-    for claim_id in claim_ids:
-        claim_path = claim_file_path(target, claim_id)
-        if not claim_path.exists():
-            raise FileNotFoundError(
-                f"Claim file does not exist for edit_then_resume: {claim_path}"
-            )
-        disk_record = ensure_claim_lifecycle_defaults(load_json(claim_path))
-        disk_record["claim_id"] = claim_id
-        disk_record["claim_file_path"] = str(Path("claims") / claim_path.name)
-        disk_record.setdefault("page_ids", live_claims_by_id.get(claim_id, {}).get("page_ids", []))
-        live_claims_by_id[claim_id] = disk_record
-        reloaded_claim_ids.add(claim_id)
-
-    return reloaded_claim_ids
+    return reload_claims_from_disk_for_review_helper(
+        target,
+        claim_ids,
+        live_claims_by_id,
+        claim_file_path=claim_file_path,
+        ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+        load_json=load_json,
+    )
 
 
 def apply_review_action(
@@ -13669,2662 +8894,235 @@ def apply_review_action(
     live_reviews_by_id: dict[str, dict],
     historical_reviews_by_id: dict[str, dict],
 ) -> dict:
-    allowed_actions = set(review_record.get("allowed_actions", []))
-    if action not in allowed_actions:
-        raise ValueError(f"Action `{action}` is not allowed for review `{review_display_id(review_record)}`.")
-
-    candidate_claim_ids = list(review_record.get("candidate_claim_ids", []))
-    candidate_page_ids = list(review_record.get("candidate_page_ids", []))
-
-    if review_record.get("kind") == "alias_conflict" and action in {"assign_alias", "remove_alias"}:
-        if not primary_page_id:
-            raise ValueError(f"{action} requires --primary-page-id.")
-        if primary_page_id not in candidate_page_ids:
-            raise ValueError("primary page must belong to candidate_page_ids.")
-
-        evidence = review_record.get("evidence", [])
-        alias_from_review = evidence[0].get("alias") if evidence else None
-        alias_to_assign = alias_value or alias_from_review
-        if not alias_to_assign:
-            raise ValueError(f"{action} requires alias value from review evidence or --alias-value.")
-
-        live_aliases_by_page_id = load_live_page_aliases_by_id(target)
-        page_state_records = [
-            ensure_page_lifecycle_defaults(record)
-            for record in load_jsonl(target / "state" / "pages.jsonl")
-        ]
-
-        def update_and_validate(overrides: dict) -> dict:
-            updated_overrides = apply_alias_override_action(
-                overrides=overrides,
-                live_aliases_by_page_id=live_aliases_by_page_id,
-                candidate_page_ids=candidate_page_ids,
-                primary_page_id=primary_page_id,
-                alias_value=alias_to_assign,
-                action=action,
-            )
-            page_records = [
-                apply_page_alias_overrides_payload(record, updated_overrides)
-                for record in page_state_records
-            ]
-            projected_alias_index = build_alias_index(page_records)
-            projected_matches = alias_index_matches_for_value(projected_alias_index, alias_to_assign)
-            projected_page_ids = sorted({match.get("page_id") for match in projected_matches if match.get("page_id")})
-            projected_canonical_ids = sorted({
-                match.get("canonical_id") or match.get("page_id")
-                for match in projected_matches
-                if match.get("canonical_id") or match.get("page_id")
-            })
-            primary_canonical_id = next(
-                (
-                    record.get("canonical_id") or record.get("page_id")
-                    for record in page_state_records
-                    if record.get("page_id") == primary_page_id
-                ),
-                primary_page_id,
-            )
-
-            if action == "assign_alias":
-                if projected_canonical_ids != [primary_canonical_id]:
-                    raise ValueError(
-                        "assign_alias did not converge alias ownership. "
-                        "Alias "
-                        f"`{alias_to_assign}` would remain on canonical_ids={projected_canonical_ids} "
-                        f"(page_ids={projected_page_ids})."
-                    )
-            elif projected_page_ids:
-                raise ValueError(
-                    "remove_alias did not fully clear alias ownership. "
-                    f"Alias `{alias_to_assign}` would remain on page_ids={projected_page_ids}."
-                )
-
-            return clear_accepted_alias_conflict(
-                updated_overrides,
-                alias_to_assign,
-                projected_canonical_ids,
-            )
-
-        update_page_alias_overrides_with_lock(target, update_and_validate)
-
-        review_record["status"] = "resolved"
-        review_record["resolved_at"] = utc_now_iso()
-        review_record["lifecycle_status"] = "active"
-        return {
-            "action": action,
-            "changed_page_ids": candidate_page_ids,
-            "resolved_review_id": review_record["review_id"],
-            "alias_value": alias_to_assign,
-            "primary_page_id": primary_page_id,
-        }
-
-    if action == "keep_both":
-        if review_record.get("kind") == "alias_conflict":
-            evidence = review_record.get("evidence", [])
-            alias_from_review = str(evidence[0].get("alias", "")).strip() if evidence else ""
-            canonical_ids = [
-                str(value).strip()
-                for value in (evidence[0].get("canonical_ids", []) if evidence else [])
-                if str(value).strip()
-            ]
-            if alias_from_review and canonical_ids:
-                def accept_alias_conflict(overrides: dict) -> dict:
-                    return persist_accepted_alias_conflict(
-                        overrides=overrides,
-                        alias_value=alias_from_review,
-                        canonical_ids=canonical_ids,
-                    )
-
-                update_page_alias_overrides_with_lock(target, accept_alias_conflict)
-        review_record["status"] = "resolved"
-        review_record["resolved_at"] = utc_now_iso()
-        review_record["lifecycle_status"] = "active"
-        sync_claim_review_state_from_open_reviews(
-            claim_ids=candidate_claim_ids,
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-        return {
-            "action": action,
-            "changed_claim_ids": candidate_claim_ids,
-            "resolved_review_id": review_record["review_id"],
-        }
-
-    if action == "edit_then_resume":
-        reloaded_claim_ids = reload_claims_from_disk_for_review(
-            target=target,
-            claim_ids=candidate_claim_ids,
-            live_claims_by_id=live_claims_by_id,
-        )
-        review_record["status"] = "resolved"
-        review_record["resolved_at"] = utc_now_iso()
-        review_record["lifecycle_status"] = "active"
-        sync_claim_review_state_from_open_reviews(
-            claim_ids=sorted(reloaded_claim_ids),
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-        return {
-            "action": action,
-            "changed_claim_ids": sorted(reloaded_claim_ids),
-            "resolved_review_id": review_record["review_id"],
-        }
-
-    if action == "archive_one":
-        if not primary_claim_id:
-            raise ValueError("archive_one requires --primary-claim-id.")
-        if primary_claim_id not in candidate_claim_ids:
-            raise ValueError("primary claim must belong to candidate_claim_ids.")
-        claim_record = resolve_claim_record_for_action(primary_claim_id, live_claims_by_id, historical_claims_by_id)
-        if claim_record["claim_id"] not in live_claims_by_id:
-            raise ValueError("archive_one currently only supports active claims.")
-        historical_claim_record = archive_live_claim(
-            claim_record=claim_record,
-            live_claims_by_id=live_claims_by_id,
-            historical_claims_by_id=historical_claims_by_id,
-        )
-        review_record["status"] = "resolved"
-        review_record["resolved_at"] = utc_now_iso()
-        review_record["lifecycle_status"] = "active"
-        rewrite_open_reviews_for_claim_change(
-            changed_review_id=review_record["review_id"],
-            removed_claim_id=primary_claim_id,
-            replacement_claim_id=None,
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-        return {
-            "action": action,
-            "changed_claim_ids": [historical_claim_record["claim_id"]],
-            "resolved_review_id": review_record["review_id"],
-        }
-
-    if action == "merge":
-        if not primary_claim_id or not secondary_claim_id:
-            raise ValueError("merge requires --primary-claim-id and --secondary-claim-id.")
-        if primary_claim_id == secondary_claim_id:
-            raise ValueError("primary and secondary claim ids must be different.")
-        if primary_claim_id not in candidate_claim_ids or secondary_claim_id not in candidate_claim_ids:
-            raise ValueError("Both primary and secondary claims must belong to candidate_claim_ids.")
-
-        primary_record = resolve_claim_record_for_action(primary_claim_id, live_claims_by_id, historical_claims_by_id)
-        secondary_record = resolve_claim_record_for_action(secondary_claim_id, live_claims_by_id, historical_claims_by_id)
-        if primary_record["claim_id"] not in live_claims_by_id or secondary_record["claim_id"] not in live_claims_by_id:
-            raise ValueError("merge currently only supports active claims.")
-
-        merged_record = merge_claim_records(primary_record, secondary_record)
-        merged_record["duplicate_candidates"] = [
-            item for item in merged_record.get("duplicate_candidates", [])
-            if item not in {merged_record["claim_id"], secondary_record["claim_id"]}
-        ]
-        merged_record["conflict_group"] = None
-        merged_record["review_reason"] = None
-        merged_record["status"] = "draft"
-        merged_record["updated_at"] = utc_now_iso()
-        live_claims_by_id[merged_record["claim_id"]] = merged_record
-
-        historical_secondary = archive_live_claim(
-            claim_record=secondary_record,
-            live_claims_by_id=live_claims_by_id,
-            historical_claims_by_id=historical_claims_by_id,
-            archived_by_claim_id=merged_record["claim_id"],
-        )
-        review_record["status"] = "resolved"
-        review_record["resolved_at"] = utc_now_iso()
-        review_record["lifecycle_status"] = "active"
-        rewrite_open_reviews_for_claim_change(
-            changed_review_id=review_record["review_id"],
-            removed_claim_id=secondary_claim_id,
-            replacement_claim_id=merged_record["claim_id"],
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-        normalize_claim_review_flags(merged_record)
-        return {
-            "action": action,
-            "changed_claim_ids": [merged_record["claim_id"], historical_secondary["claim_id"]],
-            "resolved_review_id": review_record["review_id"],
-        }
-
-    raise NotImplementedError(f"Action `{action}` is not implemented yet.")
+    return apply_review_action_via_helpers(
+        target=target,
+        review_record=review_record,
+        action=action,
+        primary_claim_id=primary_claim_id,
+        secondary_claim_id=secondary_claim_id,
+        primary_page_id=primary_page_id,
+        alias_value=alias_value,
+        live_claims_by_id=live_claims_by_id,
+        historical_claims_by_id=historical_claims_by_id,
+        live_reviews_by_id=live_reviews_by_id,
+        historical_reviews_by_id=historical_reviews_by_id,
+        deps=ReviewActionDeps(
+            review_display_id=review_display_id,
+            utc_now_iso=utc_now_iso,
+            load_live_page_aliases_by_id=load_live_page_aliases_by_id,
+            load_page_state_records=lambda workspace_target: repo_load_page_state_records(
+                workspace_target,
+                load_jsonl=load_jsonl,
+                ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+            ),
+            apply_alias_override_action=apply_alias_override_action,
+            apply_page_alias_overrides_payload=apply_page_alias_overrides_payload,
+            build_alias_index=build_alias_index,
+            alias_index_matches_for_value=alias_index_matches_for_value,
+            clear_accepted_alias_conflict=clear_accepted_alias_conflict,
+            update_page_alias_overrides_with_lock=update_page_alias_overrides_with_lock,
+            persist_accepted_alias_conflict=persist_accepted_alias_conflict,
+            sync_claim_review_state_from_open_reviews=sync_claim_review_state_from_open_reviews,
+            reload_claims_from_disk_for_review=reload_claims_from_disk_for_review,
+            resolve_claim_record_for_action=resolve_claim_record_for_action,
+            archive_live_claim=archive_live_claim,
+            rewrite_open_reviews_for_claim_change=rewrite_open_reviews_for_claim_change,
+            merge_claim_records=merge_claim_records,
+            normalize_claim_review_flags=normalize_claim_review_flags,
+        ),
+    )
 
 
 def command_review_apply(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    claims_path = target / "state" / "claims.jsonl"
-    reviews_path = target / "state" / "reviews.jsonl"
-
-    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
-    live_reviews_by_id, historical_reviews_by_id, _ = load_review_state_maps(target)
-    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
-        target=target,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    if archived_alias_review_ids:
-        refreshed_review_state_records = build_ordered_review_state_records(
-            live_reviews_by_id=live_reviews_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-        write_jsonl(reviews_path, refreshed_review_state_records)
-        for review_state_record in refreshed_review_state_records:
-            write_review_file(target, review_state_record)
-        cleanup_superseded_record_files(
-            target=target,
-            historical_claims_by_id=historical_claims_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-
-    review_record = live_reviews_by_id.get(args.review_id) or historical_reviews_by_id.get(args.review_id)
-    if review_record is None:
-        matched_live_review = next(
-            (
-                record for record in live_reviews_by_id.values()
-                if review_display_id(record) == args.review_id
-            ),
-            None,
-        )
-        if matched_live_review is not None:
-            review_record = matched_live_review
-    if review_record is None:
-        raise KeyError(f"Unknown review_id: {args.review_id}")
-    if review_record["review_id"] not in live_reviews_by_id:
-        raise ValueError("review_apply currently only supports active review items.")
-
-    result = apply_review_action(
-        target=target,
-        review_record=review_record,
-        action=args.action,
-        primary_claim_id=args.primary_claim_id,
-        secondary_claim_id=args.secondary_claim_id,
-        primary_page_id=args.primary_page_id,
-        alias_value=args.alias_value,
-        live_claims_by_id=live_claims_by_id,
-        historical_claims_by_id=historical_claims_by_id,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    live_reviews_by_id[review_record["review_id"]] = review_record
-
-    write_jsonl(
-        claims_path,
-        build_ordered_claim_state_records(
-            live_claims_by_id=live_claims_by_id,
-            historical_claims_by_id=historical_claims_by_id,
-        ),
-    )
-    for claim_record in [*live_claims_by_id.values(), *historical_claims_by_id.values()]:
-        write_claim_file(target, claim_record)
-
-    write_jsonl(
-        reviews_path,
-        build_ordered_review_state_records(
-            live_reviews_by_id=live_reviews_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        ),
-    )
-    for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
-        write_review_file(target, review_state_record)
-    cleanup_superseded_record_files(
-        target=target,
-        historical_claims_by_id=historical_claims_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-
-    rebuild_review_affected_pages(
-        target=target,
-        live_claims_by_id=live_claims_by_id,
-        live_reviews_by_id=live_reviews_by_id,
-    )
-    _, _, archived_alias_review_ids = refresh_alias_conflict_reviews(
-        target=target,
-        live_reviews_by_id=live_reviews_by_id,
-        historical_reviews_by_id=historical_reviews_by_id,
-    )
-    if archived_alias_review_ids:
-        write_jsonl(
-            reviews_path,
-            build_ordered_review_state_records(
-                live_reviews_by_id=live_reviews_by_id,
-                historical_reviews_by_id=historical_reviews_by_id,
-            ),
-        )
-        for review_state_record in [*live_reviews_by_id.values(), *historical_reviews_by_id.values()]:
-            write_review_file(target, review_state_record)
-        cleanup_superseded_record_files(
-            target=target,
-            historical_claims_by_id=historical_claims_by_id,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-
-    payload = {
-        "workspace": str(target),
-        "workspace_summary": build_workspace_summary(target),
-        "review_id": review_record["review_id"],
-        "display_id": review_display_id(review_record),
-        **result,
-    }
-    return CommandResult(
-        payload=payload,
-        message=render_workspace_summary_message(
-            "Review action applied.",
-            target_dir=target,
-            extra_lines=[
-                f"Review: {review_display_id(review_record)}",
-                f"Action: {result.get('action')}",
-                f"Review id: {review_record['review_id']}",
-            ],
-        ),
-    )
+    return review_cli_component.command_review_apply(build_review_cli_deps(), args)
 
 
 def command_init(args: argparse.Namespace) -> CommandResult:
-    # init 负责把“普通资料目录”初始化成“可被 Agent 驱动的 MyAgentWiki 工作区”。
-    root = find_project_root()
-    raw_dir = Path(args.source_dir).expanduser().resolve() if args.source_dir else None
-    target_dir = Path(args.target_dir).expanduser().resolve() if args.target_dir else None
-
-    if raw_dir is None and target_dir is None:
-        target_dir = (Path.cwd() / args.project_name).resolve()
-        raw_dir = (target_dir.parent / "raw").resolve()
-    elif raw_dir is not None and target_dir is None:
-        target_dir = (raw_dir.parent / args.project_name).resolve()
-    elif raw_dir is None and target_dir is not None:
-        raw_dir = (target_dir.parent / "raw").resolve()
-
-    assert raw_dir is not None
-    assert target_dir is not None
-    if raw_dir.name != "raw":
-        raise ValueError(f"Raw directory must be named 'raw': {raw_dir}")
-    if raw_dir.parent != target_dir.parent:
-        raise ValueError(
-            f"Raw directory must be a sibling of the workspace: raw={raw_dir} target={target_dir}"
-        )
-    if raw_dir.exists() and not raw_dir.is_dir():
-        raise FileExistsError(f"Raw path exists but is not a directory: {raw_dir}")
-
-    ensure_clean_target(target_dir)
-    # 这里即使目录不存在也没关系，mkdir 会顺手把父目录一起建出来。
-    ensure_directory(target_dir)
-    raw_dir_preexisting = raw_dir.exists()
-    assets_dir = (raw_dir.parent / "assets").resolve()
-    assets_dir_preexisting = assets_dir.exists()
-    ensure_directory(raw_dir)
-    ensure_directory(assets_dir)
-    raw_dir_relative_path = os.path.relpath(raw_dir, start=target_dir).replace(os.sep, "/")
-    assets_dir_relative_path = os.path.relpath(assets_dir, start=target_dir).replace(os.sep, "/")
-
-    context = {
-        "project_name": args.project_name,
-        "source_dir_name": raw_dir.name,
-        "source_dir_path": str(raw_dir),
-        "raw_dir_name": raw_dir.name,
-        "raw_dir_path": str(raw_dir),
-        "raw_dir_relative_path": raw_dir_relative_path,
-        "assets_dir_name": assets_dir.name,
-        "assets_dir_path": str(assets_dir),
-        "assets_dir_relative_path": assets_dir_relative_path,
-        "python_executable": sys.executable,
-    }
-
-    for directory in (
-        "normalized",
-        "chunks",
-        "claims",
-        "semantic",
-        "semantic/batches",
-        "wiki",
-        "indexes",
-        "state",
-        "reviews",
-        "logs",
-        "outputs",
-        "config",
-        "reports/lint",
-    ):
-        # 工作区目录先一次性建齐，后面各阶段脚本就可以假定这些路径始终存在。
-        ensure_directory(target_dir / directory)
-
-    template_root = root / "templates" / "project"
-    # 模板文件保存的是“用户工作区初始化时需要复制的骨架文件”。
-    template_files = {
-        "AGENTS.md.tmpl": target_dir / "AGENTS.md",
-        "CLAUDE.md.tmpl": target_dir / "CLAUDE.md",
-        "gitignore.tmpl": target_dir / ".gitignore",
-        "wiki/index.md.tmpl": target_dir / "wiki" / "index.md",
-        "wiki/log.md.tmpl": target_dir / "wiki" / "log.md",
-        "config/project.yml.tmpl": target_dir / "config" / "project.yml",
-        "config/runtime_manifest.yml.tmpl": target_dir / "config" / "runtime_manifest.yml",
-    }
-
-    for template_name, output_path in template_files.items():
-        # 用同一份 context 渲染，能保证 README、配置、Agent 说明里的项目名一致。
-        rendered = render_template(template_root / template_name, context)
-        output_path.write_text(rendered, encoding="utf-8")
-
-    metadata_files = {
-        target_dir / "state" / "sources.jsonl": [],
-        target_dir / "state" / "ingest_state.jsonl": [],
-        target_dir / "state" / "error_log.jsonl": [],
-        target_dir / "state" / "normalized.jsonl": [],
-        target_dir / STRUCTURE_BLOCKS_REL_PATH: [],
-        target_dir / EVIDENCE_BLOCKS_REL_PATH: [],
-        target_dir / KNOWLEDGE_UNITS_REL_PATH: [],
-        target_dir / "state" / "chunks.jsonl": [],
-        target_dir / "state" / "claims.jsonl": [],
-        target_dir / "state" / "reviews.jsonl": [],
-        target_dir / "state" / "pages.jsonl": [],
-        target_dir / SEMANTIC_DECISIONS_REL_PATH: [],
-        target_dir / SEARCH_PAGES_INDEX_REL_PATH: [],
-    }
-    for path, records in metadata_files.items():
-        # 这些状态文件先创建成空 JSONL，后面脚本就不用额外判“文件是否存在”。
-        write_jsonl(path, records)
-
-    write_alias_index(target_dir, [])
-
-    git_steps: list[str] = []
-    if not (target_dir / ".git").exists():
-        git_steps = git_init_and_commit(target_dir)
-
-    payload = {
-        "project_name": args.project_name,
-        "source_dir": str(raw_dir),
-        "raw_dir": str(raw_dir),
-        "assets_dir": str(assets_dir),
-        "target_dir": str(target_dir),
-        "workspace_summary": build_workspace_summary(target_dir, raw_dir),
-        "created_directories": [
-            str(raw_dir),
-            str(assets_dir),
-            *[
-                str(target_dir / path)
-                for path in (
-                    "normalized",
-                    "chunks",
-                    "claims",
-                    "semantic",
-                    "semantic/batches",
-                    "wiki",
-                    "indexes",
-                    "state",
-                    "reviews",
-                    "logs",
-                    "outputs",
-                    "config",
-                    "reports/lint",
-                )
-            ],
-        ],
-        "raw_dir_relative_path": raw_dir_relative_path,
-        "raw_dir_preexisting": raw_dir_preexisting,
-        "assets_dir_relative_path": assets_dir_relative_path,
-        "assets_dir_preexisting": assets_dir_preexisting,
-        "metadata_files": [str(path) for path in metadata_files],
-        "git_steps": git_steps,
-    }
-    return CommandResult(
-        payload=payload,
-        message=render_workspace_summary_message(
-            "Workspace initialized.",
-            target_dir=target_dir,
-            raw_dir=raw_dir,
-            extra_lines=[
-                f"Project name: {args.project_name}",
-                f"Raw directory existed before init: {'yes' if raw_dir_preexisting else 'no'}",
-            ],
+    return init_cli_component.command_init(
+        build_init_cli_component_deps(
+            find_project_root=find_project_root,
+            structure_blocks_rel_path=STRUCTURE_BLOCKS_REL_PATH,
+            evidence_blocks_rel_path=EVIDENCE_BLOCKS_REL_PATH,
+            knowledge_units_rel_path=KNOWLEDGE_UNITS_REL_PATH,
+            semantic_decisions_rel_path=SEMANTIC_DECISIONS_REL_PATH,
+            search_pages_index_rel_path=SEARCH_PAGES_INDEX_REL_PATH,
+            render_template=render_template,
+            ensure_clean_target=ensure_clean_target,
+            ensure_directory=ensure_directory,
+            write_jsonl=write_jsonl,
+            write_alias_index=write_alias_index,
+            git_init_and_commit=git_init_and_commit,
+            build_workspace_summary=build_workspace_summary,
+            render_workspace_summary_message=render_workspace_summary_message,
         ),
+        args,
     )
 
 
-def command_ingest(args: argparse.Namespace) -> CommandResult:
-    # ingest 是第一条真正处理用户资料的流水线命令。
-    # 它现在包含五步：来源登记、标准化、切块、Claim 草稿抽取、Wiki 页面生成。
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    config = load_workspace_config(target)
-    post_ingest_config = load_post_ingest_review_auto_config(config)
-    document_analysis_config = load_semantic_task_config(config, "document_analysis")
-    claim_candidate_quality_config = load_semantic_task_config(config, "claim_candidate_quality")
-    claim_role_config = load_semantic_task_config(config, "claim_role")
-    page_intent_config = load_semantic_task_config(config, "page_intent")
-    readable_concept_render_config = load_readable_concept_render_config(config)
-    overview_render_config = load_page_render_config(config, "overview")
-    raw_dir = resolve_workspace_raw_dir(target)
-    if not raw_dir.exists():
-        raise FileNotFoundError(f"Raw directory does not exist: {raw_dir}")
-
-    sources_path = target / "state" / "sources.jsonl"
-    ingest_state_path = target / "state" / "ingest_state.jsonl"
-    normalized_path = target / "state" / "normalized.jsonl"
-    structure_blocks_path = target / STRUCTURE_BLOCKS_REL_PATH
-    evidence_blocks_path = target / EVIDENCE_BLOCKS_REL_PATH
-    knowledge_units_path = target / KNOWLEDGE_UNITS_REL_PATH
-    chunks_path = target / "state" / "chunks.jsonl"
-    claims_path = target / "state" / "claims.jsonl"
-    reviews_path = target / "state" / "reviews.jsonl"
-    error_log_path = target / "state" / "error_log.jsonl"
-    pages_path = target / "state" / "pages.jsonl"
-
-    existing_sources = load_jsonl(sources_path)
-    existing_by_hash = {record["source_hash"]: record for record in existing_sources}
-    sources_by_id = {record["source_id"]: record for record in existing_sources}
-    latest_source_by_path = build_latest_source_record_by_path(existing_sources)
-    existing_normalized = {record["source_id"]: record for record in load_jsonl(normalized_path)}
-    existing_structure_source_ids = {record["source_id"] for record in load_jsonl(structure_blocks_path)}
-    existing_evidence_source_ids = {record["source_id"] for record in load_jsonl(evidence_blocks_path)}
-    existing_knowledge_source_ids = {record["source_id"] for record in load_jsonl(knowledge_units_path)}
-    existing_structured_source_ids = (
-        existing_structure_source_ids
-        & existing_evidence_source_ids
-        & existing_knowledge_source_ids
-    )
-    existing_chunked = {record["source_id"]: record for record in load_jsonl(chunks_path)}
-    existing_claim_records = [ensure_claim_lifecycle_defaults(record) for record in load_jsonl(claims_path)]
-    live_existing_claims = filter_live_claim_records(existing_claim_records)
-    historical_existing_claims = [
-        record for record in existing_claim_records
-        if not is_live_claim_record(record)
-    ]
-    claims_by_id = {record["claim_id"]: record for record in live_existing_claims}
-    historical_claims_by_id = {record["claim_id"]: record for record in historical_existing_claims}
-    claims_by_normalized_text = {record["normalized_text"]: record for record in live_existing_claims}
-    claims_by_similarity_bucket: dict[str, list[dict]] = {}
-    for record in live_existing_claims:
-        claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
-    claim_similarity_index = rebuild_claim_similarity_index(live_existing_claims)
-    existing_review_records = [
-        ensure_review_lifecycle_defaults(record)
-        for record in (load_jsonl(reviews_path) if reviews_path.exists() else [])
-    ]
-    live_existing_reviews = filter_live_review_records(existing_review_records)
-    historical_existing_reviews = [
-        record for record in existing_review_records
-        if not is_live_review_record(record)
-    ]
-    existing_reviews = {
-        record["review_id"]: record for record in live_existing_reviews
-    }
-    historical_reviews_by_id = {
-        record["review_id"]: ensure_review_lifecycle_defaults(record)
-        for record in historical_existing_reviews
-    }
-    # 这里按 hash 做首轮去重，意味着内容完全一样的文件只会登记一次。
-    # 后面如果要支持“同内容不同来源”的更细建模，可以再加来源关系表。
-
-    created_sources: list[dict] = []
-    skipped_sources: list[dict] = []
-    normalized_sources: list[dict] = []
-    chunked_sources: list[dict] = []
-    claimed_sources: list[dict] = []
-    review_items: list[dict] = []
-    error_items: list[dict] = []
-    generated_pages: list[dict] = []
-    task_id = f"ingest_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    reingested_source_ids: set[str] = set()
-    purged_claim_ids: set[str] = set()
-    purged_review_ids: set[str] = set()
-
-    # ingest 第一阶段只做来源登记：扫描 raw、生成 source_id、写 sources/state。
-    for file_path in collect_files(raw_dir):
-        source_hash = file_sha256(file_path)
-        relative_path = os.path.relpath(file_path, start=target).replace(os.sep, "/")
-        if source_hash in existing_by_hash:
-            # 已有相同内容时跳过，避免反复导入导致 state 膨胀。
-            skipped_sources.append({
-                "path": str(file_path),
-                "source_hash": source_hash,
-                "reason": "duplicate_hash",
-                "source_id": existing_by_hash[source_hash]["source_id"],
-            })
-            continue
-
-        previous_path_record = latest_source_by_path.get(relative_path)
-        if previous_path_record is not None:
-            # 同一路径但内容哈希变化时，按“路径级版本更新”处理：
-            # 复用原 source_id，清理旧证据链，再让后续 normalized/chunk/claim/wiki
-            # 围绕同一个 source_id 重算，而不是无止境地产生平行来源版本。
-            source_id = previous_path_record["source_id"]
-            version_group = previous_path_record.get("version_group") or build_source_version_group_from_source_path(relative_path)
-            previous_source_hash = previous_path_record.get("source_hash")
-            previous_normalized_path = previous_path_record.get("normalized_path")
-
-            existing_normalized.pop(source_id, None)
-            existing_structured_source_ids.discard(source_id)
-            existing_chunked.pop(source_id, None)
-
-            if previous_normalized_path:
-                normalized_file_path = target / previous_normalized_path
-                if normalized_file_path.exists():
-                    normalized_file_path.unlink()
-
-            chunk_file_path = target / "chunks" / f"{source_id}.jsonl"
-            if chunk_file_path.exists():
-                chunk_file_path.unlink()
-
-            replace_source_scoped_jsonl_records(structure_blocks_path, source_id, [])
-            replace_source_scoped_jsonl_records(evidence_blocks_path, source_id, [])
-            replace_source_scoped_jsonl_records(knowledge_units_path, source_id, [])
-
-            dirty_claim_ids, deleted_claim_ids = purge_source_from_claims(
-                target=target,
-                claims_by_id=claims_by_id,
-                historical_claims_by_id=historical_claims_by_id,
-                source_id=source_id,
-            )
-            purged_claim_ids.update(deleted_claim_ids)
-
-            dirty_review_ids, deleted_review_ids = purge_deleted_claims_from_reviews(
-                reviews_by_id=existing_reviews,
-                historical_reviews_by_id=historical_reviews_by_id,
-                deleted_claim_ids=deleted_claim_ids,
-            )
-            purged_review_ids.update(deleted_review_ids)
-
-            claims_by_normalized_text = {
-                record["normalized_text"]: record for record in claims_by_id.values()
-            }
-            claims_by_similarity_bucket = {}
-            for record in claims_by_id.values():
-                claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
-            claim_similarity_index = rebuild_claim_similarity_index(list(claims_by_id.values()))
-
-            updated_record = dict(previous_path_record)
-            updated_record.update({
-                "source_path": relative_path,
-                "source_type": infer_source_type(file_path),
-                "source_hash": source_hash,
-                "dedupe_key": source_hash,
-                "version_group": version_group,
-                "imported_at": utc_now_iso(),
-                "status": "new",
-                "normalized_path": None,
-                "warnings": [],
-            })
-            replace_jsonl_record(sources_path, "source_id", source_id, updated_record)
-            replace_jsonl_record(
-                ingest_state_path,
-                "source_id",
-                source_id,
-                {
-                    "task_id": task_id,
-                    "source_id": source_id,
-                    "state": "new",
-                    "last_successful_stage": None,
-                    "failed_stage": None,
-                    "retry_count": 0,
-                    "updated_at": utc_now_iso(),
-                },
-            )
-
-            sources_by_id[source_id] = updated_record
-            latest_source_by_path[relative_path] = updated_record
-            existing_by_hash[source_hash] = updated_record
-            created_sources.append(updated_record)
-            reingested_source_ids.add(source_id)
-            continue
-
-        source_id = build_source_id(raw_dir, file_path, source_hash)
-        version_group = build_source_version_group(raw_dir, file_path)
-        record = {
-            "source_id": source_id,
-            "source_path": relative_path,
-            "source_type": infer_source_type(file_path),
-            "source_uri": None,
-            "source_hash": source_hash,
-            "dedupe_key": source_hash,
-            "version_group": version_group,
-            "imported_at": utc_now_iso(),
-            "status": "new",
-            "normalized_path": None,
-            "warnings": [],
-        }
-        append_jsonl(sources_path, record)
-        append_jsonl(
-            ingest_state_path,
-            {
-                "task_id": task_id,
-                "source_id": source_id,
-                "state": "new",
-                "last_successful_stage": None,
-                "failed_stage": None,
-                "retry_count": 0,
-                "updated_at": utc_now_iso(),
-            },
-        )
-        created_sources.append(record)
-        existing_sources.append(record)
-        sources_by_id[source_id] = record
-        latest_source_by_path[relative_path] = record
-
-    # 来源登记完成后，第一版先支持 markdown/plain_text 的最小标准化。
-    for source_record in load_jsonl(sources_path):
-        if source_record["source_id"] in existing_normalized:
-            # 已标准化过的记录直接跳过，保证 ingest 可以重复执行而不反复写文件。
-            continue
-        normalized_record = normalize_source_record(
-            target,
-            source_record,
-            allow_insecure_downloads=not args.disable_insecure_download_retry,
-        )
-        if normalized_record is None:
-            # 暂不支持的文件类型先保留在 sources.jsonl，等待后续转换器接手。
-            continue
-
-        append_jsonl(normalized_path, normalized_record)
-        normalized_sources.append(normalized_record)
-
-        if normalized_record["extraction_quality"] in {"failed", "poor", "partial"}:
-            level = "error" if normalized_record["extraction_quality"] == "failed" else "warning"
-            error_items.append(
-                append_error_record(
-                    error_log_path=error_log_path,
-                    task_id=task_id,
-                    source_id=normalized_record["source_id"],
-                    stage="normalized",
-                    level=level,
-                    message=f"Normalization finished with quality={normalized_record['extraction_quality']}",
-                    details={
-                        "warnings": normalized_record.get("warnings", []),
-                        "normalized_path": normalized_record["normalized_path"],
-                        "source_type": normalized_record["source_type"],
-                    },
-                )
-            )
-
-        updated_source = dict(source_record)
-        updated_source["status"] = (
-            "failed"
-            if normalized_record["extraction_quality"] == "failed"
-            else "review_required"
-            if normalized_record["extraction_quality"] == "poor"
-            else "normalized"
-        )
-        updated_source["normalized_path"] = normalized_record["normalized_path"]
-        # sources.jsonl 记录的是“来源主档案”，状态变化后要同步更新。
-        replace_jsonl_record(sources_path, "source_id", source_record["source_id"], updated_source)
-        sources_by_id[source_record["source_id"]] = updated_source
-
-        replace_jsonl_record(
-            ingest_state_path,
-            "source_id",
-            source_record["source_id"],
-            {
-                "task_id": task_id,
-                "source_id": source_record["source_id"],
-                "state": (
-                    "failed"
-                    if normalized_record["extraction_quality"] == "failed"
-                    else "review_required"
-                    if normalized_record["extraction_quality"] == "poor"
-                    else "normalized"
-                ),
-                "last_successful_stage": None if normalized_record["extraction_quality"] == "failed" else "normalized",
-                "failed_stage": "normalized" if normalized_record["extraction_quality"] == "failed" else None,
-                "retry_count": 0,
-                "updated_at": utc_now_iso(),
-            },
-        )
-
-    normalized_records = load_jsonl(normalized_path)
-    if normalized_records and document_analysis_config.enabled:
-        run_semantic_batch_task(
-            target=target,
-            task_name="document_analysis",
-            dry_run=False,
-        )
-        normalized_records = apply_document_analysis_decisions_to_normalized_records(
-            target=target,
-            normalized_records=normalized_records,
-            task_config=document_analysis_config,
-        )
-        existing_normalized = {record["source_id"]: record for record in normalized_records}
-
-    structured_sources: list[dict] = []
-    for normalized_record in normalized_records:
-        source_id = normalized_record["source_id"]
-        if source_id in existing_structured_source_ids:
-            continue
-        if normalized_record["extraction_quality"] not in {"good", "partial"}:
-            continue
-
-        normalized_file_path = target / normalized_record["normalized_path"]
-        if not normalized_file_path.exists():
-            continue
-        normalized_text = normalized_file_path.read_text(encoding="utf-8")
-        compiled_records = compile_structure_knowledge_records(normalized_record, normalized_text)
-        replace_source_scoped_jsonl_records(
-            structure_blocks_path,
-            source_id,
-            compiled_records["structure_blocks"],
-        )
-        replace_source_scoped_jsonl_records(
-            evidence_blocks_path,
-            source_id,
-            compiled_records["evidence_blocks"],
-        )
-        replace_source_scoped_jsonl_records(
-            knowledge_units_path,
-            source_id,
-            compiled_records["knowledge_units"],
-        )
-        structured_source = {
-            "source_id": source_id,
-            "structure_block_count": len(compiled_records["structure_blocks"]),
-            "evidence_block_count": len(compiled_records["evidence_blocks"]),
-            "knowledge_unit_count": len(compiled_records["knowledge_units"]),
-            "updated_at": compiled_records["updated_at"],
-        }
-        structured_sources.append(structured_source)
-        existing_structured_source_ids.add(source_id)
-
-    # 标准化完成后，继续把合格文档切成 chunk，作为 claim / query 的基础证据单元。
-    for normalized_record in normalized_records:
-        if normalized_record["source_id"] in existing_chunked:
-            continue
-
-        chunk_result = chunk_normalized_record(target, normalized_record)
-        if chunk_result is None:
-            continue
-
-        # 同一 source_id 的 chunk 在原位更新场景下应该整体替换，而不是继续 append。
-        replace_jsonl_records_by_filter(
-            chunks_path,
-            keep_predicate=lambda record, source_id=chunk_result["source_id"]: record.get("source_id") != source_id,
-            replacement_records=chunk_result["chunks"],
-        )
-        chunked_sources.append({
-            "source_id": chunk_result["source_id"],
-            "chunk_file_path": chunk_result["chunk_file_path"],
-            "chunk_count": chunk_result["chunk_count"],
-            "updated_at": chunk_result["updated_at"],
-        })
-        existing_chunked[chunk_result["source_id"]] = {
-            "source_id": chunk_result["source_id"],
-            "chunk_count": chunk_result["chunk_count"],
-        }
-
-        source_record = sources_by_id.get(normalized_record["source_id"])
-        if source_record is not None:
-            updated_source = dict(source_record)
-            updated_source["status"] = "chunked"
-            replace_jsonl_record(sources_path, "source_id", source_record["source_id"], updated_source)
-            sources_by_id[source_record["source_id"]] = updated_source
-
-        replace_jsonl_record(
-            ingest_state_path,
-            "source_id",
-            normalized_record["source_id"],
-            {
-                "task_id": task_id,
-                "source_id": normalized_record["source_id"],
-                "state": "chunked",
-                "last_successful_stage": "chunked",
-                "failed_stage": None,
-                "retry_count": 0,
-                "updated_at": utc_now_iso(),
-            },
-        )
-
-    # Claim 草稿层先做“保守抽取”：
-    # 优先从 Knowledge Unit 抽取，缺少 V2 结构账本时再回退到 chunk 文本。
-    chunk_records = load_jsonl(chunks_path)
-    knowledge_unit_records = load_jsonl(knowledge_units_path)
-    chunks_by_source_id_for_claims: dict[str, list[dict]] = {}
-    for chunk_record in chunk_records:
-        chunks_by_source_id_for_claims.setdefault(chunk_record["source_id"], []).append(chunk_record)
-    knowledge_units_by_source_id: dict[str, list[dict]] = {}
-    for knowledge_unit_record in knowledge_unit_records:
-        if knowledge_unit_record.get("lifecycle_status", "active") != "active":
-            continue
-        knowledge_units_by_source_id.setdefault(knowledge_unit_record["source_id"], []).append(knowledge_unit_record)
-    claims_created_by_source: dict[str, int] = {}
-    completed_claim_source_ids = {
-        source_id
-        for source_id, source_record in sources_by_id.items()
-        if source_claim_stage_completed(source_record)
-    }
-    active_source_ids = choose_active_source_ids(sources_by_id)
-
-    claim_candidate_source_ids = sorted(set(chunks_by_source_id_for_claims) | set(knowledge_units_by_source_id))
-    for source_id in claim_candidate_source_ids:
-        if source_id in completed_claim_source_ids:
-            continue
-        source_claim_candidates = build_claim_candidates_for_source(
-            source_id=source_id,
-            knowledge_units_by_source_id=knowledge_units_by_source_id,
-            chunks_by_source_id=chunks_by_source_id_for_claims,
-        )
-        for claim_record in source_claim_candidates:
-            existing_claim = claims_by_normalized_text.get(claim_record["normalized_text"])
-            if existing_claim is not None:
-                merged_claim = merge_claim_records(existing_claim, claim_record)
-                write_claim_file(target, merged_claim)
-                replace_jsonl_record(claims_path, "claim_id", merged_claim["claim_id"], merged_claim)
-                claims_by_id[merged_claim["claim_id"]] = merged_claim
-                claims_by_normalized_text[merged_claim["normalized_text"]] = merged_claim
-                continue
-
-            similarity_bucket = build_similarity_bucket(claim_record["text"])
-            candidate_claim_ids = collect_claim_review_candidate_ids(
-                claim_record=claim_record,
-                claims_by_similarity_bucket=claims_by_similarity_bucket,
-                claim_similarity_index=claim_similarity_index,
-            )
-            conflicting_candidates = []
-            duplicate_candidates = []
-            incoming_has_negation = has_negation(claim_record["text"])
-
-            for candidate_claim_id in sorted(candidate_claim_ids):
-                similar_claim = claims_by_id.get(candidate_claim_id)
-                if similar_claim is None:
-                    continue
-                if not claims_are_similar_for_review(claim_record["text"], similar_claim["text"]):
-                    continue
-                if has_negation(similar_claim["text"]) != incoming_has_negation:
-                    conflicting_candidates.append(similar_claim)
-                else:
-                    duplicate_candidates.append(similar_claim)
-
-            if duplicate_candidates:
-                claim_record["duplicate_candidates"] = [item["claim_id"] for item in duplicate_candidates]
-                claim_record["review_reason"] = "possible_duplicate_claim"
-                claim_record["status"] = "needs_review"
-
-                review_record = build_review_record(
-                    kind="claim_duplicate",
-                    candidate_claim_ids=sorted([claim_record["claim_id"], *[item["claim_id"] for item in duplicate_candidates]]),
-                    reason="Detected highly similar claims that may need merge or archive decisions.",
-                    evidence=[
-                        {
-                            "claim_id": claim_record["claim_id"],
-                            "text": claim_record["text"],
-                            "source_refs": claim_record["source_refs"],
-                        },
-                        *[
-                            {
-                                "claim_id": item["claim_id"],
-                                "text": item["text"],
-                                "source_refs": item.get("source_refs", []),
-                            }
-                            for item in duplicate_candidates
-                        ],
-                    ],
-                    recommended_action="merge",
-                    signature_parts=[
-                        claim_record["normalized_text"],
-                        *sorted(item["claim_id"] for item in duplicate_candidates),
-                    ],
-                )
-                if review_record["review_id"] not in existing_reviews:
-                    review_file_path = write_review_file(target, review_record)
-                    review_record["review_file_path"] = review_file_path
-                    append_jsonl(reviews_path, review_record)
-                    existing_reviews[review_record["review_id"]] = review_record
-                    review_items.append(review_record)
-
-                error_items.append(
-                    append_error_record(
-                        error_log_path=error_log_path,
-                        task_id=task_id,
-                        source_id=claim_record["source_ids"][0],
-                        stage="claim",
-                        level="warning",
-                        message="Possible duplicate claims detected",
-                        details={
-                            "claim_id": claim_record["claim_id"],
-                            "duplicate_candidates": claim_record["duplicate_candidates"],
-                        },
-                    )
-                )
-
-            if conflicting_candidates:
-                conflict_claim_ids = sorted([claim_record["claim_id"], *[item["claim_id"] for item in conflicting_candidates]])
-                conflict_group = hashlib.sha256("|".join(conflict_claim_ids).encode("utf-8")).hexdigest()[:12]
-                claim_record["conflict_group"] = f"cfg_{conflict_group}"
-                claim_record["review_reason"] = "conflicting_claims_detected"
-                claim_record["status"] = "needs_review"
-
-                evidence = [
-                    {
-                        "claim_id": claim_record["claim_id"],
-                        "text": claim_record["text"],
-                        "source_refs": claim_record["source_refs"],
-                    }
-                ]
-                evidence.extend({
-                    "claim_id": item["claim_id"],
-                    "text": item["text"],
-                    "source_refs": item.get("source_refs", []),
-                } for item in conflicting_candidates)
-
-                review_record = build_review_record(
-                    kind="claim_conflict",
-                    candidate_claim_ids=conflict_claim_ids,
-                    reason="Detected claims with opposite negation pattern but very similar normalized content.",
-                    evidence=evidence,
-                    recommended_action="keep_both",
-                )
-                if review_record["review_id"] not in existing_reviews:
-                    review_file_path = write_review_file(target, review_record)
-                    review_record["review_file_path"] = review_file_path
-                    append_jsonl(reviews_path, review_record)
-                    existing_reviews[review_record["review_id"]] = review_record
-                    review_items.append(review_record)
-
-                error_items.append(
-                    append_error_record(
-                        error_log_path=error_log_path,
-                        task_id=task_id,
-                        source_id=claim_record["source_ids"][0],
-                        stage="claim",
-                        level="warning",
-                        message="Conflicting claims detected",
-                        details={
-                            "claim_id": claim_record["claim_id"],
-                            "conflict_group": claim_record["conflict_group"],
-                            "candidate_claim_ids": conflict_claim_ids,
-                        },
-                    )
-                )
-
-            claim_file_rel_path = write_claim_file(target, claim_record)
-            claim_record["claim_file_path"] = claim_file_rel_path
-            append_jsonl(claims_path, claim_record)
-            claims_by_id[claim_record["claim_id"]] = claim_record
-            claims_by_normalized_text[claim_record["normalized_text"]] = claim_record
-            claims_by_similarity_bucket.setdefault(similarity_bucket, []).append(claim_record)
-            index_claim_similarity_tokens(claim_similarity_index, claim_record)
-            source_id = claim_record["source_ids"][0]
-            claims_created_by_source[source_id] = claims_created_by_source.get(source_id, 0) + 1
-
-    for source_id, claim_count in sorted(claims_created_by_source.items()):
-        source_claims = [
-            record for record in claims_by_id.values()
-            if source_id in record.get("source_ids", [])
-        ]
-        has_review_claim = any(record.get("status") == "needs_review" for record in source_claims)
-
-        claimed_sources.append({
-            "source_id": source_id,
-            "claim_count": claim_count,
-            "needs_review": has_review_claim,
-        })
-
-        source_record = sources_by_id.get(source_id)
-        if source_record is not None:
-            updated_source = dict(source_record)
-            updated_source["status"] = "review_required" if has_review_claim else "claimed"
-            replace_jsonl_record(sources_path, "source_id", source_id, updated_source)
-            sources_by_id[source_id] = updated_source
-
-        replace_jsonl_record(
-            ingest_state_path,
-            "source_id",
-            source_id,
-            {
-                "task_id": task_id,
-                "source_id": source_id,
-                "state": "review_required" if has_review_claim else "claimed",
-                "last_successful_stage": "claimed",
-                "failed_stage": None,
-                "retry_count": 0,
-                "updated_at": utc_now_iso(),
-            },
-        )
-
-    # 如果来源被原位重算过，claims/reviews 的内存状态可能已经发生清理或删除，
-    # 这里先统一刷回 state 文件，确保后续页面生成和 lint 看到的是同一套事实。
-    if reingested_source_ids or purged_claim_ids:
-        claim_state_records = build_ordered_claim_state_records(
-            live_claims_by_id=claims_by_id,
-            historical_claims_by_id=historical_claims_by_id,
-        )
-        write_jsonl(claims_path, claim_state_records)
-        for claim_record in claim_state_records:
-            write_claim_file(target, claim_record)
-
-    current_claim_records = [ensure_claim_lifecycle_defaults(record) for record in load_jsonl(claims_path)]
-    quality_archived_claim_ids: set[str] = set()
-    if current_claim_records and claim_candidate_quality_config.enabled:
-        run_semantic_batch_task(
-            target=target,
-            task_name="claim_candidate_quality",
-            dry_run=False,
-        )
-        current_claim_records, quality_archived_claim_ids, _ = apply_claim_candidate_quality_decisions_to_claim_records(
-            target=target,
-            claim_records=current_claim_records,
-            task_config=claim_candidate_quality_config,
-        )
-        if quality_archived_claim_ids:
-            claims_created_by_source = {
-                source_id: count
-                for source_id, count in claims_created_by_source.items()
-                if count > 0
-            }
-
-    semantic_claim_updates_applied = False
-    if current_claim_records and claim_role_config.enabled:
-        claim_records_before_semantic = [dict(record) for record in current_claim_records]
-        run_semantic_batch_task(
-            target=target,
-            task_name="claim_role",
-            dry_run=False,
-        )
-        current_claim_records = apply_claim_role_decisions_to_claim_records(
-            target=target,
-            claim_records=current_claim_records,
-            task_config=claim_role_config,
-        )
-        semantic_claim_updates_applied = current_claim_records != claim_records_before_semantic
-        live_existing_claims = filter_live_claim_records(current_claim_records)
-        historical_existing_claims = [
-            record for record in current_claim_records
-            if not is_live_claim_record(record)
-        ]
-        claims_by_id = {record["claim_id"]: record for record in live_existing_claims}
-        historical_claims_by_id = {record["claim_id"]: record for record in historical_existing_claims}
-        claims_by_normalized_text = {record["normalized_text"]: record for record in live_existing_claims}
-        claims_by_similarity_bucket = {}
-        for record in live_existing_claims:
-            claims_by_similarity_bucket.setdefault(build_similarity_bucket(record["text"]), []).append(record)
-        claim_similarity_index = rebuild_claim_similarity_index(live_existing_claims)
-
-    if reingested_source_ids or purged_review_ids:
-        review_state_records = build_ordered_review_state_records(
-            live_reviews_by_id=existing_reviews,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-        write_jsonl(reviews_path, review_state_records)
-        for review_record in review_state_records:
-            write_review_file(target, review_record)
-
-    # 如果这次 ingest 没有引入任何上游变化，就不必再完整重跑页面生成与索引更新。
-    # 这样重复执行 ingest 时，系统会更像“增量编译”而不是“全量重编”。
-    can_skip_page_regeneration = workspace_can_skip_page_regeneration(
-        sources_by_id=sources_by_id,
-        created_sources=created_sources,
-        normalized_sources=normalized_sources,
-        chunked_sources=chunked_sources,
-        claims_created_by_source=claims_created_by_source,
-        review_items=review_items,
-        semantic_claim_updates_applied=semantic_claim_updates_applied,
-    )
-
-    if can_skip_page_regeneration:
-        existing_pages = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)] if pages_path.exists() else []
-        existing_pages = apply_page_alias_overrides_to_records(target, existing_pages)
-        live_existing_pages = filter_live_page_records(existing_pages)
-        page_records_by_id = {record["page_id"]: record for record in existing_pages}
-        all_chunk_records = load_jsonl(chunks_path)
-        claims_by_source_id: dict[str, list[dict]] = {}
-        for claim_record in claims_by_id.values():
-            for source_id in claim_record.get("source_ids", []):
-                claims_by_source_id.setdefault(source_id, []).append(claim_record)
-        chunks_by_source_id: dict[str, list[dict]] = {}
-        for chunk_record in all_chunk_records:
-            chunks_by_source_id.setdefault(chunk_record["source_id"], []).append(chunk_record)
-        missing_source_page_source_ids = collect_missing_source_page_source_ids(
-            active_source_ids=active_source_ids,
-            sources_by_id=sources_by_id,
-            page_records_by_id=page_records_by_id,
-            claims_by_source_id=claims_by_source_id,
-            chunks_by_source_id=chunks_by_source_id,
-        )
-        missing_concept_bucket_keys = collect_missing_concept_bucket_keys(
-            claims_by_similarity_bucket=claims_by_similarity_bucket,
-            page_records_by_id=page_records_by_id,
-        )
-        missing_workspace_overview = workspace_overview_page_missing(
-            claims_by_similarity_bucket=claims_by_similarity_bucket,
-            page_records_by_id=page_records_by_id,
-        )
-        if (
-            missing_source_page_source_ids
-            or missing_concept_bucket_keys
-            or missing_workspace_overview
-        ):
-            can_skip_page_regeneration = False
-
-    post_ingest_review_auto_payload = None
-
-    if can_skip_page_regeneration:
-        write_jsonl(pages_path, existing_pages)
-        alias_index = write_alias_index(target, existing_pages)
-        previous_search_index_records = load_search_pages_index(target)
-        search_index = {
-            "index_path": str(SEARCH_PAGES_INDEX_REL_PATH),
-            "record_count": len(previous_search_index_records),
-            "rebuilt_count": 0,
-            "reused_count": len(previous_search_index_records),
-            "index_version": SEARCH_PAGES_INDEX_VERSION,
-            "updated_at": utc_now_iso(),
-        }
-        append_wiki_log(target, task_id, generated_pages)
-        payload = {
-            "task_id": task_id,
-            "workspace": str(target),
-            "raw_dir": str(raw_dir),
-            "workspace_summary": build_workspace_summary(target, raw_dir),
-            "created_sources": created_sources,
-            "skipped_sources": skipped_sources,
-            "normalized_sources": normalized_sources,
-            "structured_sources": structured_sources,
-            "chunked_sources": chunked_sources,
-            "claimed_sources": claimed_sources,
-            "generated_pages": generated_pages,
-            "search_index": search_index,
-            "alias_index": {
-                "index_path": str(ALIAS_INDEX_REL_PATH),
-                "canonical_count": len(alias_index.get("canonical_map", {})),
-                "alias_key_count": len(alias_index.get("alias_map", {})),
-                "conflict_count": len(alias_index.get("conflicts", [])),
-                "index_version": alias_index.get("index_version"),
-            },
-            "review_items": review_items,
-            "error_items": error_items,
-            "summary": {
-                "created_count": len(created_sources),
-                "skipped_count": len(skipped_sources),
-                "normalized_count": len(normalized_sources),
-                "structured_count": len(structured_sources),
-                "chunked_count": len(chunked_sources),
-                "claimed_count": len(claimed_sources),
-                "changed_page_count": 0,
-                "review_count": len(review_items),
-                "error_count": len([item for item in error_items if item["level"] == "error"]),
-                "warning_count": len([item for item in error_items if item["level"] == "warning"]),
-                "existing_page_count": len(live_existing_pages),
-                "tracked_page_count": len(existing_pages),
-            },
-        }
-        if post_ingest_config.get("review_auto"):
-            post_ingest_review_auto_payload = run_post_ingest_review_auto(target)
-            payload["post_ingest_review_auto"] = post_ingest_review_auto_payload
-        return CommandResult(
-            payload=payload,
-            message=render_workspace_summary_message(
-                "Ingest completed with no upstream changes; wiki regeneration was skipped.",
-                target_dir=target,
-                raw_dir=raw_dir,
-                extra_lines=[
-                    f"Task id: {task_id}",
-                    (
-                        "Ingest: "
-                        f"normalized={payload['summary']['normalized_count']}, "
-                        f"structured={payload['summary']['structured_count']}, "
-                        f"chunks={payload['summary']['chunked_count']}, "
-                        f"claims={payload['summary']['claimed_count']}, "
-                        f"changed_pages={payload['summary']['changed_page_count']}, "
-                        f"reviews_detected={payload['summary']['review_count']}, "
-                        f"warnings={payload['summary']['warning_count']}, "
-                        f"errors={payload['summary']['error_count']}"
-                    ),
-                    (
-                        render_post_ingest_review_auto_summary(post_ingest_review_auto_payload)
-                    )
-                    if post_ingest_review_auto_payload is not None else None,
-                ],
-            ),
-        )
-
-    # 先生成来源摘要页，形成 source -> claim -> page 的第一层闭环。
-    page_records = [ensure_page_lifecycle_defaults(record) for record in load_jsonl(pages_path)] if pages_path.exists() else []
-    page_records = apply_page_alias_overrides_to_records(target, page_records)
-    page_records_by_id = {record["page_id"]: record for record in page_records}
-    all_claim_records = build_ordered_claim_state_records(
-        live_claims_by_id=claims_by_id,
-        historical_claims_by_id=historical_claims_by_id,
-    )
-    all_chunk_records = load_jsonl(chunks_path)
-    dirty_claim_ids: set[str] = set()
-    dirty_review_ids: set[str] = set()
-    existing_overview_page = page_records_by_id.get(build_workspace_overview_page_id())
-    if existing_overview_page is not None and existing_overview_page.get("type") == "overview":
-        overview_page_id = existing_overview_page["page_id"]
-        for claim_record in claims_by_id.values():
-            if overview_page_id in claim_record.get("page_ids", []):
-                claim_record["page_ids"] = [item for item in claim_record["page_ids"] if item != overview_page_id]
-                claim_record["updated_at"] = utc_now_iso()
-                dirty_claim_ids.add(claim_record["claim_id"])
-        for review_record in existing_reviews.values():
-            if overview_page_id in review_record.get("candidate_page_ids", []):
-                review_record["candidate_page_ids"] = [
-                    item for item in review_record["candidate_page_ids"] if item != overview_page_id
-                ]
-                dirty_review_ids.add(review_record["review_id"])
-    changed_source_ids = {record["source_id"] for record in created_sources}
-    changed_source_ids.update(record["source_id"] for record in normalized_sources)
-    changed_source_ids.update(record["source_id"] for record in chunked_sources)
-    changed_source_ids.update(claims_created_by_source.keys())
-    normalized_records_by_source = {
-        record["source_id"]: record for record in load_jsonl(normalized_path)
-    }
-    claims_by_source_id: dict[str, list[dict]] = {}
-    for claim_record in filter_live_claim_records(all_claim_records):
-        for source_id in claim_record.get("source_ids", []):
-            claims_by_source_id.setdefault(source_id, []).append(claim_record)
-    chunks_by_source_id: dict[str, list[dict]] = {}
-    for chunk_record in all_chunk_records:
-        chunks_by_source_id.setdefault(chunk_record["source_id"], []).append(chunk_record)
-
-    changed_source_ids.update(
-        collect_missing_source_page_source_ids(
-            active_source_ids=active_source_ids,
-            sources_by_id=sources_by_id,
-            page_records_by_id=page_records_by_id,
-            claims_by_source_id=claims_by_source_id,
-            chunks_by_source_id=chunks_by_source_id,
-        )
-    )
-
-    for source_record in load_jsonl(sources_path):
-        source_id = source_record["source_id"]
-        if source_id not in changed_source_ids:
-            continue
-        if source_id not in active_source_ids:
-            continue
-        source_claims = claims_by_source_id.get(source_id, [])
-        source_chunks = chunks_by_source_id.get(source_id, [])
-        if not source_claims and not source_chunks:
-            continue
-
-        # 来源摘要页正文里会展示当前来源状态。
-        # 如果这里仍然沿用上一阶段的 claimed/chunked 状态，第一页生成出来的正文
-        # 就会和后面真正写回 sources.jsonl 的 generated 状态不一致，导致下一次 ingest
-        # 平白再改一遍来源页。这里先在内存里把“即将生成页面”的来源状态提升到 generated，
-        # 再用于页面渲染和状态落盘，保证第一次与后续重复运行的页面签名一致。
-        source_record_for_page = dict(sources_by_id.get(source_id, source_record))
-        source_record_for_page["status"] = "generated"
-
-        normalized_record = normalized_records_by_source.get(source_id)
-        page_rel_path = source_summary_page_path(
-            source_id,
-            normalized_record["title"] if normalized_record else Path(source_record["source_path"]).stem,
-        )
-        page_text, page_record = build_source_summary_page(
-            source_record=source_record_for_page,
-            page_rel_path=page_rel_path,
-            normalized_record=normalized_record,
-            claim_records=source_claims,
-            chunk_records=source_chunks,
-        )
-        page_record = apply_page_alias_overrides(target, page_record)
-        page_record["page_path"] = str(page_rel_path)
-        stored_page_record, page_changed = upsert_wiki_page(
-            target=target,
-            page_records_by_id=page_records_by_id,
-            page_record=page_record,
-            page_text=page_text,
-        )
-        if page_changed:
-            generated_pages.append(stored_page_record)
-            dirty_claim_ids.update(
-                link_claims_to_page_in_memory(
-                    source_claims,
-                    stored_page_record["page_id"],
-                    claims_by_id,
-                )
-            )
-
-        replace_jsonl_record(
-            ingest_state_path,
-            "source_id",
-            source_id,
-            {
-                "task_id": task_id,
-                "source_id": source_id,
-                "state": "generated",
-                "last_successful_stage": "generated",
-                "failed_stage": None,
-                "retry_count": 0,
-                "updated_at": utc_now_iso(),
-            },
-        )
-
-        replace_jsonl_record(sources_path, "source_id", source_id, source_record_for_page)
-        sources_by_id[source_id] = source_record_for_page
-
-    # 再生成概念候选页，让多来源、多 claim 的主题可以在 Wiki 层聚合起来。
-    # 这里直接沿用内存中的 claims 映射，保证前面给来源页补上的 page 反链
-    # 在概念页生成阶段立刻可见，不必依赖中途先刷回磁盘。
-    all_claim_records = list(claims_by_id.values())
-    review_records = list(existing_reviews.values())
-    concept_claim_groups: dict[str, list[dict]] = {}
-    for claim_record in all_claim_records:
-        active_claim_source_ids = [
-            source_id for source_id in claim_record.get("source_ids", [])
-            if source_id in active_source_ids
-        ]
-        if not active_claim_source_ids:
-            continue
-        # 概念页聚合与 review 检测共享更稳的 group key，减少“同主题分裂成多页”。
-        bucket_key = build_concept_group_key(claim_record)
-        concept_claim_groups.setdefault(bucket_key, []).append(claim_record)
-    concept_claim_groups = regroup_concept_claims_by_canonical_topic(concept_claim_groups)
-    if concept_claim_groups and page_intent_config.enabled:
-        run_semantic_batch_task(
-            target=target,
-            task_name="page_intent",
-            dry_run=False,
-        )
-    page_routes_by_bucket = apply_page_intent_decisions_to_claim_groups(
-        target=target,
-        concept_claim_groups=concept_claim_groups,
-        task_config=page_intent_config,
-    )
-
-    changed_bucket_keys = set()
-    for claim_record in all_claim_records:
-        if any(source_id in changed_source_ids for source_id in claim_record.get("source_ids", [])):
-            original_bucket_key = build_concept_group_key(claim_record)
-            matching_bucket_key = next(
-                (
-                    bucket_key
-                    for bucket_key, grouped_claims in concept_claim_groups.items()
-                    if any(item["claim_id"] == claim_record["claim_id"] for item in grouped_claims)
-                ),
-                original_bucket_key,
-            )
-            changed_bucket_keys.add(matching_bucket_key)
-    changed_bucket_keys.update(
-        collect_missing_concept_bucket_keys(
-            claims_by_similarity_bucket=concept_claim_groups,
-            page_records_by_id=page_records_by_id,
-        )
-    )
-    if semantic_claim_updates_applied:
-        changed_bucket_keys.update(concept_claim_groups.keys())
-    for bucket_key, grouped_claims in sorted(concept_claim_groups.items()):
-        if bucket_key not in changed_bucket_keys:
-            continue
-        page_route = page_route_for_bucket(page_routes_by_bucket, bucket_key)
-        page_intent = preferred_page_intent_for_claim_group(
-            grouped_claims,
-            page_route.get("page_intent", "topic"),
-        )
-        page_route["page_intent"] = page_intent
-        page_route["route_target"] = page_intent
-        if page_intent == "reject":
-            continue
-        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
-            group_topic_label = choose_group_topic_label(grouped_claims)
-            canonical_claim = choose_canonical_claim(grouped_claims, group_topic_label)
-            concept_page_id = build_concept_page_id(bucket_key)
-            concept_title, concept_title_quality = resolve_concept_title_candidate(
-                target=target,
-                config=config,
-                canonical_claim=canonical_claim,
-                claim_records=grouped_claims,
-                preferred_section_label=group_topic_label,
-            )
-            page_rel_path = concept_summary_page_path(
-                concept_page_id,
-                concept_title,
-            )
-            page_text, page_record = build_concept_page(
-                target=target,
-                bucket_key=bucket_key,
-                page_rel_path=page_rel_path,
-                claim_records=grouped_claims,
-                page_records_by_id=page_records_by_id,
-                review_records=review_records,
-                render_config=readable_concept_render_config,
-            )
-            page_record = apply_page_route_to_page_record(page_record, page_route)
-            page_record = apply_page_alias_overrides(target, page_record)
-            page_record["page_path"] = str(page_rel_path)
-            stored_page_record, page_changed = upsert_wiki_page(
-                target=target,
-                page_records_by_id=page_records_by_id,
-                page_record=page_record,
-                page_text=page_text,
-            )
-            if page_changed:
-                generated_pages.append(stored_page_record)
-                dirty_claim_ids.update(
-                    link_claims_to_page_in_memory(
-                        grouped_claims,
-                        stored_page_record["page_id"],
-                        claims_by_id,
-                    )
-                )
-                dirty_review_ids.update(
-                    link_reviews_to_page_in_memory(
-                        review_records=review_records,
-                        page_id=stored_page_record["page_id"],
-                        claim_ids=stored_page_record["claim_ids"],
-                        reviews_by_id=existing_reviews,
-                    )
-                )
-
-        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
-            page_id = page_intent_page_id(bucket_key, page_intent)
-            page_title_source = choose_group_topic_label(grouped_claims) or choose_canonical_claim(grouped_claims).get("text", "")
-            page_rel_path = page_intent_page_path(page_intent, page_id, page_title_source)
-            page_text, page_record = build_intent_routed_page(
-                target=target,
-                config=config,
-                bucket_key=bucket_key,
-                page_intent=page_intent,
-                page_rel_path=page_rel_path,
-                claim_records=grouped_claims,
-                page_records_by_id=page_records_by_id,
-                review_records=review_records,
-            )
-            page_record = apply_page_route_to_page_record(page_record, page_route)
-            page_record = apply_page_alias_overrides(target, page_record)
-            page_record["page_path"] = str(page_rel_path)
-            stored_page_record, page_changed = upsert_wiki_page(
-                target=target,
-                page_records_by_id=page_records_by_id,
-                page_record=page_record,
-                page_text=page_text,
-            )
-            if page_changed:
-                generated_pages.append(stored_page_record)
-                dirty_claim_ids.update(
-                    link_claims_to_page_in_memory(
-                        grouped_claims,
-                        stored_page_record["page_id"],
-                        claims_by_id,
-                    )
-                )
-                dirty_review_ids.update(
-                    link_reviews_to_page_in_memory(
-                        review_records=review_records,
-                        page_id=stored_page_record["page_id"],
-                        claim_ids=stored_page_record["claim_ids"],
-                        reviews_by_id=existing_reviews,
-                    )
-                )
-
-    overview_concept_pages = collect_workspace_overview_concept_pages(
-        claims_by_similarity_bucket=concept_claim_groups,
-        page_records_by_id=page_records_by_id,
-    )
-    if should_generate_workspace_overview_page(overview_concept_pages):
-        overview_page_rel_path = workspace_overview_page_path()
-        overview_page_text, overview_page_record = build_workspace_overview_page(
-            target=target,
-            page_rel_path=overview_page_rel_path,
-            concept_pages=overview_concept_pages,
-            page_records_by_id=page_records_by_id,
-            claim_records_by_id=claims_by_id,
-            render_config=overview_render_config,
-        )
-        overview_page_record = apply_page_alias_overrides(target, overview_page_record)
-        overview_page_record["page_path"] = str(overview_page_rel_path)
-        stored_overview_page, overview_page_changed = upsert_wiki_page(
-            target=target,
-            page_records_by_id=page_records_by_id,
-            page_record=overview_page_record,
-            page_text=overview_page_text,
-        )
-        dirty_claim_ids.update(
-            link_claims_to_page_in_memory(
-                [
-                    claims_by_id[claim_id]
-                    for claim_id in stored_overview_page["claim_ids"]
-                    if claim_id in claims_by_id
-                ],
-                stored_overview_page["page_id"],
-                claims_by_id,
-            )
-        )
-        dirty_review_ids.update(
-            link_reviews_to_page_in_memory(
-                review_records=review_records,
-                page_id=stored_overview_page["page_id"],
-                claim_ids=stored_overview_page["claim_ids"],
-                reviews_by_id=existing_reviews,
-            )
-        )
-        if overview_page_changed:
-            generated_pages.append(stored_overview_page)
-
-    desired_auto_page_ids = {
-        expected_source_summary_page_id(source_id)
-        for source_id in active_source_ids
-        if claims_by_source_id.get(source_id) or chunks_by_source_id.get(source_id)
-    }
-    forced_stale_page_ids: set[str] = set()
-    for bucket_key, grouped_claims in concept_claim_groups.items():
-        page_route = page_route_for_bucket(page_routes_by_bucket, bucket_key)
-        page_intent = page_route.get("page_intent", "topic")
-        forced_stale_page_ids.update(
-            {
-                build_concept_page_id(bucket_key),
-                *{
-                    page_intent_page_id(bucket_key, stale_intent)
-                    for stale_intent in {"guide", "example", "topic", "reference", "timeline"}
-                    if stale_intent != page_intent
-                },
-            }
-        )
-        if page_intent == "concept" and should_generate_concept_page(grouped_claims):
-            desired_auto_page_ids.add(build_concept_page_id(bucket_key))
-        elif page_intent in {"guide", "example", "topic", "reference", "timeline"}:
-            desired_auto_page_ids.add(page_intent_page_id(bucket_key, page_intent))
-    if should_generate_workspace_overview_page(overview_concept_pages):
-        desired_auto_page_ids.add(build_workspace_overview_page_id())
-
-    removed_pages, pruned_claim_ids, pruned_review_ids = prune_stale_auto_pages(
-        target=target,
-        page_records_by_id=page_records_by_id,
-        desired_auto_page_ids=desired_auto_page_ids,
-        claims_by_id=claims_by_id,
-        reviews_by_id=existing_reviews,
-        forced_stale_page_ids=forced_stale_page_ids - desired_auto_page_ids,
-    )
-    if removed_pages:
-        generated_pages.extend(removed_pages)
-    dirty_claim_ids.update(pruned_claim_ids)
-    dirty_review_ids.update(pruned_review_ids)
-
-    # 页面阶段结束后再统一把内存中的 claims / reviews / pages 落盘，
-    # 避免生成大量概念页时频繁整文件重写，明显降低大资料集下的 ingest 耗时。
-    if dirty_claim_ids:
-        claim_state_records = build_ordered_claim_state_records(
-            live_claims_by_id=claims_by_id,
-            historical_claims_by_id=historical_claims_by_id,
-        )
-        write_jsonl(claims_path, claim_state_records)
-        for claim_id in dirty_claim_ids:
-            write_claim_file(target, claims_by_id[claim_id])
-
-    if dirty_review_ids:
-        review_state_records = build_ordered_review_state_records(
-            live_reviews_by_id=existing_reviews,
-            historical_reviews_by_id=historical_reviews_by_id,
-        )
-        write_jsonl(reviews_path, review_state_records)
-        for review_id in dirty_review_ids:
-            write_review_file(target, existing_reviews[review_id])
-
-    # pages.jsonl 这里保留完整页面账本：
-    # 在线页面继续参与 query/index，removed 页面则作为历史痕迹留存。
-    write_jsonl(pages_path, list(page_records_by_id.values()))
-    page_links_index = write_page_links_index(target, list(page_records_by_id.values()))
-    for page_id, link_entry in page_links_index.get("pages", {}).items():
-        page_record = page_records_by_id.get(page_id)
-        if page_record is None:
-            continue
-        page_record["outgoing_page_ids"] = link_entry.get("outgoing_page_ids", [])
-        page_record["incoming_page_ids"] = link_entry.get("incoming_page_ids", [])
-        page_record["related_page_ids"] = link_entry.get("related_page_ids", [])
-    write_jsonl(pages_path, list(page_records_by_id.values()))
-
-    all_claim_records = list(claims_by_id.values())
-    page_records_for_index = list(page_records_by_id.values())
-    claim_records_by_id = {record["claim_id"]: record for record in all_claim_records}
-    previous_search_index_records = load_search_pages_index(target)
-    search_index = write_search_pages_index(
-        target=target,
-        page_records=page_records_for_index,
-        claim_records_by_id=claim_records_by_id,
-        previous_records=previous_search_index_records,
-    )
-
-    alias_index = write_alias_index(target, page_records_for_index)
-    alias_conflict_reviews, _ = build_alias_conflict_reviews(alias_index, existing_reviews)
-    for review_record in alias_conflict_reviews:
-        review_file_path = write_review_file(target, review_record)
-        review_record["review_file_path"] = review_file_path
-        append_jsonl(reviews_path, review_record)
-        existing_reviews[review_record["review_id"]] = review_record
-        review_items.append(review_record)
-    rebuild_wiki_index(target, list(page_records_by_id.values()))
-    append_wiki_log(target, task_id, generated_pages)
-
-    payload = {
-        "task_id": task_id,
-        "workspace": str(target),
-        "raw_dir": str(raw_dir),
-        "workspace_summary": build_workspace_summary(target, raw_dir),
-        "created_sources": created_sources,
-        "skipped_sources": skipped_sources,
-        "normalized_sources": normalized_sources,
-        "structured_sources": structured_sources,
-        "chunked_sources": chunked_sources,
-        "claimed_sources": claimed_sources,
-        "generated_pages": generated_pages,
-        "search_index": search_index,
-        "alias_index": {
-            "index_path": str(ALIAS_INDEX_REL_PATH),
-            "canonical_count": len(alias_index.get("canonical_map", {})),
-            "alias_key_count": len(alias_index.get("alias_map", {})),
-            "conflict_count": len(alias_index.get("conflicts", [])),
-            "index_version": alias_index.get("index_version"),
-        },
-        "review_items": review_items,
-        "error_items": error_items,
-        "summary": {
-            "created_count": len(created_sources),
-            "skipped_count": len(skipped_sources),
-            "normalized_count": len(normalized_sources),
-            "structured_count": len(structured_sources),
-            "chunked_count": len(chunked_sources),
-            "claimed_count": len(claimed_sources),
-            "changed_page_count": len(generated_pages),
-            "review_count": len(review_items),
-            "error_count": len([item for item in error_items if item["level"] == "error"]),
-            "warning_count": len([item for item in error_items if item["level"] == "warning"]),
-        },
-    }
-    if post_ingest_config.get("review_auto"):
-        post_ingest_review_auto_payload = run_post_ingest_review_auto(target)
-        payload["post_ingest_review_auto"] = post_ingest_review_auto_payload
-    return CommandResult(
-        payload=payload,
-        message=render_workspace_summary_message(
-            "Ingest registration, normalization, chunking, claim drafting, and wiki generation completed.",
-            target_dir=target,
-            raw_dir=raw_dir,
-            extra_lines=[
-                f"Task id: {task_id}",
-                (
-                    "Ingest: "
-                    f"normalized={payload['summary']['normalized_count']}, "
-                    f"structured={payload['summary']['structured_count']}, "
-                    f"chunks={payload['summary']['chunked_count']}, "
-                    f"claims={payload['summary']['claimed_count']}, "
-                    f"changed_pages={payload['summary']['changed_page_count']}, "
-                    f"reviews_detected={payload['summary']['review_count']}, "
-                    f"warnings={payload['summary']['warning_count']}, "
-                    f"errors={payload['summary']['error_count']}"
-                ),
-                (
-                    render_post_ingest_review_auto_summary(post_ingest_review_auto_payload)
-                )
-                if post_ingest_review_auto_payload is not None
-                else None,
-            ],
-        ),
+def build_misc_cli_deps(
+    *,
+    load_page_state_records: object,
+    load_claim_state_maps_override: object | None = None,
+    load_review_state_maps_override: object | None = None,
+) -> MiscCliDeps:
+    return build_misc_cli_component_deps(
+        find_project_root=find_project_root,
+        workspace_schema_guard_payload=workspace_schema_guard_payload,
+        load_simple_yaml=load_simple_yaml,
+        resolve_workspace_path=resolve_workspace_path,
+        load_jsonl=load_jsonl,
+        load_semantic_decisions=load_semantic_decisions,
+        ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+        filter_live_claim_records=filter_live_claim_records,
+        is_live_claim_record=is_live_claim_record,
+        ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+        filter_live_review_records=filter_live_review_records,
+        is_live_review_record=is_live_review_record,
+        load_page_state_records=load_page_state_records,
+        ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+        filter_live_page_records=filter_live_page_records,
+        is_live_page_record=is_live_page_record,
+        claim_semantic_risk_issues=claim_semantic_risk_issues,
+        rendered_page_grounding_issues=rendered_page_grounding_issues,
+        concept_page_quality_issues=concept_page_quality_issues,
+        page_semantic_consistency_issues=page_semantic_consistency_issues,
+        page_intent_brake_issues=page_intent_brake_issues,
+        load_alias_index=load_alias_index,
+        alias_index_path=alias_index_path,
+        unresolved_alias_conflicts=unresolved_alias_conflicts,
+        load_search_pages_index=load_search_pages_index,
+        atomic_write_text=atomic_write_text,
+        build_workspace_summary=build_workspace_summary,
+        render_workspace_summary_message=render_workspace_summary_message,
+        alias_index_rel_path=str(ALIAS_INDEX_REL_PATH),
+        search_pages_index_rel_path=str(SEARCH_PAGES_INDEX_REL_PATH),
+        structure_blocks_rel_path=str(STRUCTURE_BLOCKS_REL_PATH),
+        evidence_blocks_rel_path=str(EVIDENCE_BLOCKS_REL_PATH),
+        knowledge_units_rel_path=str(KNOWLEDGE_UNITS_REL_PATH),
+        semantic_decisions_rel_path=str(SEMANTIC_DECISIONS_REL_PATH),
+        ensure_workspace_schema_supported=ensure_workspace_schema_supported,
+        page_render_targets=PAGE_RENDER_TARGETS,
+        load_claim_state_maps=load_claim_state_maps_override or load_claim_state_maps,
+        load_review_state_maps=load_review_state_maps_override or load_review_state_maps,
+        rebuild_review_affected_pages=rebuild_review_affected_pages,
+        live_pages_for_render_target=live_pages_for_render_target,
+        page_record_render_target=page_record_render_target,
+        run_semantic_batch_task=run_semantic_batch_task,
+        is_actionable_review_record=is_actionable_review_record,
+        utc_now_iso=utc_now_iso,
     )
 
 
 def command_lint(args: argparse.Namespace) -> CommandResult:
-    # lint 在 V1 里承担“结构 + 基础质量巡检”双重职责：
-    # - 目录与状态文件是否完整
-    # - page / claim / review / alias index 是否彼此对齐
-    root = find_project_root()
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else root
-
-    checks = []
-
-    def add_check(name: str, ok: bool, details: str, severity: str = "error") -> None:
-        # 统一收集检查项，后面既能给人看，也方便做 JSON 输出。
-        checks.append({
-            "name": name,
-            "ok": ok,
-            "severity": severity,
-            "details": details,
-        })
-
-    if target == root:
-        add_check("project_root", True, "Linting repository root scaffold.", severity="info")
-        required_paths = [
-            "README.md",
-            "docs/MyAgentWiki系统详细设计.md",
-            "pyproject.toml",
-            "config/runtime_manifest.yml",
-            "src/myagentwiki/cli.py",
-            "templates/project/config/project.yml.tmpl",
-        ]
-    else:
-        schema_guard_payload = workspace_schema_guard_payload(target)
-        add_check("workspace_target", True, f"Linting initialized workspace: {target}", severity="info")
-        add_check(
-            name="workspace_schema_supported",
-            ok=schema_guard_payload.get("status") == "supported",
-            details=(
-                f"workspace.schema_version={schema_guard_payload.get('workspace_schema_version')} "
-                f"(expected={schema_guard_payload.get('expected_schema_version')})"
+    return misc_cli_component.command_lint(
+        build_misc_cli_deps(
+            load_page_state_records=repo_build_page_state_records_loader(
+                load_jsonl=load_jsonl,
+                ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
             ),
-        )
-        required_paths = [
-            "wiki/index.md",
-            "wiki/log.md",
-            "config/project.yml",
-            "AGENTS.md",
-            "CLAUDE.md",
-            str(ALIAS_INDEX_REL_PATH),
-        ]
-
-    for rel_path in required_paths:
-        # 这里不区分文件还是目录，只要求“该路径存在”。
-        path = target / rel_path
-        add_check(
-            name=f"path_exists:{rel_path}",
-            ok=path.exists(),
-            details=f"Expected path: {path}",
-        )
-
-    if target != root:
-        live_claim_records: list[dict] = []
-        claim_records_by_id: dict[str, dict] = {}
-        config_path = target / "config" / "project.yml"
-        raw_dir = resolve_workspace_path(target, load_simple_yaml(config_path)["paths"]["raw"]) if config_path.exists() else target / "raw"
-        add_check(
-            name="raw_exists",
-            ok=raw_dir.exists(),
-            details="The raw directory should exist next to the workspace.",
-        )
-        add_check(
-            name="git_initialized",
-            ok=(target / ".git").exists(),
-            details="Initialized workspace should have a git repository.",
-        )
-        add_check(
-            name="state_sources_exists",
-            ok=(target / "state" / "sources.jsonl").exists(),
-            details="Workspace should contain state/sources.jsonl.",
-        )
-        add_check(
-            name="state_ingest_state_exists",
-            ok=(target / "state" / "ingest_state.jsonl").exists(),
-            details="Workspace should contain state/ingest_state.jsonl.",
-        )
-        add_check(
-            name="state_normalized_exists",
-            ok=(target / "state" / "normalized.jsonl").exists(),
-            details="Workspace should contain state/normalized.jsonl.",
-        )
-        add_check(
-            name="state_structure_blocks_exists",
-            ok=(target / STRUCTURE_BLOCKS_REL_PATH).exists(),
-            details=f"Workspace should contain {target / STRUCTURE_BLOCKS_REL_PATH}.",
-        )
-        add_check(
-            name="state_evidence_blocks_exists",
-            ok=(target / EVIDENCE_BLOCKS_REL_PATH).exists(),
-            details=f"Workspace should contain {target / EVIDENCE_BLOCKS_REL_PATH}.",
-        )
-        add_check(
-            name="state_knowledge_units_exists",
-            ok=(target / KNOWLEDGE_UNITS_REL_PATH).exists(),
-            details=f"Workspace should contain {target / KNOWLEDGE_UNITS_REL_PATH}.",
-        )
-        add_check(
-            name="state_chunks_exists",
-            ok=(target / "state" / "chunks.jsonl").exists(),
-            details="Workspace should contain state/chunks.jsonl.",
-        )
-        add_check(
-            name="state_claims_exists",
-            ok=(target / "state" / "claims.jsonl").exists(),
-            details="Workspace should contain state/claims.jsonl.",
-        )
-        add_check(
-            name="state_reviews_exists",
-            ok=(target / "state" / "reviews.jsonl").exists(),
-            details="Workspace should contain state/reviews.jsonl.",
-        )
-        add_check(
-            name="state_error_log_exists",
-            ok=(target / "state" / "error_log.jsonl").exists(),
-            details="Workspace should contain state/error_log.jsonl.",
-        )
-        add_check(
-            name="state_pages_exists",
-            ok=(target / "state" / "pages.jsonl").exists(),
-            details="Workspace should contain state/pages.jsonl.",
-        )
-        add_check(
-            name="index_search_pages_exists",
-            ok=(target / SEARCH_PAGES_INDEX_REL_PATH).exists(),
-            details=f"Workspace should contain {target / SEARCH_PAGES_INDEX_REL_PATH}.",
-        )
-        add_check(
-            name="index_aliases_exists",
-            ok=alias_index_path(target).exists(),
-            details=f"Workspace should contain {alias_index_path(target)}.",
-        )
-
-        chunk_records = load_jsonl(target / "state" / "chunks.jsonl") if (target / "state" / "chunks.jsonl").exists() else []
-        structure_block_records = load_jsonl(target / STRUCTURE_BLOCKS_REL_PATH) if (target / STRUCTURE_BLOCKS_REL_PATH).exists() else []
-        if structure_block_records:
-            structure_block_ids = [record.get("structure_block_id") for record in structure_block_records]
-            add_check(
-                name="structure_block_ids_unique",
-                ok=len(structure_block_ids) == len(set(structure_block_ids)),
-                details=f"All structure_block_id values in {STRUCTURE_BLOCKS_REL_PATH} should be unique.",
-            )
-
-        evidence_block_records = load_jsonl(target / EVIDENCE_BLOCKS_REL_PATH) if (target / EVIDENCE_BLOCKS_REL_PATH).exists() else []
-        if evidence_block_records:
-            evidence_block_ids = [record.get("evidence_block_id") for record in evidence_block_records]
-            add_check(
-                name="evidence_block_ids_unique",
-                ok=len(evidence_block_ids) == len(set(evidence_block_ids)),
-                details=f"All evidence_block_id values in {EVIDENCE_BLOCKS_REL_PATH} should be unique.",
-            )
-            add_check(
-                name="evidence_blocks_trace_structure",
-                ok=all(record.get("structure_block_ids") for record in evidence_block_records),
-                details="Each evidence block should point back to at least one structure block.",
-            )
-
-        knowledge_unit_records = load_jsonl(target / KNOWLEDGE_UNITS_REL_PATH) if (target / KNOWLEDGE_UNITS_REL_PATH).exists() else []
-        if knowledge_unit_records:
-            knowledge_unit_ids = [record.get("knowledge_unit_id") for record in knowledge_unit_records]
-            add_check(
-                name="knowledge_unit_ids_unique",
-                ok=len(knowledge_unit_ids) == len(set(knowledge_unit_ids)),
-                details=f"All knowledge_unit_id values in {KNOWLEDGE_UNITS_REL_PATH} should be unique.",
-            )
-            add_check(
-                name="knowledge_units_trace_evidence",
-                ok=all(record.get("evidence_block_ids") for record in knowledge_unit_records),
-                details="Each knowledge unit should point back to at least one evidence block.",
-            )
-
-        if chunk_records:
-            chunk_ids = [record.get("chunk_id") for record in chunk_records]
-            add_check(
-                name="chunk_ids_unique",
-                ok=len(chunk_ids) == len(set(chunk_ids)),
-                details="All chunk_id values in state/chunks.jsonl should be unique.",
-            )
-
-        claim_records = load_jsonl(target / "state" / "claims.jsonl") if (target / "state" / "claims.jsonl").exists() else []
-        semantic_decision_records = load_semantic_decisions(target) if semantic_decisions_path(target).exists() else []
-        semantic_decisions_by_id = {
-            str(record.get("decision_id", "")).strip(): record
-            for record in semantic_decision_records
-            if str(record.get("decision_id", "")).strip()
-        }
-        if claim_records:
-            claim_records = [ensure_claim_lifecycle_defaults(record) for record in claim_records]
-            live_claim_records = filter_live_claim_records(claim_records)
-            claim_records_by_id = {record["claim_id"]: record for record in live_claim_records}
-            historical_claim_records = [
-                record for record in claim_records
-                if not is_live_claim_record(record)
-            ]
-            claim_ids = [record.get("claim_id") for record in claim_records]
-            add_check(
-                name="claim_ids_unique",
-                ok=len(claim_ids) == len(set(claim_ids)),
-                details="All claim_id values in state/claims.jsonl should be unique.",
-            )
-            add_check(
-                name="live_claim_source_refs_present",
-                ok=all(record.get("source_refs") for record in live_claim_records),
-                details="Each live claim should keep at least one source_ref for traceability.",
-            )
-            add_check(
-                name="live_claim_source_ids_present",
-                ok=all(record.get("source_ids") for record in live_claim_records),
-                details="Each live claim should keep at least one source_id.",
-            )
-            add_check(
-                name="historical_claims_not_live",
-                ok=all(record.get("lifecycle_status") in {"superseded", "archived"} for record in historical_claim_records),
-                details="Historical claim records should not remain in active lifecycle state.",
-            )
-            claim_semantic_risk_issues_by_id = {
-                record["claim_id"]: claim_semantic_risk_issues(record, semantic_decisions_by_id)
-                for record in live_claim_records
-            }
-            claim_semantic_risk_issues_by_id = {
-                claim_id: issues
-                for claim_id, issues in claim_semantic_risk_issues_by_id.items()
-                if issues
-            }
-            claim_semantic_risk_preview = ", ".join(
-                issues[0]
-                for issues in list(claim_semantic_risk_issues_by_id.values())[:8]
-            ) or "No live claims carry unreviewed ambiguous semantic decision risk flags."
-            add_check(
-                name="claim_semantic_risk_flags_reviewed",
-                ok=len(claim_semantic_risk_issues_by_id) == 0,
-                details=claim_semantic_risk_preview,
-                severity="warning",
-            )
-
-        review_records = load_jsonl(target / "state" / "reviews.jsonl") if (target / "state" / "reviews.jsonl").exists() else []
-        if review_records:
-            review_records = [ensure_review_lifecycle_defaults(record) for record in review_records]
-            live_review_records = filter_live_review_records(review_records)
-            historical_review_records = [
-                record for record in review_records
-                if not is_live_review_record(record)
-            ]
-            review_ids = [record.get("review_id") for record in review_records]
-            add_check(
-                name="review_ids_unique",
-                ok=len(review_ids) == len(set(review_ids)),
-                details="All review_id values in state/reviews.jsonl should be unique.",
-            )
-            add_check(
-                name="live_review_candidate_claims_present",
-                ok=all(
-                    record.get("candidate_claim_ids") or record.get("kind") == "alias_conflict"
-                    for record in live_review_records
-                ),
-                details="Claim-oriented live reviews should contain candidate_claim_ids; alias_conflict may use candidate_page_ids only.",
-            )
-            add_check(
-                name="live_review_candidate_pages_present",
-                ok=all("candidate_page_ids" in record for record in live_review_records),
-                details="Each live review record should contain candidate_page_ids for reverse page lookup.",
-            )
-            add_check(
-                name="historical_reviews_not_live",
-                ok=all(record.get("lifecycle_status") in {"superseded", "archived"} for record in historical_review_records),
-                details="Historical review records should not remain in active lifecycle state.",
-            )
-
-        page_records = load_jsonl(target / "state" / "pages.jsonl") if (target / "state" / "pages.jsonl").exists() else []
-        if page_records:
-            page_records = [ensure_page_lifecycle_defaults(record) for record in page_records]
-            live_page_records = filter_live_page_records(page_records)
-            removed_page_records = [
-                record for record in page_records
-                if record.get("lifecycle_status") == "removed"
-            ]
-            page_ids = [record.get("page_id") for record in page_records]
-            add_check(
-                name="page_ids_unique",
-                ok=len(page_ids) == len(set(page_ids)),
-                details="All page_id values in state/pages.jsonl should be unique.",
-            )
-            add_check(
-                name="page_paths_present",
-                ok=all(record.get("page_path") for record in page_records),
-                details="Each page record should include page_path.",
-            )
-            add_check(
-                name="page_titles_present",
-                ok=all(record.get("title") for record in live_page_records),
-                details="Each live page should include title.",
-            )
-            add_check(
-                name="page_types_present",
-                ok=all(record.get("type") for record in live_page_records),
-                details="Each live page should include type.",
-            )
-            add_check(
-                name="page_canonical_ids_present",
-                ok=all(record.get("canonical_id") for record in live_page_records),
-                details="Each live page should include canonical_id.",
-            )
-            add_check(
-                name="live_pages_exist_on_disk",
-                ok=all((target / record["page_path"]).exists() for record in live_page_records),
-                details="Each live page record should have a corresponding wiki markdown file on disk.",
-            )
-            add_check(
-                name="removed_pages_absent_on_disk",
-                ok=all(not (target / record["page_path"]).exists() for record in removed_page_records),
-                details="Removed page records should keep history in state/pages.jsonl, but their markdown files should already be deleted.",
-            )
-            add_check(
-                name="removed_pages_not_in_live_set",
-                ok=all(not is_live_page_record(record) for record in removed_page_records),
-                details="Removed page records should not be treated as live pages for index/query rebuilds.",
-            )
-
-            canonical_groups: dict[str, list[str]] = {}
-            live_page_records_by_id = {record["page_id"]: record for record in live_page_records}
-            for record in live_page_records:
-                canonical_id = record.get("canonical_id")
-                if not canonical_id:
-                    continue
-                canonical_groups.setdefault(canonical_id, []).append(record.get("type", ""))
-            add_check(
-                name="canonical_page_family_valid",
-                ok=all(
-                    len(page_types) == len(set(page_types))
-                    and len(page_types) == 1
-                    for page_types in canonical_groups.values()
-                ),
-                details="Each canonical_id should map to at most one live page type.",
-            )
-            concept_pages = [record for record in live_page_records if record.get("type") == "concept"]
-            concept_like_pages = [
-                record for record in live_page_records
-                if record.get("type") == "concept"
-            ]
-            add_check(
-                name="readable_concept_render_metadata_present",
-                ok=all(
-                    record.get("render_target") and record.get("render_mode") and record.get("render_status")
-                    for record in concept_pages
-                ),
-                details="Each readable concept page should record render_target, render_mode and render_status for traceability.",
-            )
-            grounded_concept_issues = {
-                record["page_id"]: rendered_page_grounding_issues(
-                    target=target,
-                    page_record=record,
-                    claim_records_by_id=claim_records_by_id,
-                    page_records_by_id=live_page_records_by_id,
-                )
-                for record in concept_pages
-            }
-            grounded_concept_issues = {
-                page_id: issues
-                for page_id, issues in grounded_concept_issues.items()
-                if issues
-            }
-            grounded_issue_preview = ", ".join(
-                f"{page_id}:{'/'.join(issues[:2])}"
-                for page_id, issues in list(grounded_concept_issues.items())[:5]
-            ) or "All readable concept pages remain grounded in their linked claims."
-            add_check(
-                name="readable_concept_pages_grounded",
-                ok=len(grounded_concept_issues) == 0,
-                details=grounded_issue_preview,
-            )
-            overview_pages = [record for record in live_page_records if record.get("type") == "overview"]
-            add_check(
-                name="overview_render_metadata_present",
-                ok=all(
-                    record.get("render_target") and record.get("render_mode") and record.get("render_status")
-                    for record in overview_pages
-                ),
-                details="Each overview page should record render_target, render_mode and render_status for traceability.",
-            )
-            grounded_overview_issues = {
-                record["page_id"]: rendered_page_grounding_issues(
-                    target=target,
-                    page_record=record,
-                    claim_records_by_id=claim_records_by_id,
-                    page_records_by_id=live_page_records_by_id,
-                )
-                for record in overview_pages
-            }
-            grounded_overview_issues = {
-                page_id: issues
-                for page_id, issues in grounded_overview_issues.items()
-                if issues
-            }
-            overview_issue_preview = ", ".join(
-                f"{page_id}:{'/'.join(issues[:2])}"
-                for page_id, issues in list(grounded_overview_issues.items())[:5]
-            ) or "All overview pages remain grounded in their linked concept pages."
-            add_check(
-                name="overview_pages_grounded",
-                ok=len(grounded_overview_issues) == 0,
-                details=overview_issue_preview,
-            )
-            concept_quality_issues = {
-                record["page_id"]: concept_page_quality_issues(record, claim_records_by_id)
-                for record in concept_like_pages
-            }
-            concept_quality_issues = {
-                page_id: issues
-                for page_id, issues in concept_quality_issues.items()
-                if issues
-            }
-            concept_quality_preview = ", ".join(
-                f"{page_id}:{'/'.join(issues[:2])}"
-                for page_id, issues in list(concept_quality_issues.items())[:8]
-            ) or "All concept pages passed title-quality checks."
-            add_check(
-                name="concept_pages_title_quality",
-                ok=len(concept_quality_issues) == 0,
-                details=concept_quality_preview,
-                severity="warning",
-            )
-            semantic_consistency_issues = {
-                record["page_id"]: page_semantic_consistency_issues(record, claim_records_by_id)
-                for record in live_page_records
-            }
-            semantic_consistency_issues = {
-                page_id: issues
-                for page_id, issues in semantic_consistency_issues.items()
-                if issues
-            }
-            semantic_consistency_preview = ", ".join(
-                f"{page_id}:{'/'.join(issues[:2])}"
-                for page_id, issues in list(semantic_consistency_issues.items())[:8]
-            ) or "All semantic page types remain consistent with their linked claim roles."
-            add_check(
-                name="page_semantic_consistency",
-                ok=len(semantic_consistency_issues) == 0,
-                details=semantic_consistency_preview,
-                severity="warning",
-            )
-            page_brake_issues = {
-                record["page_id"]: page_intent_brake_issues(record)
-                for record in live_page_records
-            }
-            page_brake_issues = {
-                page_id: issues
-                for page_id, issues in page_brake_issues.items()
-                if issues
-            }
-            page_brake_preview = ", ".join(
-                f"{page_id}:{'/'.join(issues[:2])}"
-                for page_id, issues in list(page_brake_issues.items())[:8]
-            ) or "No live pages were routed through semantic page-intent downgrade brakes."
-            add_check(
-                name="semantic_page_intent_brakes_reviewed",
-                ok=len(page_brake_issues) == 0,
-                details=page_brake_preview,
-                severity="warning",
-            )
-
-            alias_index = load_alias_index(target) if alias_index_path(target).exists() else {}
-            alias_conflicts = unresolved_alias_conflicts(alias_index) if alias_index else []
-            add_check(
-                name="alias_conflicts_absent",
-                ok=len(alias_conflicts) == 0,
-                details="Alias registry should not contain unresolved alias conflicts.",
-                severity="warning",
-            )
-
-            alias_canonical_ids = set(alias_index.get("canonical_map", {}).keys()) if alias_index else set()
-            live_page_canonical_ids = {record.get("canonical_id") for record in live_page_records if record.get("canonical_id")}
-            add_check(
-                name="alias_index_covers_live_pages",
-                ok=live_page_canonical_ids.issubset(alias_canonical_ids),
-                details="Alias registry should cover every live page canonical_id.",
-            )
-
-            search_index_records = load_search_pages_index(target) if (target / SEARCH_PAGES_INDEX_REL_PATH).exists() else []
-            indexed_page_ids = {record.get("page_id") for record in search_index_records}
-            expected_live_page_ids = {record.get("page_id") for record in live_page_records}
-            add_check(
-                name="search_index_covers_live_pages",
-                ok=expected_live_page_ids.issubset(indexed_page_ids),
-                details="Search index should contain every live page.",
-            )
-
-    if target != root:
-        report_lines = [
-            "# Lint Report",
-            "",
-            f"- 目标目录: `{target}`",
-            f"- 错误数量: `{len([check for check in checks if not check['ok'] and check['severity'] == 'error'])}`",
-            f"- 警告数量: `{len([check for check in checks if not check['ok'] and check['severity'] == 'warning'])}`",
-            "",
-            "## 检查结果 / Checks",
-            "",
-        ]
-        for check in checks:
-            marker = "PASS" if check["ok"] else ("WARN" if check["severity"] == "warning" else "FAIL")
-            report_lines.append(f"- [{marker}] `{check['name']}`: {check['details']}")
-        atomic_write_text(
-            target / "reports" / "lint" / "lint_latest.md",
-            "\n".join(report_lines).strip() + "\n",
-            encoding="utf-8",
-        )
-
-    # 先把 error / warning 分开统计，后面扩展更多级别也会比较自然。
-    errors = [check for check in checks if not check["ok"] and check["severity"] == "error"]
-    warnings = [check for check in checks if not check["ok"] and check["severity"] == "warning"]
-    payload = {
-        "target": str(target),
-        "workspace_summary": build_workspace_summary(target),
-        "checks": checks,
-        "summary": {
-            "errors": len(errors),
-            "warnings": len(warnings),
-            "ok": len(errors) == 0,
-        },
-    }
-    return CommandResult(
-        exit_code=0 if len(errors) == 0 else 1,
-        payload=payload,
-        message=render_workspace_summary_message(
-            "Lint completed." if len(errors) == 0 else "Lint found issues.",
-            target_dir=target,
-            extra_lines=[
-                (
-                    "Summary: "
-                    f"errors={payload['summary']['errors']}, "
-                    f"warnings={payload['summary']['warnings']}, "
-                    f"ok={'yes' if payload['summary']['ok'] else 'no'}"
-                ),
-            ],
+            load_claim_state_maps_override=repo_build_claim_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+                filter_live_claim_records=filter_live_claim_records,
+                is_live_claim_record=is_live_claim_record,
+            ),
+            load_review_state_maps_override=repo_build_review_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+                filter_live_review_records=filter_live_review_records,
+                is_live_review_record=is_live_review_record,
+            ),
         ),
+        args,
     )
 
 
 def command_render_page(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    render_target = args.render_target
-    render_target_spec = PAGE_RENDER_TARGETS.get(render_target)
-    if render_target_spec is None:
-        raise KeyError(f"Unknown render_target: {render_target}")
-
-    if render_target_spec.get("rebuild_strategy") == "review_affected_pages":
-        live_claims_by_id, _, _ = load_claim_state_maps(target)
-        live_reviews_by_id, _, _ = load_review_state_maps(target)
-        rebuild_review_affected_pages(
-            target=target,
-            live_claims_by_id=live_claims_by_id,
-            live_reviews_by_id=live_reviews_by_id,
-        )
-
-    page_records = [
-        ensure_page_lifecycle_defaults(record)
-        for record in load_jsonl(target / "state" / "pages.jsonl")
-    ]
-    live_rendered_pages = live_pages_for_render_target(page_records, render_target)
-
-    selected_pages = live_rendered_pages
-    if args.page_id:
-        selected_pages = [record for record in selected_pages if record.get("page_id") == args.page_id]
-    elif args.canonical_id:
-        selected_pages = [record for record in selected_pages if record.get("canonical_id") == args.canonical_id]
-    elif args.claim_id:
-        selected_pages = [record for record in selected_pages if args.claim_id in record.get("claim_ids", [])]
-
-    if not selected_pages:
-        raise KeyError(f"No page matched render_target={render_target} with the requested selector.")
-
-    payload = {
-        "workspace": str(target),
-        "render_target": render_target,
-        "pages": [
-            {
-                "page_id": record["page_id"],
-                "title": record.get("title"),
-                "render_target": record.get("render_target") or page_record_render_target(record),
-                "canonical_id": record.get("canonical_id"),
-                "status": record.get("status"),
-                "render_mode": record.get("render_mode"),
-                "render_status": record.get("render_status"),
-                "page_path": record.get("page_path"),
-                "summary": record.get("summary"),
-                "claim_ids": record.get("claim_ids", []),
-            }
-            for record in selected_pages
-        ],
-        "summary": {
-            "page_count": len(selected_pages),
-        },
-    }
-    if len(selected_pages) == 1:
-        page_path = target / selected_pages[0]["page_path"]
-        payload["page_text"] = page_path.read_text(encoding="utf-8")
-    return CommandResult(payload=payload, message=f"Rendered page target: {render_target}")
+    return misc_cli_component.command_render_page(
+        build_misc_cli_deps(
+            load_page_state_records=repo_build_page_state_records_loader(
+                load_jsonl=load_jsonl,
+                ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+            ),
+            load_claim_state_maps_override=repo_build_claim_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+                filter_live_claim_records=filter_live_claim_records,
+                is_live_claim_record=is_live_claim_record,
+            ),
+            load_review_state_maps_override=repo_build_review_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+                filter_live_review_records=filter_live_review_records,
+                is_live_review_record=is_live_review_record,
+            ),
+        ),
+        args,
+    )
 
 
 def command_semantic_batch(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    payload = run_semantic_batch_task(
-        target=target,
-        task_name=args.task,
-        dry_run=bool(args.dry_run),
-    )
-    return CommandResult(
-        payload=payload,
-        message=render_workspace_summary_message(
-            f"Semantic batch completed: {args.task}",
-            target_dir=target,
-            extra_lines=[
-                (
-                    "Summary: "
-                    f"items={payload['summary']['item_count']}, "
-                    f"cache_hits={payload['summary']['cache_hits']}, "
-                    f"pending_batches={payload['summary']['pending_batch_count']}, "
-                    f"written_decisions={payload['summary']['written_decision_count']}, "
-                    f"dry_run={'yes' if payload['summary']['dry_run'] else 'no'}"
-                ),
-            ],
+    return misc_cli_component.command_semantic_batch(
+        build_misc_cli_deps(
+            load_page_state_records=repo_build_page_state_records_loader(
+                load_jsonl=load_jsonl,
+                ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+            ),
         ),
+        args,
     )
 
 
 def command_claim_set_status(args: argparse.Namespace) -> CommandResult:
-    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
-    ensure_workspace_schema_supported(target)
-    live_claims_by_id, historical_claims_by_id, _ = load_claim_state_maps(target)
-    live_reviews_by_id, _, _ = load_review_state_maps(target)
-
-    claim_record = live_claims_by_id.get(args.claim_id) or historical_claims_by_id.get(args.claim_id)
-    if claim_record is None:
-        raise KeyError(f"Unknown claim_id: {args.claim_id}")
-    if claim_record["claim_id"] not in live_claims_by_id:
-        raise ValueError("claim_set_status currently only supports active claims.")
-
-    active_review_ids = sorted(
-        review_record["review_id"]
-        for review_record in live_reviews_by_id.values()
-        if is_actionable_review_record(review_record)
-        and args.claim_id in review_record.get("candidate_claim_ids", [])
+    return misc_cli_component.command_claim_set_status(
+        build_misc_cli_deps(
+            load_page_state_records=repo_build_page_state_records_loader(
+                load_jsonl=load_jsonl,
+                ensure_page_lifecycle_defaults=ensure_page_lifecycle_defaults,
+            ),
+            load_claim_state_maps_override=repo_build_claim_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_claim_lifecycle_defaults=ensure_claim_lifecycle_defaults,
+                filter_live_claim_records=filter_live_claim_records,
+                is_live_claim_record=is_live_claim_record,
+            ),
+            load_review_state_maps_override=repo_build_review_state_maps_loader(
+                load_jsonl=load_jsonl,
+                ensure_review_lifecycle_defaults=ensure_review_lifecycle_defaults,
+                filter_live_review_records=filter_live_review_records,
+                is_live_review_record=is_live_review_record,
+            ),
+        ),
+        args,
     )
 
-    updated_claim = dict(claim_record)
-    updated_claim["status"] = args.status
-    if args.status != "needs_review":
-        updated_claim["review_reason"] = None
-    updated_claim["updated_at"] = utc_now_iso()
-    live_claims_by_id[args.claim_id] = updated_claim
 
-    rebuild_review_affected_pages(
-        target=target,
-        live_claims_by_id=live_claims_by_id,
-        live_reviews_by_id=live_reviews_by_id,
-    )
+def build_ingest_cli_deps() -> IngestCliDeps:
+    return ingest_cli_component.build_ingest_cli_deps(sys.modules[__name__])
 
-    payload = {
-        "workspace": str(target),
-        "claim_id": args.claim_id,
-        "status": args.status,
-        "active_review_ids": active_review_ids,
-    }
-    return CommandResult(payload=payload, message="Claim status updated.")
+
+def command_ingest(args: argparse.Namespace) -> CommandResult:
+    return ingest_cli_component.command_ingest(build_ingest_cli_deps(), args)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # 所有 CLI 子命令都在这里集中声明，方便一眼看清当前系统有哪些入口。
-    parser = argparse.ArgumentParser(
-        prog="myagentwiki",
-        description="MyAgentWiki CLI scaffold.",
+    return build_cli_parser(
+        command_init=command_init,
+        command_ingest=command_ingest,
+        command_lint=command_lint,
+        command_query=command_query,
+        command_answer_query=command_answer_query,
+        command_render_page=command_render_page,
+        command_semantic_batch=command_semantic_batch,
+        command_claim_set_status=command_claim_set_status,
+        command_review_list=command_review_list,
+        command_review_auto=command_review_auto,
+        command_review_apply=command_review_apply,
+        query_reading_depth_limits=QUERY_READING_DEPTH_LIMITS,
+        query_link_expansion_choices=QUERY_LINK_EXPANSION_CHOICES,
+        semantic_task_names=SEMANTIC_TASK_NAMES,
+        supported_page_render_targets=supported_page_render_targets,
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # init: 创建一个新的 MyAgentWiki 工作区，并复用/创建其外部 sibling raw 目录。
-    init_parser = subparsers.add_parser("init", help="Initialize a new MyAgentWiki workspace.")
-    init_parser.add_argument(
-        "--source-dir",
-        help="Optional path to the sibling raw directory. If omitted, create/use ../raw next to the workspace.",
-    )
-    init_parser.add_argument("--project-name", required=True, help="Name of the new wiki workspace.")
-    init_parser.add_argument("--target-dir", help="Optional explicit target directory.")
-    init_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    init_parser.set_defaults(handler=command_init)
-
-    # ingest: 扫描 raw，登记来源，并对已支持的文本类型做标准化。
-    ingest_parser = subparsers.add_parser("ingest", help="Register raw files into workspace metadata.")
-    ingest_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    ingest_parser.add_argument(
-        "--disable-insecure-download-retry",
-        action="store_true",
-        help="Disable the automatic one-time insecure retry for certificate verification failures when downloading remote Markdown images.",
-    )
-    ingest_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    ingest_parser.set_defaults(handler=command_ingest)
-
-    # doctor: 检查当前机器是否满足项目运行要求。
-    doctor_parser = subparsers.add_parser("doctor", help="Check runtime environment.")
-    doctor_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    doctor_parser.set_defaults(handler=command_doctor)
-
-    # bootstrap: 安装本项目声明的 Python 依赖。
-    bootstrap_parser = subparsers.add_parser("bootstrap", help="Install or repair Python dependencies.")
-    bootstrap_parser.add_argument("--dry-run", action="store_true", help="Show planned install command without running it.")
-    bootstrap_parser.add_argument(
-        "--extra",
-        dest="extras",
-        action="append",
-        choices=("ocr", "office", "pdf", "dev"),
-        default=[],
-        help="Optional dependency group to install.",
-    )
-    bootstrap_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    bootstrap_parser.set_defaults(handler=command_bootstrap)
-
-    # lint: 检查仓库骨架或某个已初始化工作区的完整性。
-    lint_parser = subparsers.add_parser("lint")
-    lint_parser.add_argument("--target-dir", help="Optional workspace directory to lint.")
-    lint_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    lint_parser.set_defaults(handler=command_lint)
-
-    # query: 在现有 wiki/claim/page 产物上执行多字段 BM25 检索。
-    query_parser = subparsers.add_parser("query", help="Search generated wiki pages with weighted BM25 ranking.")
-    query_parser.add_argument("text", help="Search query text.")
-    query_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    query_parser.add_argument("--limit", type=int, default=5, help="Maximum number of results to return.")
-    query_parser.add_argument(
-        "--reading-depth",
-        choices=tuple(QUERY_READING_DEPTH_LIMITS.keys()),
-        default="standard",
-        help="Preset reading-pack thickness. `deep` returns more matched claims and chunks per page.",
-    )
-    query_parser.add_argument(
-        "--answer-ready",
-        action="store_true",
-        help="Render reading_pack as an answer-ready handoff summary for an upper-layer Agent.",
-    )
-    query_parser.add_argument(
-        "--format",
-        choices=("summary", "prompt", "messages", "chatml"),
-        default="summary",
-        help="When used with --answer-ready, choose summary view or direct prompt view.",
-    )
-    query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
-    query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
-    query_parser.add_argument(
-        "--intent",
-        choices=QUERY_INTENT_CHOICES,
-        help="Explicit query intent. Overrides lightweight automatic detection.",
-    )
-    query_parser.add_argument(
-        "--link-expansion",
-        choices=QUERY_LINK_EXPANSION_CHOICES,
-        default="auto",
-        help="Control whether query reading_pack expands to linked pages.",
-    )
-    query_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    query_parser.set_defaults(handler=command_query)
-
-    answer_query_parser = subparsers.add_parser(
-        "answer-query",
-        help="Return an answer-ready handoff summary derived from query reading_pack.",
-    )
-    answer_query_parser.add_argument("text", help="Search query text.")
-    answer_query_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    answer_query_parser.add_argument("--limit", type=int, default=5, help="Maximum number of results to inspect.")
-    answer_query_parser.add_argument(
-        "--reading-depth",
-        choices=tuple(QUERY_READING_DEPTH_LIMITS.keys()),
-        default="standard",
-        help="Preset reading-pack thickness. `deep` returns more matched claims and chunks per page.",
-    )
-    answer_query_parser.add_argument(
-        "--format",
-        choices=("summary", "prompt", "messages", "chatml"),
-        default="summary",
-        help="Choose answer-ready summary view or direct prompt view.",
-    )
-    answer_query_parser.add_argument("--claim-limit", type=int, help="Maximum matched claims per page. Overrides reading-depth default.")
-    answer_query_parser.add_argument("--chunk-limit", type=int, help="Maximum matched chunks per page. Overrides reading-depth default.")
-    answer_query_parser.add_argument(
-        "--intent",
-        choices=QUERY_INTENT_CHOICES,
-        help="Explicit query intent. Overrides lightweight automatic detection.",
-    )
-    answer_query_parser.add_argument(
-        "--link-expansion",
-        choices=QUERY_LINK_EXPANSION_CHOICES,
-        default="auto",
-        help="Control whether query reading_pack expands to linked pages.",
-    )
-    answer_query_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    answer_query_parser.set_defaults(handler=command_answer_query)
-
-    render_page_parser = subparsers.add_parser(
-        "render-page",
-        help="Rebuild and inspect rendered wiki page(s) by render target.",
-    )
-    render_page_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    render_page_parser.add_argument(
-        "--render-target",
-        choices=supported_page_render_targets(),
-        required=True,
-        help="Render target family to rebuild and inspect.",
-    )
-    render_page_selector_group = render_page_parser.add_mutually_exclusive_group()
-    render_page_selector_group.add_argument("--page-id", help="Specific page_id to render.")
-    render_page_selector_group.add_argument("--canonical-id", help="Specific canonical_id to render.")
-    render_page_selector_group.add_argument("--claim-id", help="Render the page that references this claim.")
-    render_page_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    render_page_parser.set_defaults(handler=command_render_page)
-
-    semantic_batch_parser = subparsers.add_parser(
-        "semantic-batch",
-        help="Run one semantic analysis batch task and persist structured semantic decisions.",
-    )
-    semantic_batch_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    semantic_batch_parser.add_argument(
-        "--task",
-        choices=SEMANTIC_TASK_NAMES,
-        required=True,
-        help="Semantic task family to run.",
-    )
-    semantic_batch_parser.add_argument("--dry-run", action="store_true", help="Plan batches without writing semantic decisions.")
-    semantic_batch_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    semantic_batch_parser.set_defaults(handler=command_semantic_batch)
-
-    # claim-set-status: 手工把某条 claim 提升或调整到目标状态，并触发页面重建。
-    claim_status_parser = subparsers.add_parser("claim-set-status", help="Update one claim status and rebuild dependent pages.")
-    claim_status_parser.add_argument("claim_id", help="Claim id to update.")
-    claim_status_parser.add_argument("status", choices=("draft", "stable", "disputed", "needs_review"), help="New claim status.")
-    claim_status_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    claim_status_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    claim_status_parser.set_defaults(handler=command_claim_set_status)
-
-    # review-list: 查看当前 review 队列及其候选 claim。
-    review_list_parser = subparsers.add_parser("review-list", help="List review items and candidate claims.")
-    review_list_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    review_list_parser.add_argument("--status", choices=("open", "resolved"), help="Optional review status filter.")
-    review_list_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    review_list_parser.set_defaults(handler=command_review_list)
-
-    review_auto_parser = subparsers.add_parser(
-        "review-auto",
-        help="Conservatively auto-resolve high-confidence review items and escalate the rest.",
-    )
-    review_auto_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    review_auto_parser.add_argument("--dry-run", action="store_true", help="Plan auto actions without mutating workspace state.")
-    review_auto_parser.add_argument(
-        "--format",
-        choices=("summary", "prompt", "messages", "chatml"),
-        default="summary",
-        help="Choose summary view or direct Agent handoff format.",
-    )
-    review_auto_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    review_auto_parser.set_defaults(handler=command_review_auto)
-
-    # review-apply: 对单条 review 执行人工裁决动作。
-    review_apply_parser = subparsers.add_parser("review-apply", help="Apply an action to a review item.")
-    review_apply_parser.add_argument("review_id", help="Review id to apply action to.")
-    review_apply_parser.add_argument(
-        "action",
-        choices=("keep_both", "archive_one", "merge", "edit_then_resume", "assign_alias", "remove_alias"),
-        help="Decision action to apply.",
-    )
-    review_apply_parser.add_argument("--primary-claim-id", help="Primary claim id for archive_one / merge.")
-    review_apply_parser.add_argument("--secondary-claim-id", help="Secondary claim id for merge.")
-    review_apply_parser.add_argument("--primary-page-id", help="Primary page id for alias-conflict assign_alias.")
-    review_apply_parser.add_argument("--alias-value", help="Alias value to assign during alias-conflict handling.")
-    review_apply_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
-    review_apply_parser.add_argument("--json", action="store_true", help="Output JSON.")
-    review_apply_parser.set_defaults(handler=command_review_apply)
-
-    return parser
 
 
 def main() -> int:

@@ -112,6 +112,15 @@ def test_ingest_builds_structure_evidence_and_knowledge_units(tmp_path: Path) ->
 
     metadata_ku = ku_by_evidence_id[metadata_block["evidence_block_id"]]
     assert metadata_ku["unit_kind"] == "metadata_fact"
+    metadata_claim = next(
+        record
+        for record in claims
+        if record["evidence_block_ids"] == [metadata_block["evidence_block_id"]]
+    )
+    assert metadata_claim["claim_type"] == "metadata_fact"
+    assert metadata_claim["claim_origin_kind"] == "metadata_fact"
+    assert metadata_claim["text"] == "平台运营组 负责人 是 许颖超"
+    assert metadata_claim["source_refs"][0]["section_path_parts"] == ["运营工作说明", "平台运营组"]
 
     attached_claim = next(
         record
@@ -129,3 +138,57 @@ def test_ingest_builds_structure_evidence_and_knowledge_units(tmp_path: Path) ->
 
     lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
     assert lint_result["summary"]["ok"] is True
+    assert "structure_coverage" in lint_result
+    assert lint_result["structure_coverage"]["rows"]
+
+
+def test_lint_reports_structure_coverage_rows_and_report_section(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "ops.md").write_text(
+        "# 运营工作说明\n\n"
+        "## 平台运营组\n\n"
+        "负责人：许颖超\n\n"
+        "| 字段 | 值 |\n"
+        "| --- | --- |\n"
+        "| 小组人数 | 4人 |\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "StructureCoverageLint",
+        "--target-dir",
+        str(workspace_dir),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    lint_result = run_cli("lint", "--target-dir", str(workspace_dir))
+
+    checks = {item["name"]: item for item in lint_result["checks"]}
+    assert checks["structured_pipeline_complete"]["ok"] is True
+    assert "structured_claim_coverage_reviewed" in checks
+
+    coverage_rows = lint_result["structure_coverage"]["rows"]
+    assert len(coverage_rows) == 1
+    coverage_row = coverage_rows[0]
+    assert coverage_row["structured_pipeline_complete"] is True
+    assert coverage_row["structure_block_count"] > 0
+    assert coverage_row["evidence_block_count"] > 0
+    assert coverage_row["knowledge_unit_count"] > 0
+    assert coverage_row["chunk_count"] > 0
+    assert coverage_row["live_claim_count"] > 0
+
+    report_text = (workspace_dir / "reports" / "lint" / "lint_latest.md").read_text(encoding="utf-8")
+    assert "## 结构覆盖率 / Structure Coverage" in report_text
+    assert "| source_id | status | doc_kind | structure | evidence | knowledge | chunks | live_claims | uncovered_structured_units | pipeline_complete |" in report_text
+    assert "### 结构跳过与漏抽分类 / Intentional Skips And Gap Classes" in report_text
+    assert "structured_claim_coverage_reviewed" in report_text
+    assert "intentional_skips" in report_text
+    assert "uncovered_gap_classes" in report_text
+    assert "intentional_skip_counts" in lint_result["structure_coverage"]
+    assert "uncovered_gap_class_counts" in lint_result["structure_coverage"]
