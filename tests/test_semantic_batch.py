@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from myagentwiki.cli import (
     collect_semantic_task_items,
@@ -46,6 +48,71 @@ def append_jsonl(path: Path, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+class _SemanticHookHandler(BaseHTTPRequestHandler):
+    response_body = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({
+                        "decisions": [
+                            {
+                                "item_id": "replace_me",
+                                "decision": {
+                                    "knowledge_role": "fact",
+                                    "page_intent_hints": ["topic"],
+                                    "concept_candidate_score": 0.52,
+                                },
+                                "decision_status": "accepted",
+                                "confidence": 0.91,
+                                "reason_code": "online_semantic_ok",
+                            }
+                        ]
+                    }, ensure_ascii=False)
+                }
+            }
+        ]
+    }
+
+    def do_POST(self):  # noqa: N802
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length).decode("utf-8")
+        payload = json.loads(body)
+        prompt_payload = json.loads(payload["messages"][1]["content"])
+        item_id = prompt_payload["payload"]["items"][0]["item_id"]
+        response_body = json.loads(json.dumps(self.response_body))
+        response_body["choices"][0]["message"]["content"] = json.dumps({
+            "decisions": [
+                {
+                    "item_id": item_id,
+                    "decision": {
+                        "knowledge_role": "fact",
+                        "page_intent_hints": ["topic"],
+                        "concept_candidate_score": 0.52,
+                    },
+                    "decision_status": "accepted",
+                    "confidence": 0.91,
+                    "reason_code": "online_semantic_ok",
+                }
+            ]
+        }, ensure_ascii=False)
+        encoded = json.dumps(response_body, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format, *args):  # noqa: A003, ANN001
+        return
+
+
+def start_test_server(handler_cls: type[BaseHTTPRequestHandler]) -> tuple[HTTPServer, threading.Thread]:
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
 def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -72,6 +139,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     assert "workspace:" in config_text
     assert "semantic:" in config_text
     assert "agent_cli_hook:" in config_text
+    assert "agent_online_hook:" in config_text
     assert "batch_scheduler:" in config_text
     assert "document_analysis:" in config_text
     assert "claim_candidate_quality:" in config_text
@@ -90,6 +158,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
         if line.strip()
     }
     assert "state/semantic_decisions.jsonl" in tracked_files
+    assert "config/llm.local.example.yml" in tracked_files
 
 
 def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:
@@ -348,6 +417,82 @@ def test_semantic_batch_claim_candidate_quality_writes_short_claim_decisions(tmp
     assert quality_claim["semantic_decision_ids"]
     assert quality_claim["semantic_projection"]["quality_safe_auto_ready"] is not True
     assert quality_claim["semantic_projection"]["quality_label"] == quality_claim["quality_label"]
+
+
+def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "concept.md").write_text(
+        "# 概念\n\n"
+        "系统需要保留来源回链。\n",
+        encoding="utf-8",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "OnlineSemanticBatch",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    claim_records_path = workspace_dir / "state" / "claims.jsonl"
+    claim_records = load_jsonl(claim_records_path)
+    for record in claim_records:
+        if record.get("lifecycle_status", "active") == "active":
+            record["semantic_decision_ids"] = []
+            record["semantic_projection"] = {}
+            record["knowledge_role"] = None
+            record["page_intent_hints"] = []
+            record["concept_candidate_score"] = None
+    claim_records_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in claim_records) + "\n",
+        encoding="utf-8",
+    )
+    (workspace_dir / "state" / "semantic_decisions.jsonl").write_text("", encoding="utf-8")
+
+    server, thread = start_test_server(_SemanticHookHandler)
+    try:
+        (workspace_dir / "config" / "llm.local.yml").write_text(
+            'provider:\n'
+            '  protocol: "openai_compatible"\n'
+            f'  base_url: "http://127.0.0.1:{server.server_port}"\n'
+            '  model: "test-model"\n'
+            '  api_key: "test-key"\n'
+            '  timeout_seconds: 30\n',
+            encoding="utf-8",
+        )
+        config_path = workspace_dir / "config" / "project.yml"
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace(
+                '  claim_role:\n'
+                '    strategy: "agent_assisted"\n'
+                '    command:\n'
+                f'      - "{sys.executable}"\n'
+                '      - "-m"\n'
+                '      - "myagentwiki.agent_hook"\n',
+                '  claim_role:\n'
+                '    strategy: "agent_assisted"\n'
+                '    command:\n'
+                '      - "python3"\n'
+                '      - "-m"\n'
+                '      - "myagentwiki.agent_online_hook"\n',
+            ),
+            encoding="utf-8",
+        )
+        result = run_cli("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert result["summary"]["item_count"] >= 1
+    assert result["summary"]["written_decision_count"] >= 1
+    semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
+    assert any(record.get("reason_code") == "online_semantic_ok" for record in semantic_records)
 
 
 def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) -> None:

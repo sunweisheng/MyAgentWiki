@@ -153,6 +153,7 @@ from .cli_components.misc_commands import MiscCliDeps, build_misc_cli_deps as bu
 from .cli_components.query_commands import QueryCliDeps
 from .cli_components.review_commands import ReviewCliDeps
 from .cli_components.result import CommandResult, print_result
+from .hook_protocol import HookExecutionError, is_online_hook_command, parse_online_hook_error
 from .repositories.state_views import (
     build_claim_state_maps_loader as repo_build_claim_state_maps_loader,
     build_page_state_records_loader as repo_build_page_state_records_loader,
@@ -541,6 +542,7 @@ def baseline_git_paths(target: Path) -> list[str]:
         ".gitignore",
         "AGENTS.md",
         "CLAUDE.md",
+        "config/llm.local.example.yml",
         "config/project.yml",
         "config/runtime_manifest.yml",
         "indexes/aliases.json",
@@ -1017,6 +1019,10 @@ def run_json_automation_command(
         return None
 
     if completed.returncode != 0:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
         return None
 
     stdout = (completed.stdout or "").strip()
@@ -1026,6 +1032,36 @@ def run_json_automation_command(
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def parse_hook_process_result(
+    command: list[str],
+    completed: subprocess.CompletedProcess[str],
+) -> dict | None:
+    if completed.returncode != 0:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
+        return None
+
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        return None
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -5743,18 +5779,7 @@ def run_llm_assisted_concept_title_review(
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-
-    if completed.returncode != 0:
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        result = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None
+    result = parse_hook_process_result(command, completed)
     if not isinstance(result, dict):
         return None
 
@@ -7061,18 +7086,7 @@ def run_llm_assisted_readable_concept_render(
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-
-    if completed.returncode != 0:
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        raw_result = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None
+    raw_result = parse_hook_process_result(command, completed)
     if not isinstance(raw_result, dict):
         return None
 
@@ -7166,18 +7180,7 @@ def run_llm_assisted_overview_render(
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-
-    if completed.returncode != 0:
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        raw_result = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None
+    raw_result = parse_hook_process_result(command, completed)
     if not isinstance(raw_result, dict):
         return None
 
@@ -9129,7 +9132,10 @@ def main() -> int:
     # main 保持很薄，只负责“解析参数 -> 调用命令 -> 输出结果”这条主线。
     parser = build_parser()
     args = parser.parse_args()
-    result = args.handler(args)
+    try:
+        result = args.handler(args)
+    except HookExecutionError as exc:
+        result = CommandResult(exit_code=1, payload=exc.payload, message=exc.message)
     return print_result(result, as_json=getattr(args, "json", False))
 
 

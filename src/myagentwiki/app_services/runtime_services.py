@@ -38,6 +38,7 @@ try:
 except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
     Image = None
 
+from ..hook_protocol import HookExecutionError, is_online_hook_command, parse_online_hook_error
 from ..runtime_env import build_doctor_payload, command_exists, load_simple_yaml
 
 AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
@@ -253,6 +254,10 @@ def run_json_automation_command(
         return None
 
     if completed.returncode != 0:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
         return None
 
     stdout = (completed.stdout or "").strip()
@@ -262,6 +267,10 @@ def run_json_automation_command(
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError:
+        if is_online_hook_command(command):
+            hook_error = parse_online_hook_error(stdout, completed.stderr)
+            if hook_error is not None:
+                raise hook_error
         return None
     return parsed if isinstance(parsed, dict) else None
 

@@ -37,6 +37,13 @@ semantic:
     provider_env: "MYAGENTWIKI_AGENT_CLI"
     command_env: "MYAGENTWIKI_AGENT_CLI_COMMAND"
     timeout_env: "MYAGENTWIKI_AGENT_CLI_TIMEOUT_SECONDS"
+  agent_online_hook:
+    # 如需通过你自己提供的在线模型地址调用真实 LLM，把具体任务 command 改为：
+    #   - "${python_executable}"
+    #   - "-m"
+    #   - "myagentwiki.agent_online_hook"
+    # 并在当前工作区单独创建 `config/llm.local.yml`。
+    config_path: "config/llm.local.yml"
   batch_scheduler:
     default_batch_size: 12
     max_retries: 1

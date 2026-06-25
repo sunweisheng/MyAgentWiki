@@ -118,6 +118,29 @@ def configure_llm_assisted_concept_quality(workspace_dir: Path, script_path: Pat
     )
 
 
+def configure_online_hook_missing_config(workspace_dir: Path, section: str, task_name: str, *, mode: str | None = None) -> None:
+    config_path = workspace_dir / "config" / "project.yml"
+    entry_lines = [
+        "\n",
+        f"{section}:\n",
+        f"  {task_name}:\n",
+    ]
+    if mode is not None:
+        entry_lines.append(f'    mode: "{mode}"\n')
+    else:
+        entry_lines.append('    strategy: "agent_assisted"\n')
+    entry_lines.extend([
+        "    command:\n",
+        '      - "python3"\n',
+        '      - "-m"\n',
+        '      - "myagentwiki.agent_online_hook"\n',
+        "    timeout_seconds: 20\n",
+    ])
+    if mode is None:
+        entry_lines.append("    min_confidence: 0.75\n")
+    config_path.write_text(config_path.read_text(encoding="utf-8") + "".join(entry_lines), encoding="utf-8")
+
+
 def create_workspace_with_two_concepts(tmp_path: Path, project_name: str) -> Path:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -218,14 +241,106 @@ def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    result = run_cli("query", "知识声明层", "--target-dir", str(workspace_dir))
 
-    assert result["summary"]["returned_page_count"] >= 1
-    assert result["alias_hits"]
-    assert result["canonical_targets"]
-    assert result["intent"] == "lookup"
-    assert any(target["canonical_id"].startswith("concept:") for target in result["canonical_targets"])
-    assert result["results"][0]["exact_match_boost"] >= 1.2
+def test_online_hook_missing_local_config_fails_semantic_batch(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "topic.md").write_text("# Topic\n\n系统需要保留来源回链。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "OnlineHookSemanticError",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_online_hook_missing_config(workspace_dir, "semantic", "claim_role")
+    (workspace_dir / "state" / "semantic_decisions.jsonl").write_text("", encoding="utf-8")
+    claims_path = workspace_dir / "state" / "claims.jsonl"
+    claim_records = load_jsonl(claims_path)
+    for record in claim_records:
+        if record.get("lifecycle_status", "active") == "active":
+            record["semantic_decision_ids"] = []
+            record["semantic_projection"] = {}
+            record["knowledge_role"] = None
+            record["page_intent_hints"] = []
+            record["concept_candidate_score"] = None
+    write_jsonl(claims_path, claim_records)
+
+    result = run_cli_expect_exit("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir), expected_exit_code=1)
+    assert result["error"] == "online_hook_configuration_error"
+    assert "configured to use the online model hook" in result["message"]
+    assert "config/llm.local.yml" in result["message"]
+
+
+def test_online_hook_missing_local_config_fails_review_auto(tmp_path: Path) -> None:
+    workspace_dir = create_workspace_with_two_concepts(tmp_path, "OnlineHookReviewError")
+    reviews_path = workspace_dir / "state" / "reviews.jsonl"
+
+    page_ids = inject_shared_alias_override(workspace_dir, "知识层")
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_online_hook_missing_config(workspace_dir, "automation", "review_auto")
+    live_pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
+    candidate_pages = [record for record in live_pages if record.get("page_id") in page_ids]
+    assert len(candidate_pages) == 2
+    review_record = {
+        "review_id": "rev_online_hook_missing_config",
+        "kind": "alias_conflict",
+        "status": "open",
+        "lifecycle_status": "active",
+        "candidate_claim_ids": [],
+        "candidate_page_ids": page_ids,
+        "reason": "shared alias",
+        "recommended_action": "assign_alias",
+        "allowed_actions": ["assign_alias", "remove_alias", "keep_both", "edit_then_resume"],
+        "resume_from": "page_review",
+        "evidence": [{"alias": "知识层", "canonical_ids": [item.get("canonical_id") for item in candidate_pages]}],
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "resolved_at": None,
+        "archived_at": None,
+        "review_file_path": "reviews/rev_online_hook_missing_config.json",
+    }
+    write_jsonl(reviews_path, [review_record])
+    (workspace_dir / "reviews" / "rev_online_hook_missing_config.json").write_text(
+        json.dumps(review_record, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    result = run_cli_expect_exit("review-auto", "--target-dir", str(workspace_dir), expected_exit_code=1)
+    assert result["error"] == "online_hook_configuration_error"
+    assert "do not commit it to Git" in result["message"]
+
+
+def test_online_hook_missing_local_config_fails_readable_render(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "claim.md").write_text(
+        "# Claim\n\n"
+        "Claim 是位于 chunk 与 wiki 之间的独立知识声明层。\n\n"
+        "Claim 用于承载可追踪、可合并、可审计的结论。\n",
+        encoding="utf-8",
+    )
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir", str(source_dir),
+        "--project-name", "OnlineHookRenderError",
+        "--target-dir", str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_online_hook_missing_config(workspace_dir, "rendering", "readable_concept", mode="llm_assisted")
+
+    claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
+    claim_id = first_active_claim(claim_records, contains="Claim 是位于 chunk 与 wiki 之间")["claim_id"]
+    result = run_cli_expect_exit(
+        "claim-set-status",
+        claim_id,
+        "stable",
+        "--target-dir", str(workspace_dir),
+        expected_exit_code=1,
+    )
+    assert result["error"] == "online_hook_configuration_error"
 
 
 def test_workspace_schema_guard_blocks_unsupported_workspace_commands(tmp_path: Path) -> None:

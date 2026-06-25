@@ -195,6 +195,14 @@ def test_init_enables_post_ingest_review_auto_by_default(tmp_path: Path) -> None
     config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
     assert "post_ingest:" in config_text
     assert "review_auto: true" in config_text
+    assert (workspace_dir / "config" / "llm.local.example.yml").exists()
+    assert not (workspace_dir / "config" / "llm.local.yml").exists()
+    gitignore_text = (workspace_dir / ".gitignore").read_text(encoding="utf-8")
+    assert "config/llm.local.yml" in gitignore_text
+    agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
+    claude_text = (workspace_dir / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "config/llm.local.yml" in agents_text
+    assert "config/llm.local.yml" in claude_text
 
 
 def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:

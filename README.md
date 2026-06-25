@@ -141,7 +141,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `3.0.0` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.0.1` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -449,6 +449,54 @@ export MYAGENTWIKI_CLAUDE_BIN="claude"
 ```
 
 `agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex/Claude Code CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
+
+如果希望直接通过你自己的在线模型地址调用，而不是走 Codex / Claude CLI，可以改用包内在线 hook：
+
+```yaml
+semantic:
+  claim_role:
+    strategy: "agent_assisted"
+    command:
+      - "python3"
+      - "-m"
+      - "myagentwiki.agent_online_hook"
+    timeout_seconds: 90
+    min_confidence: 0.75
+    batch_size: 8
+    model_key: "remote-online"
+    prompt_version: "v1"
+    schema_version: "v1"
+```
+
+在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这个文件必须由每个使用者单独配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
+
+OpenAI 兼容示例：
+
+```yaml
+provider:
+  protocol: "openai_compatible"
+  base_url: "https://example.com/v1"
+  model: "your-model-name"
+  api_key: "your-api-key"
+  timeout_seconds: 120
+```
+
+Anthropic 兼容示例：
+
+```yaml
+provider:
+  protocol: "anthropic_compatible"
+  base_url: "https://example.com"
+  model: "your-model-name"
+  api_key: "your-api-key"
+  timeout_seconds: 120
+```
+
+区别很明确：
+- `agent_cli_hook` 走 Codex / Claude Code CLI
+- `agent_online_hook` 直接走你提供的在线模型地址
+
+如果某个任务已经显式配置成 `myagentwiki.agent_online_hook`，但 `config/llm.local.yml` 缺失、字段不完整、鉴权失败或协议不匹配，命令会直接报错并提醒你补配本地文件，而不会静默回退。
 
 约定很简单：
 - hook 从标准输入接收 JSON payload
