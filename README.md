@@ -2,6 +2,8 @@
 
 MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
+如果你准备让脚本直接调用在线大模型，而不是只走本地保守 hook 或 Codex / Claude CLI，那么必须先在当前工作区单独配置 `config/llm.local.yml`。这个文件不应提交到 Git，仓库只会提供 `config/llm.local.example.yml` 示例。
+
 当前仓库既是：
 
 - 一个可安装的 Python CLI 项目
@@ -141,7 +143,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `3.0.1` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.0.2` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -201,6 +203,8 @@ New-Item -ItemType Junction `
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
 
+如果 Codex 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `config/llm.local.yml`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
+
 ### 在 Claude Code 中安装
 
 Claude Code 支持用户级和项目级 Skill：
@@ -240,6 +244,8 @@ New-Item -ItemType Junction `
 ```
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Claude Code 还会读取根目录的 `CLAUDE.md`，它会把 Claude Code 引导到共享规则 `Agent.md` 和 review / state 恢复约定。
+
+如果 Claude Code 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `config/llm.local.yml`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
 
 ## 文档导航
 
@@ -469,6 +475,8 @@ semantic:
 ```
 
 在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这个文件必须由每个使用者单独配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
+
+对 Codex / Claude Code 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就应先确认当前工作区已有 `config/llm.local.yml`。
 
 OpenAI 兼容示例：
 
