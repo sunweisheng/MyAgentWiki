@@ -2192,7 +2192,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `review-apply` 之后的页面、索引、状态收口
 - lint 与 lint 报告
 - `semantic/` 目录、`state/semantic_decisions.jsonl`、semantic batch 缓存与任务契约
-- `document_analysis / claim_candidate_quality / claim_role / page_intent / page_route` 五类语义批处理阶段
+- `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑语义批处理阶段，以及会在页面路由时自动落账的 `page_route` 决策
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
 - `agent_cli_hook` 已支持通过 Codex / Claude Code CLI 调用真实 LLM
 - `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路

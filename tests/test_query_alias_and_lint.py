@@ -45,6 +45,18 @@ def run_cli_expect_exit(*args: str, expected_exit_code: int, cwd: Path | None = 
     return json.loads(completed.stdout)
 
 
+def run_cli_raw(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, "-m", "myagentwiki.cli", *args]
+    return subprocess.run(
+        command,
+        cwd=str(cwd or REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def load_jsonl(path: Path) -> list[dict]:
     return [
         json.loads(line)
@@ -116,6 +128,14 @@ def configure_llm_assisted_concept_quality(workspace_dir: Path, script_path: Pat
         + "    timeout_seconds: 20\n",
         encoding="utf-8",
     )
+
+
+def test_render_page_help_hides_internal_render_targets() -> None:
+    completed = run_cli_raw("render-page", "--help")
+
+    assert completed.returncode == 0
+    assert "qa_note" not in completed.stdout
+    assert "concept_update" not in completed.stdout
 
 
 def configure_online_hook_missing_config(workspace_dir: Path, section: str, task_name: str, *, mode: str | None = None) -> None:

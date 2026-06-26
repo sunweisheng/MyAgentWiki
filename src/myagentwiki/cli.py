@@ -373,7 +373,7 @@ QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
 AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
-SEMANTIC_TASK_NAMES = ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent", "page_route")
+SEMANTIC_TASK_NAMES = ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent")
 WORKSPACE_SCHEMA_VERSION = "v1"
 QUERY_INTENT_MARKERS = {
     "overview": (
@@ -2231,7 +2231,12 @@ def apply_page_route_to_page_record(page_record: dict, page_route: dict) -> dict
 
 
 def supported_page_render_targets() -> tuple[str, ...]:
-    return tuple(PAGE_RENDER_TARGETS.keys())
+    public_targets = []
+    for render_target in PAGE_RENDER_TARGETS:
+        if render_target in {"qa_note", "concept_update"}:
+            continue
+        public_targets.append(render_target)
+    return tuple(public_targets)
 
 
 def page_record_render_target(page_record: dict) -> str | None:

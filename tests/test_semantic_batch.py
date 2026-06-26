@@ -33,6 +33,18 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     return json.loads(completed.stdout)
 
 
+def run_cli_raw(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, "-m", "myagentwiki.cli", *args]
+    return subprocess.run(
+        command,
+        cwd=str(cwd or REPO_ROOT),
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -159,6 +171,13 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     }
     assert "state/semantic_decisions.jsonl" in tracked_files
     assert "config/llm.local.example.yml" in tracked_files
+
+
+def test_semantic_batch_help_does_not_expose_internal_page_route_task() -> None:
+    completed = run_cli_raw("semantic-batch", "--help")
+
+    assert completed.returncode == 0
+    assert "page_route" not in completed.stdout
 
 
 def test_semantic_batch_writes_and_reuses_decisions(tmp_path: Path) -> None:

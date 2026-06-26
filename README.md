@@ -2,7 +2,13 @@
 
 MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
-如果你准备让脚本直接调用在线大模型，而不是只走本地保守 hook 或 Codex / Claude CLI，那么必须先在当前工作区单独配置 `config/llm.local.yml`。这个文件不应提交到 Git，仓库只会提供 `config/llm.local.example.yml` 示例。
+一个最实用的判断是：
+
+- 如果你只是想先正常把系统用起来：默认不用配在线模型，直接使用包内保守 `agent_hook` 即可
+- 如果你想让 `ingest / review / grounded` 改写效果更强：优先建议改配 `agent_cli_hook`，不必先上 `agent_online_hook`
+- 如果你明确要让工作区脚本直连你自己的远程模型 API：再配置 `config/llm.local.yml`
+
+只要工作区脚本准备调用远程 LLM，这份 `config/llm.local.yml` 就必须由当前用户用自己的 API 配置单独提供。它不应提交到 Git，仓库只会提供 `config/llm.local.example.yml` 示例；如果缺失、不可读或明显未填完，Agent 必须明确提醒用户先补这份配置，而不是继续假定可以正常调用远程模型。
 
 当前仓库既是：
 
@@ -143,7 +149,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `3.0.2` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.0.3` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -421,7 +427,7 @@ automation:
     min_confidence: 0.9
 ```
 
-如果希望通过 Codex 或 Claude Code 调用真实 LLM，可以改用包内 Agent CLI hook：
+如果你只是想先把效果增强，但不想先接自己的远程 API，优先建议通过 Codex 或 Claude Code 调用真实 LLM，也就是改用包内 `agent_cli_hook`：
 
 ```yaml
 semantic:
@@ -456,7 +462,7 @@ export MYAGENTWIKI_CLAUDE_BIN="claude"
 
 `agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex/Claude Code CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
 
-如果希望直接通过你自己的在线模型地址调用，而不是走 Codex / Claude CLI，可以改用包内在线 hook：
+只有当你明确要直接通过你自己的在线模型地址调用，而不是走 Codex / Claude CLI 时，再改用包内在线 hook：
 
 ```yaml
 semantic:
@@ -474,9 +480,9 @@ semantic:
     schema_version: "v1"
 ```
 
-在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这个文件必须由每个使用者单独配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
+在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这份文件必须由每个使用者单独填写自己的 API 配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
 
-对 Codex / Claude Code 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就应先确认当前工作区已有 `config/llm.local.yml`。
+对 Codex / Claude Code 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就必须先确认当前工作区已有用户自己填写好的 `config/llm.local.yml`。
 
 OpenAI 兼容示例：
 
@@ -504,7 +510,7 @@ provider:
 - `agent_cli_hook` 走 Codex / Claude Code CLI
 - `agent_online_hook` 直接走你提供的在线模型地址
 
-如果某个任务已经显式配置成 `myagentwiki.agent_online_hook`，但 `config/llm.local.yml` 缺失、字段不完整、鉴权失败或协议不匹配，命令会直接报错并提醒你补配本地文件，而不会静默回退。
+如果某个任务已经显式配置成 `myagentwiki.agent_online_hook`，但 `config/llm.local.yml` 缺失、字段不完整、不是用户自己的有效 API 配置、鉴权失败或协议不匹配，命令会直接报错并提醒你必须先补好这份本地配置，而不会静默回退。
 
 约定很简单：
 - hook 从标准输入接收 JSON payload
@@ -512,7 +518,7 @@ provider:
 - `confidence` 当前仅用于 `review_auto`、`stable_promotion` 等自动化决策对象
 - `review_auto` hook 可返回 `decision=auto_apply`，并附带 `action`、`primary_claim_id`、`secondary_claim_id`、`primary_page_id`、`alias_value`、`confidence`
 - `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
-- `semantic-batch` hook 当前除 `document_analysis / claim_role / page_intent` 外，也支持 `claim_candidate_quality`，用于给短句灰区返回结构化质量判断
+- `semantic-batch` hook 当前支持 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单独执行的任务
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
 - `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
 - `concept_update` hook 当前也会被复用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
@@ -700,6 +706,10 @@ MyAgentWiki/
 
 当前实现状态：
 
+- `myagentwiki render-page`
+  - 当前公开支持的 render target 为 `readable_concept / guide / duty / example / topic / reference / timeline / overview`
+  - `qa_note / concept_update` 仍属于内部保留配置名，不作为当前正式 CLI 入口对外暴露
+
 - `myagentwiki doctor`
   - 已实现运行环境检查、Python 包检查、可选系统工具检查
   - 已输出 Windows / macOS / Linux 的推荐自举命令示例
@@ -792,10 +802,11 @@ MyAgentWiki/
   - JSON 输出当前会附带 `workspace_summary`，纯文本输出会显式打印工作区绝对路径与当前处理的 review 标识
   - review 动作执行后会即时刷新受影响的自动页面、`state/pages.jsonl`、`wiki/index.md` 与页面检索索引
 - `myagentwiki semantic-batch`
-  - 已实现 `document_analysis / claim_candidate_quality / claim_role / page_intent / page_route` 五类语义批处理入口
+  - 已实现 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑的语义批处理入口
   - 当前支持批处理、缓存命中、dry-run 和统一语义账本写回
   - `claim_candidate_quality` 当前专门处理短句灰区：它不会替代确定性噪声过滤，而是批量判断短 claim 更像可保留陈述、上下文碎片、结构壳标题，还是可安全进入 `safe_auto`
   - `page_intent` 的缓存命中当前会显式依赖 claim 侧的 `knowledge_role / page_intent_hints / concept_candidate_score`；如果 `claim_role` 结果发生变化，对应页面路由会自动失效重算，而不会继续沿用旧的页型判断
+  - `page_route` 当前会在页面路由阶段自动落账到 `state/semantic_decisions.jsonl`，用于保留 `route_target / route_reason / rejected_alternatives` 等可回放信息；它不作为独立 `semantic-batch --task` 对外暴露
 
 ## Windows 兼容性 / Windows Compatibility
 

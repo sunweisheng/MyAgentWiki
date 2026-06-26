@@ -183,7 +183,7 @@ LLM 只能在已有 `normalized / structure_blocks / evidence_blocks / knowledge
 
 如果前几步没收口，页面路由再聪明也会不断被噪声拖累。
 
-当前实现中，`page_intent` 不是单条 claim 的即时反应，而是 claim group 级判断；`page_route` 进一步把最终 `route_target / route_reason / rejected_alternatives` 写成可回放语义决策。
+当前实现中，`page_intent` 是当前对外可单独执行的 claim group 级语义任务；`page_route` 则进一步把最终 `route_target / route_reason / rejected_alternatives` 写成页面路由阶段自动落账的可回放语义决策。
 
 ### 2. `review-auto` 和 `stable promotion` 本质上也属于语义协同链的一部分
 
