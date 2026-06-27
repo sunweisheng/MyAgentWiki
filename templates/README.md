@@ -5,6 +5,6 @@
 预计会包含：
 
 - 用户工程目录骨架模板
-- `AGENTS.md` / `CLAUDE.md` 用户工程入口模板
+- `AGENTS.md` 用户工程入口模板
 - `wiki/index.md` / `wiki/log.md` 初始化模板
 - 配置文件模板

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
-import urllib.error
-import urllib.request
+import time
 from pathlib import Path
 from typing import Any
 
+import httpx
+from openai import DefaultHttpxClient, OpenAI
+from openai import APIConnectionError, APIStatusError
+
 from .agent_cli_hook import parse_json_object_from_text
-from .hook_protocol import (
-    ONLINE_HOOK_CONFIG_REL_PATH,
-    online_hook_error_payload,
-)
+from .hook_protocol import ONLINE_HOOK_CONFIG_REL_PATH, online_hook_error_payload
 from .runtime_env import load_simple_yaml
 from .semantic import (
     SEMANTIC_DECISION_STATUS_ABSTAINED,
@@ -21,9 +22,14 @@ from .semantic import (
 )
 
 OPENAI_COMPATIBLE = "openai_compatible"
-ANTHROPIC_COMPATIBLE = "anthropic_compatible"
-SUPPORTED_PROTOCOLS = {OPENAI_COMPATIBLE, ANTHROPIC_COMPATIBLE}
-ANTHROPIC_VERSION = "2023-06-01"
+SUPPORTED_PROTOCOLS = {OPENAI_COMPATIBLE}
+RESPONSES_API_STYLE = "responses"
+CHAT_COMPLETIONS_API_STYLE = "chat_completions"
+SUPPORTED_API_STYLES = {RESPONSES_API_STYLE, CHAT_COMPLETIONS_API_STYLE}
+
+_CLIENT_CACHE_KEY: tuple | None = None
+_CLIENT_CACHE: OpenAI | None = None
+_NETWORK_REQUEST_COUNT = 0
 
 
 class OnlineHookConfigError(ValueError):
@@ -46,15 +52,30 @@ def load_online_hook_config(cwd: Path | None = None) -> dict:
     provider = config.get("provider", {})
     if not isinstance(provider, dict):
         raise OnlineHookConfigError("`provider` must be a mapping.")
+    transport = config.get("transport", {})
+    if transport is None:
+        transport = {}
+    if not isinstance(transport, dict):
+        raise OnlineHookConfigError("`transport` must be a mapping.")
+
     protocol = str(provider.get("protocol", "")).strip()
     base_url = str(provider.get("base_url", "")).strip()
     model = str(provider.get("model", "")).strip()
     api_key = str(provider.get("api_key", "")).strip()
     timeout_raw = provider.get("timeout_seconds", 120)
+    api_style = str(transport.get("api_style", RESPONSES_API_STYLE)).strip() or RESPONSES_API_STYLE
+    verify_ssl_raw = transport.get("verify_ssl", True)
+
     try:
         timeout_seconds = max(int(timeout_raw), 5)
     except (TypeError, ValueError):
         raise OnlineHookConfigError("`provider.timeout_seconds` must be an integer >= 5.")
+
+    if isinstance(verify_ssl_raw, bool):
+        verify_ssl = verify_ssl_raw
+    else:
+        verify_ssl = str(verify_ssl_raw).strip().lower() not in {"0", "false", "no", "off"}
+
     missing = [
         field
         for field, value in (
@@ -71,12 +92,18 @@ def load_online_hook_config(cwd: Path | None = None) -> dict:
         raise OnlineHookConfigError(
             f"Unsupported provider protocol `{protocol}`. Expected one of: {', '.join(sorted(SUPPORTED_PROTOCOLS))}."
         )
+    if api_style not in SUPPORTED_API_STYLES:
+        raise OnlineHookConfigError(
+            f"Unsupported transport.api_style `{api_style}`. Expected one of: {', '.join(sorted(SUPPORTED_API_STYLES))}."
+        )
     return {
         "protocol": protocol,
         "base_url": base_url.rstrip("/"),
         "model": model,
         "api_key": api_key,
         "timeout_seconds": timeout_seconds,
+        "api_style": api_style,
+        "verify_ssl": verify_ssl,
     }
 
 
@@ -182,107 +209,153 @@ def response_format_for_payload(payload: dict) -> tuple[str, dict]:
     )
 
 
-def build_openai_request(config: dict, prompt_payload: dict) -> tuple[str, dict, bytes]:
-    url = config["base_url"]
-    if not url.endswith("/chat/completions"):
-        url = f"{url}/chat/completions"
-    body = {
-        "model": config["model"],
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are MyAgentWiki's online hook. Return only valid JSON matching the requested shape.",
-            },
-            {
-                "role": "user",
-                "content": json.dumps(prompt_payload, ensure_ascii=False),
-            },
-        ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
+def client_cache_key(config: dict) -> tuple:
+    return (
+        config["base_url"],
+        config["api_key"],
+        config["timeout_seconds"],
+        config["verify_ssl"],
+        config["api_style"],
+    )
+
+
+def get_openai_client(config: dict) -> OpenAI:
+    global _CLIENT_CACHE_KEY, _CLIENT_CACHE
+    cache_key = client_cache_key(config)
+    if _CLIENT_CACHE is not None and _CLIENT_CACHE_KEY == cache_key:
+        return _CLIENT_CACHE
+
+    transport = httpx.HTTPTransport(retries=0, verify=config["verify_ssl"])
+    http_client = DefaultHttpxClient(
+        transport=transport,
+        timeout=config["timeout_seconds"],
+    )
+    _CLIENT_CACHE = OpenAI(
+        api_key=config["api_key"],
+        base_url=config["base_url"],
+        http_client=http_client,
+    )
+    _CLIENT_CACHE_KEY = cache_key
+    return _CLIENT_CACHE
+
+
+def json_schema_for_task(task_key: str, prompt_payload: dict) -> dict:
+    schema_name = f"myagentwiki_{task_key}"
+    if task_key == "semantic_batch":
+        schema_name = f"myagentwiki_{prompt_payload.get('task_name', 'semantic_batch')}"
+    return {
+        "type": "json_schema",
+        "name": schema_name,
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": True,
+        },
     }
-    headers = {
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json",
+
+
+def chat_completions_response_format_for_task(task_key: str, prompt_payload: dict) -> dict:
+    schema = json_schema_for_task(task_key, prompt_payload)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema["name"],
+            "strict": schema["strict"],
+            "schema": schema["schema"],
+        },
     }
-    return url, headers, json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
-def build_anthropic_request(config: dict, prompt_payload: dict) -> tuple[str, dict, bytes]:
-    url = config["base_url"]
-    if not url.endswith("/messages"):
-        url = f"{url}/messages"
-    body = {
-        "model": config["model"],
-        "max_tokens": 4096,
-        "temperature": 0,
-        "system": "You are MyAgentWiki's online hook. Return only valid JSON matching the requested shape.",
-        "messages": [
-            {
-                "role": "user",
-                "content": json.dumps(prompt_payload, ensure_ascii=False),
-            }
-        ],
-    }
-    headers = {
-        "x-api-key": config["api_key"],
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-    return url, headers, json.dumps(body, ensure_ascii=False).encode("utf-8")
+def build_instruction_text(prompt_payload: dict) -> str:
+    instructions = prompt_payload.get("instructions", [])
+    lines = ["You are MyAgentWiki's online hook. Return only valid JSON matching the requested shape."]
+    for item in instructions:
+        if isinstance(item, str) and item.strip():
+            lines.append(item.strip())
+    return "\n".join(lines)
 
 
-def extract_openai_response_text(payload: dict) -> str:
-    choices = payload.get("choices", [])
-    if not isinstance(choices, list) or not choices:
-        raise OnlineHookConfigError("OpenAI-compatible response missing `choices`.")
-    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text")
-            if isinstance(text, str) and text.strip():
-                texts.append(text)
-        return "\n".join(texts)
-    return ""
+def build_input_text(prompt_payload: dict) -> str:
+    return json.dumps(prompt_payload, ensure_ascii=False)
 
 
-def extract_anthropic_response_text(payload: dict) -> str:
-    content = payload.get("content", [])
-    if not isinstance(content, list):
-        raise OnlineHookConfigError("Anthropic-compatible response missing `content`.")
-    texts = []
-    for item in content:
-        if not isinstance(item, dict):
+def extract_responses_stream_text(stream) -> str:
+    fragments: list[str] = []
+    for event in stream:
+        event_type = getattr(event, "type", "")
+        if event_type == "response.output_text.delta":
+            delta = getattr(event, "delta", "")
+            if isinstance(delta, str) and delta:
+                fragments.append(delta)
+    return "".join(fragments).strip()
+
+
+def extract_chat_completions_stream_text(stream) -> str:
+    fragments: list[str] = []
+    for chunk in stream:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
             continue
-        if item.get("type") != "text":
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
             continue
-        text = item.get("text", "")
-        if isinstance(text, str) and text.strip():
-            texts.append(text)
-    return "\n".join(texts)
+        content = getattr(delta, "content", None)
+        if isinstance(content, str) and content:
+            fragments.append(content)
+            continue
+        if isinstance(content, list):
+            for item in content:
+                text = getattr(item, "text", None)
+                if isinstance(text, str) and text:
+                    fragments.append(text)
+    return "".join(fragments).strip()
 
 
-def request_online_model(config: dict, prompt_payload: dict) -> dict:
-    if config["protocol"] == OPENAI_COMPATIBLE:
-        url, headers, body = build_openai_request(config, prompt_payload)
-        extractor = extract_openai_response_text
-    else:
-        url, headers, body = build_anthropic_request(config, prompt_payload)
-        extractor = extract_anthropic_response_text
+def request_responses_model(client: OpenAI, config: dict, task_key: str, prompt_payload: dict) -> str:
+    stream = client.responses.create(
+        model=config["model"],
+        instructions=build_instruction_text(prompt_payload),
+        input=build_input_text(prompt_payload),
+        text={"format": json_schema_for_task(task_key, prompt_payload), "verbosity": "low"},
+        stream=True,
+    )
+    return extract_responses_stream_text(stream)
 
-    request = urllib.request.Request(url=url, data=body, headers=headers, method="POST")
+
+def request_chat_completions_model(client: OpenAI, config: dict, task_key: str, prompt_payload: dict) -> str:
+    stream = client.chat.completions.create(
+        model=config["model"],
+        messages=[
+            {"role": "system", "content": build_instruction_text(prompt_payload)},
+            {"role": "user", "content": build_input_text(prompt_payload)},
+        ],
+        response_format=chat_completions_response_format_for_task(task_key, prompt_payload),
+        temperature=0,
+        stream=True,
+    )
+    return extract_chat_completions_stream_text(stream)
+
+
+def request_online_model(config: dict, task_key: str, prompt_payload: dict) -> dict:
+    global _NETWORK_REQUEST_COUNT
+    client = get_openai_client(config)
+    _NETWORK_REQUEST_COUNT += 1
+    if _NETWORK_REQUEST_COUNT > 1:
+        time.sleep(random.uniform(1.0, 2.0))
     try:
-        with urllib.request.urlopen(request, timeout=config["timeout_seconds"]) as response:
-            raw_body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore").strip()
-        status = exc.code
+        if config["api_style"] == RESPONSES_API_STYLE:
+            content = request_responses_model(client, config, task_key, prompt_payload)
+        else:
+            content = request_chat_completions_model(client, config, task_key, prompt_payload)
+    except APIStatusError as exc:
+        detail = ""
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                detail = response.text.strip()
+            except Exception:
+                detail = ""
+        status = getattr(exc, "status_code", None)
         if status in {401, 403}:
             raise OnlineHookConfigError(
                 f"Online model request was rejected with HTTP {status}. Verify `provider.base_url`, `provider.model`, and `provider.api_key` in `{ONLINE_HOOK_CONFIG_REL_PATH.as_posix()}`."
@@ -290,18 +363,11 @@ def request_online_model(config: dict, prompt_payload: dict) -> dict:
         raise OnlineHookConfigError(
             f"Online model request failed with HTTP {status}. Response: {detail or 'empty body'}"
         ) from exc
-    except urllib.error.URLError as exc:
-        raise OnlineHookConfigError(
-            f"Online model request failed: {exc.reason}."
-        ) from exc
+    except APIConnectionError as exc:
+        raise OnlineHookConfigError(f"Online model request failed: {exc}.") from exc
+    except Exception as exc:
+        raise OnlineHookConfigError(f"Online model request failed: {exc}.") from exc
 
-    try:
-        parsed = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
-        raise OnlineHookConfigError("Online model response was not valid JSON.") from exc
-    if not isinstance(parsed, dict):
-        raise OnlineHookConfigError("Online model response root must be a JSON object.")
-    content = extractor(parsed).strip()
     parsed_output = parse_json_object_from_text(content)
     if parsed_output is None:
         raise OnlineHookConfigError("Online model response did not contain a valid JSON object.")
@@ -372,7 +438,7 @@ def normalize_result(task_key: str, payload: dict, raw_result: dict) -> dict:
 def run_online_hook(payload: dict, cwd: Path | None = None) -> dict:
     config = load_online_hook_config(cwd=cwd)
     task_key, prompt_payload = response_format_for_payload(payload)
-    raw_result = request_online_model(config, prompt_payload)
+    raw_result = request_online_model(config, task_key, prompt_payload)
     return normalize_result(task_key, payload, raw_result)
 
 

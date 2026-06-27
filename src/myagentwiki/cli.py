@@ -541,7 +541,6 @@ def baseline_git_paths(target: Path) -> list[str]:
     candidates = [
         ".gitignore",
         "AGENTS.md",
-        "CLAUDE.md",
         "config/llm.local.example.yml",
         "config/project.yml",
         "config/runtime_manifest.yml",

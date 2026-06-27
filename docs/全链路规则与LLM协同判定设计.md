@@ -71,7 +71,7 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 灰区候选的 accept / reject / rename / reroute
 - grounded 的可读化改写
 
-当前实现里，真实 LLM 接入不直接依赖某个云 API，而是通过 CLI-first 的 `myagentwiki.agent_cli_hook` 调用 Codex 或 Claude Code。默认工作区仍使用包内保守 `agent_hook`，因此没有登录 CLI、模型不可用、超时或输出无法解析时，系统会回退到保守路径，而不是中断 `ingest`。
+当前实现里，真实 LLM 接入不直接依赖某个云 API，而是通过 CLI-first 的 `myagentwiki.agent_cli_hook` 调用 Codex。默认工作区仍使用包内保守 `agent_hook`，因此没有登录 CLI、模型不可用、超时或输出无法解析时，系统会回退到保守路径，而不是中断 `ingest`。
 
 ### 3. 语义分析应该作为正式阶段，而不是零散 hook
 

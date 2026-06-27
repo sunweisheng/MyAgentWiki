@@ -324,6 +324,11 @@ def run_lint_service(
     target = Path(request.target_dir).expanduser().resolve() if request.target_dir else root
 
     checks: list[dict[str, Any]] = []
+    structure_coverage_rows: list[dict[str, Any]] = []
+    incomplete_structure_rows: list[dict[str, Any]] = []
+    structured_claim_coverage_gaps: list[dict[str, Any]] = []
+    structured_gap_class_counts: dict[str, int] = {}
+    intentional_structure_skip_counts: dict[str, int] = {}
 
     def add_check(name: str, ok: bool, details: str, severity: str = "error") -> None:
         checks.append({
@@ -359,7 +364,6 @@ def run_lint_service(
             "wiki/log.md",
             "config/project.yml",
             "AGENTS.md",
-            "CLAUDE.md",
             deps.alias_index_rel_path,
         ]
 

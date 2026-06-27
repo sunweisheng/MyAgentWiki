@@ -98,7 +98,6 @@ def run_init_service(request: InitRequest, deps: InitServiceDeps) -> dict:
     template_root = deps.repo_root / "templates" / "project"
     template_files = {
         "AGENTS.md.tmpl": target_dir / "AGENTS.md",
-        "CLAUDE.md.tmpl": target_dir / "CLAUDE.md",
         "gitignore.tmpl": target_dir / ".gitignore",
         "wiki/index.md.tmpl": target_dir / "wiki" / "index.md",
         "wiki/log.md.tmpl": target_dir / "wiki" / "log.md",

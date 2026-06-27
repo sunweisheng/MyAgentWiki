@@ -200,9 +200,8 @@ def test_init_enables_post_ingest_review_auto_by_default(tmp_path: Path) -> None
     gitignore_text = (workspace_dir / ".gitignore").read_text(encoding="utf-8")
     assert "config/llm.local.yml" in gitignore_text
     agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
-    claude_text = (workspace_dir / "CLAUDE.md").read_text(encoding="utf-8")
     assert "config/llm.local.yml" in agents_text
-    assert "config/llm.local.yml" in claude_text
+    assert not (workspace_dir / "CLAUDE.md").exists()
 
 
 def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
@@ -349,12 +348,11 @@ def test_init_templates_constrain_agent_prechecks_to_known_raw(tmp_path: Path) -
     )
 
     agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
-    claude_text = (workspace_dir / "CLAUDE.md").read_text(encoding="utf-8")
     expected_line = (
         "默认只检查这个目录本身；不要为了确认导入范围先读取它的父目录、其他兄弟目录或整库内容"
     )
     assert expected_line in agents_text
-    assert expected_line in claude_text
+    assert not (workspace_dir / "CLAUDE.md").exists()
 
 
 def test_skill_and_default_prompt_constrain_prechecks_to_known_raw() -> None:

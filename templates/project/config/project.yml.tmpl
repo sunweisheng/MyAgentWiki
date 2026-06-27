@@ -29,11 +29,11 @@ query:
 
 semantic:
   agent_cli_hook:
-    # 默认使用包内保守模拟器；如需通过 Codex / Claude Code 调用真实 LLM，把具体任务 command 改为：
+    # 默认使用包内保守模拟器；如需通过 Codex 调用真实 LLM，把具体任务 command 改为：
     #   - "${python_executable}"
     #   - "-m"
     #   - "myagentwiki.agent_cli_hook"
-    # 并设置 MYAGENTWIKI_AGENT_CLI=codex|claude 以及对应 CLI 登录/模型环境变量。
+    # 并设置 MYAGENTWIKI_AGENT_CLI=codex 以及对应 CLI 登录/模型环境变量。
     provider_env: "MYAGENTWIKI_AGENT_CLI"
     command_env: "MYAGENTWIKI_AGENT_CLI_COMMAND"
     timeout_env: "MYAGENTWIKI_AGENT_CLI_TIMEOUT_SECONDS"
@@ -153,4 +153,3 @@ rendering:
 agent:
   rule_source: "Agent.md"
   codex_entry: "AGENTS.md"
-  claude_entry: "CLAUDE.md"

@@ -259,7 +259,6 @@ flowchart TD
 
 - `Agent.md`：共享 Agent 核心规则源，约束不同 Agent 的共同工作边界
 - `AGENTS.md`：面向 Codex 的入口规则文件
-- `CLAUDE.md`：面向 Claude Code 的入口规则文件
 - `SKILL.md`：Skill 主入口，说明什么时候应使用 MyAgentWiki
 - `agents/openai.yaml`：OpenAI Skill 元数据，用于 Skill 展示和接入配置
 - `pyproject.toml`：Python 项目配置文件，用于声明依赖、构建方式和 CLI 入口
@@ -300,7 +299,6 @@ flowchart TD
 
 - `Agent.md`：共享 Agent 核心规则
 - `AGENTS.md`：Codex 入口规则
-- `CLAUDE.md`：Claude Code 入口规则
 - `SKILL.md`：Skill 主入口
 - `agents/openai.yaml`：OpenAI Skill 元数据
 - `README.md`：项目总说明
@@ -847,7 +845,7 @@ evidence_block_ids: [B]
 2. 在原始目录同级创建新的 Wiki 工程目录
 3. 若同级 `raw/` 已存在则直接复用；若不存在则创建空的 `raw/`
 4. 生成模板目录和配置文件
-5. 写入 `AGENTS.md`、`CLAUDE.md`、`wiki/index.md`、`wiki/log.md`
+5. 写入 `AGENTS.md`、`wiki/index.md`、`wiki/log.md`
 6. 初始化状态文件和索引占位文件
 7. 若目标目录不是 Git 仓库，则自动执行 Git 初始化并生成基线提交
 
@@ -1527,7 +1525,7 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 
 每类任务都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch` 会把缺字段、低置信度、`abstain` 或 malformed 输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
 
-真实 LLM 接入采用 CLI-first 策略。默认工作区模板仍使用包内保守 `myagentwiki.agent_hook`；如果需要让 Codex 或 Claude Code 调用真实模型，可把具体 semantic task 的 command 改为 `python3 -m myagentwiki.agent_cli_hook`。该 hook 会将 payload 包装为结构优先提示词，并要求返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
+真实 LLM 接入采用 CLI-first 策略。默认工作区模板仍使用包内保守 `myagentwiki.agent_hook`；如果需要让 Codex 调用真实模型，可把具体 semantic task 的 command 改为 `python3 -m myagentwiki.agent_cli_hook`。该 hook 会将 payload 包装为结构优先提示词，并要求返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
 
 LLM 必须允许放弃判断：
 
@@ -2172,7 +2170,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `tests/test_review_detection.py`：审核候选检测测试
 - `tests/test_query_alias_and_lint.py`：查询、别名与 lint 测试
 - `tests/test_semantic_batch.py`：语义批处理、缓存、结构上下文与页面路由重算测试
-- `tests/test_agent_cli_hook.py`：Codex / Claude Code CLI hook 的 prompt、schema 与解析测试
+- `tests/test_agent_cli_hook.py`：Codex CLI hook 的 prompt、schema 与解析测试
 - `tests/test_page_intent_routing.py`：结构优先页型路由与中文歧义词回归测试
 - `tests/test_claim_role_concept_filter.py`：claim role 对概念候选过滤和结构化参考证据的测试
 - `tests/test_structure_knowledge_pipeline.py`：Structure IR、Evidence Block、Knowledge Unit 与 semantic features 测试
@@ -2194,7 +2192,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `semantic/` 目录、`state/semantic_decisions.jsonl`、semantic batch 缓存与任务契约
 - `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑语义批处理阶段，以及会在页面路由时自动落账的 `page_route` 决策
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
-- `agent_cli_hook` 已支持通过 Codex / Claude Code CLI 调用真实 LLM
+- `agent_cli_hook` 已支持通过 Codex CLI 调用真实 LLM
 - `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
 - 覆盖主闭环的端到端和关键回归测试
 
@@ -2235,4 +2233,4 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 正式目标平台为 Windows、macOS、Linux
 - Python 版本固定为 `3.12+`
 - 外部办公软件和 OCR 工具属于可选增强能力，不是主路径前提
-- `Agent.md` 是 Agent 规则的共享权威源，`AGENTS.md` 与 `CLAUDE.md` 只做入口适配
+- `Agent.md` 是 Agent 规则的共享权威源，`AGENTS.md` 只做 Codex 入口适配

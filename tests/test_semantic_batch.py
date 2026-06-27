@@ -61,38 +61,17 @@ def append_jsonl(path: Path, record: dict) -> None:
 
 
 class _SemanticHookHandler(BaseHTTPRequestHandler):
-    response_body = {
-        "choices": [
-            {
-                "message": {
-                    "content": json.dumps({
-                        "decisions": [
-                            {
-                                "item_id": "replace_me",
-                                "decision": {
-                                    "knowledge_role": "fact",
-                                    "page_intent_hints": ["topic"],
-                                    "concept_candidate_score": 0.52,
-                                },
-                                "decision_status": "accepted",
-                                "confidence": 0.91,
-                                "reason_code": "online_semantic_ok",
-                            }
-                        ]
-                    }, ensure_ascii=False)
-                }
-            }
-        ]
-    }
-
     def do_POST(self):  # noqa: N802
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length).decode("utf-8")
         payload = json.loads(body)
-        prompt_payload = json.loads(payload["messages"][1]["content"])
+        is_chat_completions = "messages" in payload
+        if is_chat_completions:
+            prompt_payload = json.loads(payload["messages"][1]["content"])
+        else:
+            prompt_payload = json.loads(payload["input"])
         item_id = prompt_payload["payload"]["items"][0]["item_id"]
-        response_body = json.loads(json.dumps(self.response_body))
-        response_body["choices"][0]["message"]["content"] = json.dumps({
+        decisions_json = json.dumps({
             "decisions": [
                 {
                     "item_id": item_id,
@@ -107,12 +86,66 @@ class _SemanticHookHandler(BaseHTTPRequestHandler):
                 }
             ]
         }, ensure_ascii=False)
-        encoded = json.dumps(response_body, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        if is_chat_completions:
+            chunks = [
+                {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": decisions_json},
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            ]
+            encoded = "".join(
+                f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n" for chunk in chunks
+            ) + "data: [DONE]\n\n"
+            encoded_bytes = encoded.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(len(encoded_bytes)))
+            self.end_headers()
+            self.wfile.write(encoded_bytes)
+        else:
+            events = [
+                {
+                    "type": "response.output_text.delta",
+                    "delta": decisions_json,
+                },
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp-test"},
+                },
+            ]
+            encoded = "".join(
+                f"event: {event['type']}\n"
+                f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                for event in events
+            )
+            encoded_bytes = encoded.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(len(encoded_bytes)))
+            self.end_headers()
+            self.wfile.write(encoded_bytes)
 
     def log_message(self, format, *args):  # noqa: A003, ANN001
         return
@@ -482,7 +515,10 @@ def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
             f'  base_url: "http://127.0.0.1:{server.server_port}"\n'
             '  model: "test-model"\n'
             '  api_key: "test-key"\n'
-            '  timeout_seconds: 30\n',
+            '  timeout_seconds: 30\n'
+            'transport:\n'
+            '  api_style: "chat_completions"\n'
+            '  verify_ssl: true\n',
             encoding="utf-8",
         )
         config_path = workspace_dir / "config" / "project.yml"

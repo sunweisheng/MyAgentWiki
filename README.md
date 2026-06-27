@@ -1,6 +1,6 @@
 # MyAgentWiki
 
-MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
+MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
 一个最实用的判断是：
 
@@ -13,7 +13,7 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（
 当前仓库既是：
 
 - 一个可安装的 Python CLI 项目
-- 一个可供 Codex / Claude Code 使用的 Skill 仓库
+- 一个可供 Codex 使用的 Skill 仓库
 - 一个承载项目设计、工程决策与知识沉淀的母仓库
 
 ## 项目简介
@@ -47,7 +47,7 @@ MyAgentWiki 是一个面向 Codex 和 Claude Code 的本地知识编译系统（
 
 同时，项目的运行定位是：
 
-- 默认假设它会运行在 Codex 或 Claude Code 这样的 Agent 环境里
+- 默认假设它会运行在 Codex 这样的 Agent 环境里
 - 固定流程由 CLI 保证可重复和可回滚
 - 需要语义判断的步骤优先交给 Agent / LLM hook 自动推进
 - 只有在高风险冲突、归属不清或 hook 没给出高置信结论时，才升级为人工判断
@@ -149,7 +149,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `3.0.3` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.1.0` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -159,9 +159,8 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 - [agents/openai.yaml](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/agents/openai.yaml)
 - [Agent.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/Agent.md)
 - [AGENTS.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/AGENTS.md)
-- [CLAUDE.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/CLAUDE.md)
 
-这意味着它可以被 Codex 或 Claude Code 作为一个包含 `SKILL.md` 的目录加载。推荐优先用软链接 / 目录链接安装，这样仓库更新后 Skill 会同步生效。
+这意味着它可以被 Codex 作为一个包含 `SKILL.md` 的目录加载。推荐优先用软链接 / 目录链接安装，这样仓库更新后 Skill 会同步生效。
 
 面向 Agent 的核心约束是：
 
@@ -210,48 +209,6 @@ New-Item -ItemType Junction `
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
 
 如果 Codex 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `config/llm.local.yml`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
-
-### 在 Claude Code 中安装
-
-Claude Code 支持用户级和项目级 Skill：
-
-- 用户级：`~/.claude/skills/`
-  - 适合在所有项目中复用 MyAgentWiki
-- 项目级：`.claude/skills/`
-  - 适合只在某个项目中启用 MyAgentWiki
-
-用户级安装，macOS / Linux：
-
-```bash
-mkdir -p "$HOME/.claude/skills"
-ln -s /path/to/MyAgentWiki "$HOME/.claude/skills/myagentwiki"
-```
-
-项目级安装，macOS / Linux：
-
-```bash
-mkdir -p .claude/skills
-ln -s /path/to/MyAgentWiki .claude/skills/myagentwiki
-```
-
-Windows PowerShell 用户级安装：
-
-```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"
-New-Item -ItemType Junction `
-  -Path "$env:USERPROFILE\.claude\skills\myagentwiki" `
-  -Target "C:\path\to\MyAgentWiki"
-```
-
-安装后重启 Claude Code。使用时可以直接说：
-
-```text
-使用 myagentwiki skill，围绕当前顶层 raw/ 执行 doctor、init、ingest、query 和 lint，不要把其他目录并入导入源。
-```
-
-如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Claude Code 还会读取根目录的 `CLAUDE.md`，它会把 Claude Code 引导到共享规则 `Agent.md` 和 review / state 恢复约定。
-
-如果 Claude Code 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `config/llm.local.yml`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
 
 ## 文档导航
 
@@ -427,7 +384,7 @@ automation:
     min_confidence: 0.9
 ```
 
-如果你只是想先把效果增强，但不想先接自己的远程 API，优先建议通过 Codex 或 Claude Code 调用真实 LLM，也就是改用包内 `agent_cli_hook`：
+如果你只是想先把效果增强，但不想先接自己的远程 API，优先建议通过 Codex 调用真实 LLM，也就是改用包内 `agent_cli_hook`：
 
 ```yaml
 semantic:
@@ -448,19 +405,14 @@ semantic:
 并设置环境变量：
 
 ```bash
-# codex 或 claude，默认 codex
+# 仅支持 codex
 export MYAGENTWIKI_AGENT_CLI="codex"
 # 可选：指定模型或二进制路径
 export MYAGENTWIKI_CODEX_MODEL="gpt-5.1-codex"
 export MYAGENTWIKI_CODEX_BIN="codex"
-
-# 如果改用 Claude Code：
-export MYAGENTWIKI_AGENT_CLI="claude"
-export MYAGENTWIKI_CLAUDE_MODEL="sonnet"
-export MYAGENTWIKI_CLAUDE_BIN="claude"
 ```
 
-`agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex/Claude Code CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
+`agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
 
 只有当你明确要直接通过你自己的在线模型地址调用，而不是走 Codex / Claude CLI 时，再改用包内在线 hook：
 
@@ -482,7 +434,7 @@ semantic:
 
 在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这份文件必须由每个使用者单独填写自己的 API 配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
 
-对 Codex / Claude Code 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就必须先确认当前工作区已有用户自己填写好的 `config/llm.local.yml`。
+对 Codex 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就必须先确认当前工作区已有用户自己填写好的 `config/llm.local.yml`。
 
 OpenAI 兼容示例：
 
@@ -495,19 +447,8 @@ provider:
   timeout_seconds: 120
 ```
 
-Anthropic 兼容示例：
-
-```yaml
-provider:
-  protocol: "anthropic_compatible"
-  base_url: "https://example.com"
-  model: "your-model-name"
-  api_key: "your-api-key"
-  timeout_seconds: 120
-```
-
 区别很明确：
-- `agent_cli_hook` 走 Codex / Claude Code CLI
+- `agent_cli_hook` 走 Codex CLI
 - `agent_online_hook` 直接走你提供的在线模型地址
 
 如果某个任务已经显式配置成 `myagentwiki.agent_online_hook`，但 `config/llm.local.yml` 缺失、字段不完整、不是用户自己的有效 API 配置、鉴权失败或协议不匹配，命令会直接报错并提醒你必须先补好这份本地配置，而不会静默回退。
@@ -538,7 +479,7 @@ provider:
 - `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写；若不满足校验或生成条件，会回退到 deterministic fallback，或暂不产出对应页面
 - 只有仍然 escalated 的 review 才需要人工判断
 
-如果你主要是在 Codex 或 Claude 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
+如果你主要是在 Codex 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
 
 用户通常不需要重复说明查询规则。像“先看候选页面”“需要时继续回读证据”“有风险就明确提示不确定性”这些行为，本来就应该由 Agent 按 MyAgentWiki 约定自动完成。
 
@@ -618,7 +559,6 @@ Agent 使用约定：
 MyAgentWiki/
 ├── Agent.md
 ├── AGENTS.md
-├── CLAUDE.md
 ├── README.md
 ├── pyproject.toml
 ├── config/
@@ -646,8 +586,8 @@ MyAgentWiki/
 - `Agent.md`
   - 共享 Agent 核心规则源
 
-- `AGENTS.md` / `CLAUDE.md`
-  - Codex / Claude Code 入口适配文件
+- `AGENTS.md`
+  - Codex 入口适配文件
 
 - `pyproject.toml`
   - Python 项目元信息、依赖和 CLI 入口规划
@@ -718,7 +658,7 @@ MyAgentWiki/
   - 当前直接调用运行中的 Python 解释器，不依赖 shell 专属语法
 - `myagentwiki init`
   - 已实现工作区初始化、模板生成、状态文件创建、Git 基线提交
-  - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md` / `CLAUDE.md`、以及 query/agent 基础配置
+  - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md`、以及 query/agent 基础配置
 - `myagentwiki ingest`
   - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、Structure IR / Evidence Block / Knowledge Unit 编译、chunk 上下文容器生成、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
   - 扫描 `raw/` 时当前会统一跳过所有 `.` 开头的文件和目录，例如 `.DS_Store`、`.obsidian/` 及其子内容，不把这些隐藏项纳入 ingest
@@ -828,7 +768,7 @@ MyAgentWiki/
 
 面向最终用户的大致流程会是：
 
-1. 在 Codex 或 Claude Code 中安装或接入 MyAgentWiki Skill
+1. 在 Codex 中安装或接入 MyAgentWiki Skill
 2. 准备自己的 `raw/` 原始知识目录，放在目标工作区同级
 3. 运行 `init`，创建 Wiki 工程并复用或创建 sibling `raw/`
 4. 使用 Agent 执行 `ingest`

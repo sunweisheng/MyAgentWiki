@@ -57,30 +57,9 @@ def test_build_codex_command_uses_headless_structured_output(tmp_path: Path, mon
     assert stdin_text == "return json"
 
 
-def test_build_claude_command_uses_print_json_schema(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("MYAGENTWIKI_CLAUDE_BIN", "claude-test")
-    monkeypatch.setenv("MYAGENTWIKI_CLAUDE_MODEL", "sonnet-test")
-    schema_path = tmp_path / "schema.json"
-    schema = semantic_decisions_schema()
-    schema_path.write_text(json.dumps(schema), encoding="utf-8")
-
-    command, stdin_text = build_agent_command(
-        "claude",
-        "return json",
-        schema_path=schema_path,
-    )
-
-    assert command[:4] == ["claude-test", "-p", "--output-format", "json"]
-    assert "--json-schema" in command
-    assert json.loads(command[command.index("--json-schema") + 1]) == schema
-    assert ["--model", "sonnet-test"] == command[command.index("--model"):command.index("--model") + 2]
-    assert command[-1] == "return json"
-    assert stdin_text is None
-
-
 def test_normalize_agent_stdout_extracts_decisions_from_envelopes() -> None:
     codex_output = "prefix\n{\"decisions\":[{\"item_id\":\"a\",\"decision\":{\"page_intent\":\"topic\"},\"confidence\":0.8,\"reason_code\":\"ok\"}]}\n"
-    claude_output = json.dumps({
+    codex_output_nested = json.dumps({
         "type": "result",
         "structured_output": {
             "decisions": [
@@ -95,4 +74,4 @@ def test_normalize_agent_stdout_extracts_decisions_from_envelopes() -> None:
     })
 
     assert normalize_agent_stdout(codex_output)["decisions"][0]["item_id"] == "a"
-    assert normalize_agent_stdout(claude_output)["decisions"][0]["item_id"] == "b"
+    assert normalize_agent_stdout(codex_output_nested)["decisions"][0]["item_id"] == "b"

@@ -12,7 +12,7 @@ from typing import Any
 from .semantic import semantic_task_contract
 
 
-AGENT_PROVIDERS = {"codex", "claude"}
+AGENT_PROVIDERS = {"codex"}
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -140,22 +140,6 @@ def build_agent_command(
     custom_command = split_command_env(env_value("MYAGENTWIKI_AGENT_CLI_COMMAND"))
     if custom_command:
         return custom_command, prompt
-
-    if provider == "claude":
-        command = [
-            env_value("MYAGENTWIKI_CLAUDE_BIN", "claude"),
-            "-p",
-            "--output-format",
-            "json",
-            "--no-session-persistence",
-        ]
-        if schema_path is not None:
-            command.extend(["--json-schema", schema_path.read_text(encoding="utf-8")])
-        model = env_value("MYAGENTWIKI_CLAUDE_MODEL")
-        if model:
-            command.extend(["--model", model])
-        command.append(prompt)
-        return command, None
 
     command = [
         env_value("MYAGENTWIKI_CODEX_BIN", "codex"),

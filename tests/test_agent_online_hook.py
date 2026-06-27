@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import importlib
 import importlib.util
+import json
 import sys
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -23,8 +22,10 @@ PACKAGE_SPEC.loader.exec_module(PACKAGE_MODULE)
 MODULE = importlib.import_module("myagentwiki.agent_online_hook")
 
 OnlineHookConfigError = MODULE.OnlineHookConfigError
-build_anthropic_request = MODULE.build_anthropic_request
-build_openai_request = MODULE.build_openai_request
+RESPONSES_API_STYLE = MODULE.RESPONSES_API_STYLE
+CHAT_COMPLETIONS_API_STYLE = MODULE.CHAT_COMPLETIONS_API_STYLE
+client_cache_key = MODULE.client_cache_key
+get_openai_client = MODULE.get_openai_client
 load_online_hook_config = MODULE.load_online_hook_config
 normalize_result = MODULE.normalize_result
 request_online_model = MODULE.request_online_model
@@ -36,6 +37,39 @@ def write_local_config(workspace_dir: Path, text: str) -> None:
     config_dir = workspace_dir / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "llm.local.yml").write_text(text, encoding="utf-8")
+
+
+def sample_config(api_style: str = RESPONSES_API_STYLE, verify_ssl: bool = True) -> dict:
+    return {
+        "protocol": "openai_compatible",
+        "base_url": "https://example.com/v1",
+        "model": "gpt-test",
+        "api_key": "sk-test",
+        "timeout_seconds": 60,
+        "api_style": api_style,
+        "verify_ssl": verify_ssl,
+    }
+
+
+class FakeResponseEvent:
+    def __init__(self, event_type: str, delta: str = "") -> None:
+        self.type = event_type
+        self.delta = delta
+
+
+class FakeChoiceDelta:
+    def __init__(self, content) -> None:  # noqa: ANN001
+        self.content = content
+
+
+class FakeChoice:
+    def __init__(self, delta) -> None:  # noqa: ANN001
+        self.delta = delta
+
+
+class FakeChatChunk:
+    def __init__(self, content) -> None:  # noqa: ANN001
+        self.choices = [FakeChoice(FakeChoiceDelta(content))]
 
 
 def test_load_online_hook_config_requires_local_file(tmp_path: Path) -> None:
@@ -54,99 +88,54 @@ def test_load_online_hook_config_requires_fields(tmp_path: Path) -> None:
     assert "provider.base_url" in str(exc.value)
 
 
-def test_build_openai_request_uses_chat_completions_and_bearer_auth() -> None:
-    url, headers, body = build_openai_request(
-        {
-            "protocol": "openai_compatible",
-            "base_url": "https://example.com/v1",
-            "model": "gpt-test",
-            "api_key": "sk-test",
-            "timeout_seconds": 60,
-        },
-        {"task": "render_readable_concept_page"},
+def test_load_online_hook_config_defaults_to_responses_and_verify_ssl(tmp_path: Path) -> None:
+    write_local_config(
+        tmp_path,
+        'provider:\n'
+        '  protocol: "openai_compatible"\n'
+        '  base_url: "https://example.com/v1"\n'
+        '  model: "gpt-test"\n'
+        '  api_key: "sk-test"\n',
     )
-    assert url == "https://example.com/v1/chat/completions"
-    assert headers["Authorization"] == "Bearer sk-test"
-    payload = json.loads(body)
-    assert payload["model"] == "gpt-test"
-    assert payload["response_format"] == {"type": "json_object"}
+    config = load_online_hook_config(tmp_path)
+    assert config["api_style"] == RESPONSES_API_STYLE
+    assert config["verify_ssl"] is True
 
 
-def test_build_anthropic_request_uses_messages_api_and_api_key_header() -> None:
-    url, headers, body = build_anthropic_request(
-        {
-            "protocol": "anthropic_compatible",
-            "base_url": "https://anthropic.example.com",
-            "model": "claude-test",
-            "api_key": "key-test",
-            "timeout_seconds": 60,
-        },
-        {"task": "render_workspace_overview_page"},
+def test_load_online_hook_config_rejects_invalid_api_style(tmp_path: Path) -> None:
+    write_local_config(
+        tmp_path,
+        'provider:\n'
+        '  protocol: "openai_compatible"\n'
+        '  base_url: "https://example.com/v1"\n'
+        '  model: "gpt-test"\n'
+        '  api_key: "sk-test"\n'
+        'transport:\n'
+        '  api_style: "invalid"\n',
     )
-    assert url == "https://anthropic.example.com/messages"
-    assert headers["x-api-key"] == "key-test"
-    payload = json.loads(body)
-    assert payload["model"] == "claude-test"
-    assert payload["messages"][0]["role"] == "user"
-
-
-def test_request_online_model_rejects_401(monkeypatch) -> None:
-    class UnauthorizedResponse:
-        def read(self) -> bytes:
-            return b'{"error":"unauthorized"}'
-
-        def close(self) -> None:
-            return None
-
-    def fake_urlopen(request, timeout):  # noqa: ANN001
-        raise urllib.error.HTTPError(
-            request.full_url,
-            401,
-            "Unauthorized",
-            hdrs=None,
-            fp=UnauthorizedResponse(),
-        )
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     with pytest.raises(OnlineHookConfigError) as exc:
-        request_online_model(
-            {
-                "protocol": "openai_compatible",
-                "base_url": "https://example.com/v1",
-                "model": "gpt-test",
-                "api_key": "sk-test",
-                "timeout_seconds": 10,
-            },
-            {"task": "render_readable_concept_page"},
-        )
-    assert "HTTP 401" in str(exc.value)
-    assert "config/llm.local.yml" in str(exc.value)
+        load_online_hook_config(tmp_path)
+    assert "transport.api_style" in str(exc.value)
 
 
-def test_request_online_model_rejects_non_json_response(monkeypatch) -> None:
-    class FakeResponse:
-        def __enter__(self):  # noqa: ANN204
-            return self
+def test_client_cache_key_changes_with_effective_transport() -> None:
+    first = client_cache_key(sample_config())
+    second = client_cache_key(sample_config(api_style=CHAT_COMPLETIONS_API_STYLE))
+    third = client_cache_key(sample_config(verify_ssl=False))
+    assert first != second
+    assert first != third
 
-        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN204
-            return False
 
-        def read(self) -> bytes:
-            return b"not json"
+def test_get_openai_client_reuses_singleton_for_same_config() -> None:
+    first = get_openai_client(sample_config())
+    second = get_openai_client(sample_config())
+    assert first is second
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
-    with pytest.raises(OnlineHookConfigError) as exc:
-        request_online_model(
-            {
-                "protocol": "openai_compatible",
-                "base_url": "https://example.com/v1",
-                "model": "gpt-test",
-                "api_key": "sk-test",
-                "timeout_seconds": 10,
-            },
-            {"task": "render_readable_concept_page"},
-        )
-    assert "not valid JSON" in str(exc.value)
+
+def test_get_openai_client_rebuilds_singleton_when_config_changes() -> None:
+    first = get_openai_client(sample_config())
+    second = get_openai_client(sample_config(api_style=CHAT_COMPLETIONS_API_STYLE))
+    assert first is not second
 
 
 def test_response_format_for_payload_supports_semantic_batch_contract() -> None:
@@ -181,6 +170,126 @@ def test_normalize_result_validates_semantic_required_fields() -> None:
     assert "missing required fields" in str(exc.value)
 
 
+def test_request_online_model_uses_responses_stream(monkeypatch) -> None:
+    recorded = {}
+
+    class FakeResponses:
+        def create(self, **kwargs):  # noqa: ANN003
+            recorded.update(kwargs)
+            return [
+                FakeResponseEvent("response.output_text.delta", '{"summary":"'),
+                FakeResponseEvent("response.output_text.delta", 'ok"}'),
+            ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("myagentwiki.agent_online_hook.get_openai_client", lambda config: FakeClient())
+    result = request_online_model(
+        sample_config(api_style=RESPONSES_API_STYLE),
+        "render_workspace_overview_page",
+        {
+            "task": "render_workspace_overview_page",
+            "instructions": ["Return JSON only."],
+            "response_shape": {"summary": "string"},
+            "payload": {},
+        },
+    )
+    assert recorded["stream"] is True
+    assert recorded["model"] == "gpt-test"
+    assert recorded["text"]["format"]["type"] == "json_schema"
+    assert result["summary"] == "ok"
+
+
+def test_request_online_model_uses_chat_completions_stream(monkeypatch) -> None:
+    recorded = {}
+
+    class FakeChatCompletions:
+        def create(self, **kwargs):  # noqa: ANN003
+            recorded.update(kwargs)
+            return [
+                FakeChatChunk('{"decision":"'),
+                FakeChatChunk('skip","reason":"ok"}'),
+            ]
+
+    class FakeChat:
+        def __init__(self) -> None:
+            self.completions = FakeChatCompletions()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.chat = FakeChat()
+
+    monkeypatch.setattr("myagentwiki.agent_online_hook.get_openai_client", lambda config: FakeClient())
+    result = request_online_model(
+        sample_config(api_style=CHAT_COMPLETIONS_API_STYLE),
+        "claim_stable_promotion",
+        {
+            "task": "claim_stable_promotion",
+            "instructions": ["Return JSON only."],
+            "response_shape": {"decision": "string", "reason": "string"},
+            "payload": {},
+        },
+    )
+    assert recorded["stream"] is True
+    assert recorded["model"] == "gpt-test"
+    assert recorded["response_format"]["type"] == "json_schema"
+    assert recorded["response_format"]["json_schema"]["schema"]["type"] == "object"
+    assert result["decision"] == "skip"
+
+
+def test_request_online_model_sleeps_after_first_network_request(monkeypatch) -> None:
+    sleep_calls = []
+
+    class FakeResponses:
+        def create(self, **kwargs):  # noqa: ANN003
+            return [FakeResponseEvent("response.output_text.delta", '{"summary":"ok"}')]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("myagentwiki.agent_online_hook.get_openai_client", lambda config: FakeClient())
+    monkeypatch.setattr("myagentwiki.agent_online_hook.time.sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr("myagentwiki.agent_online_hook.random.uniform", lambda start, end: 1.5)
+    monkeypatch.setattr("myagentwiki.agent_online_hook._NETWORK_REQUEST_COUNT", 0)
+
+    payload = {
+        "task": "render_workspace_overview_page",
+        "instructions": ["Return JSON only."],
+        "response_shape": {"summary": "string"},
+        "payload": {},
+    }
+    request_online_model(sample_config(), "render_workspace_overview_page", payload)
+    request_online_model(sample_config(), "render_workspace_overview_page", payload)
+    assert sleep_calls == [1.5]
+
+
+def test_request_online_model_rejects_missing_json_object(monkeypatch) -> None:
+    class FakeResponses:
+        def create(self, **kwargs):  # noqa: ANN003
+            return [FakeResponseEvent("response.output_text.delta", "not json")]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("myagentwiki.agent_online_hook.get_openai_client", lambda config: FakeClient())
+    with pytest.raises(OnlineHookConfigError) as exc:
+        request_online_model(
+            sample_config(),
+            "render_workspace_overview_page",
+            {
+                "task": "render_workspace_overview_page",
+                "instructions": ["Return JSON only."],
+                "response_shape": {"summary": "string"},
+                "payload": {},
+            },
+        )
+    assert "valid JSON object" in str(exc.value)
+
+
 def test_run_online_hook_supports_render_and_review_shapes(tmp_path: Path, monkeypatch) -> None:
     write_local_config(
         tmp_path,
@@ -189,7 +298,10 @@ def test_run_online_hook_supports_render_and_review_shapes(tmp_path: Path, monke
         '  base_url: "https://example.com/v1"\n'
         '  model: "gpt-test"\n'
         '  api_key: "sk-test"\n'
-        '  timeout_seconds: 60\n',
+        '  timeout_seconds: 60\n'
+        'transport:\n'
+        '  api_style: "responses"\n'
+        '  verify_ssl: true\n',
     )
 
     responses = iter([
@@ -208,7 +320,7 @@ def test_run_online_hook_supports_render_and_review_shapes(tmp_path: Path, monke
         },
     ])
 
-    monkeypatch.setattr("myagentwiki.agent_online_hook.request_online_model", lambda config, prompt_payload: next(responses))
+    monkeypatch.setattr("myagentwiki.agent_online_hook.request_online_model", lambda config, task_key, prompt_payload: next(responses))
 
     review_result = run_online_hook({"task": "review_auto_decision", "review": {"allowed_actions": ["keep_both"]}}, cwd=tmp_path)
     assert review_result["decision"] == "auto_apply"
@@ -230,15 +342,18 @@ def test_run_online_hook_supports_semantic_batch(tmp_path: Path, monkeypatch) ->
     write_local_config(
         tmp_path,
         'provider:\n'
-        '  protocol: "anthropic_compatible"\n'
-        '  base_url: "https://example.com"\n'
-        '  model: "claude-test"\n'
-        '  api_key: "key-test"\n'
-        '  timeout_seconds: 60\n',
+        '  protocol: "openai_compatible"\n'
+        '  base_url: "https://example.com/v1"\n'
+        '  model: "gpt-test"\n'
+        '  api_key: "sk-test"\n'
+        '  timeout_seconds: 60\n'
+        'transport:\n'
+        '  api_style: "chat_completions"\n'
+        '  verify_ssl: false\n',
     )
     monkeypatch.setattr(
         "myagentwiki.agent_online_hook.request_online_model",
-        lambda config, prompt_payload: {
+        lambda config, task_key, prompt_payload: {
             "decisions": [
                 {
                     "item_id": "claim-1",

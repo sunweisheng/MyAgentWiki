@@ -6,7 +6,7 @@
 
 - 约束 Agent 如何在用户工程中执行 `init / ingest / query / lint`
 - 明确 Python 脚本与大模型推理的职责边界
-- 统一 Codex 与 Claude Code 的核心行为规则
+- 统一 Codex 场景下的核心行为规则
 
 ## 职责边界 / Responsibility Boundary
 

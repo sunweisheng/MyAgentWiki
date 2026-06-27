@@ -13,6 +13,7 @@ python_packages:
     - "openpyxl"
     - "pypdf"
     - "pillow"
+    - "openai"
   optional:
     ocr: []
     office: []
