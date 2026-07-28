@@ -4,10 +4,13 @@
 
 - Python `3.12+`
 - `git`
+- 项目声明的 Python 包：`python-docx`、`openpyxl`、`pypdf`、`pillow`、`openai`
+
+这些 Python 包由 `pip install -e .` 或 `pip install -e ".[dev]"` 统一安装。即使当前工作区只使用包内保守 `agent_hook`，`doctor` 仍会按 `config/runtime_manifest.yml` 检查这组项目依赖。
 
 ## 可选增强依赖
 
-这些工具不是 V1 主流程的前提条件，但可以提升特定格式的处理质量：
+这些工具不是当前主流程的前提条件，但可以提升特定格式的处理质量：
 
 - `tesseract`
   - 用途：图片 OCR 增强
@@ -25,7 +28,7 @@
   - 用途：PDF 文本提取增强
   - 缺失时：走纯 Python PDF 解析
 
-## 当前 V1 转换器现状
+## 当前转换器现状
 
 - Markdown / 纯文本
   - 已支持，走纯 Python 标准化
@@ -57,13 +60,13 @@
 
 ## 平台说明
 
-V1 目标平台：
+目标平台：
 
 - Windows 11+
 - macOS
 - 主流 Linux 发行版
 
-V1 原则：
+当前原则：
 
 - 核心流程不依赖外部办公软件才能运行
 - 可选系统工具缺失时，`doctor` 需要明确提示并说明降级策略
@@ -75,13 +78,17 @@ Windows:
 
 - `py -3.12 -m venv .venv`
 - `.venv\\Scripts\\python -m pip install -U pip`
-- `.venv\\Scripts\\python -m myagentwiki bootstrap --extra dev`
+- `.venv\\Scripts\\python -m pip install -e ".[dev]"`
+- `.venv\\Scripts\\python -m myagentwiki doctor`
 
 macOS / Linux:
 
 - `python3.12 -m venv .venv`
 - `.venv/bin/python -m pip install -U pip`
-- `.venv/bin/python -m myagentwiki bootstrap --extra dev`
+- `.venv/bin/python -m pip install -e ".[dev]"`
+- `.venv/bin/python -m myagentwiki doctor`
+
+完成项目安装后，才可以使用 `python -m myagentwiki bootstrap --extra dev` 安装或修复依赖；`bootstrap --dry-run` 可先查看将要执行的安装命令。
 
 ## 工作流验证脚本
 

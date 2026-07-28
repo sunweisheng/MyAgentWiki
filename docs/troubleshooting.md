@@ -15,7 +15,7 @@
 
 说明：
 
-- 当前 V1 基线是 `Python 3.12+`
+- 当前运行基线是 `Python 3.12+`
 - 这样可以兼顾 `.docx` / `.xlsx` / `pypdf` 依赖稳定性与 Windows 兼容性
 
 ## 2. `bootstrap` 安装依赖失败
@@ -52,7 +52,7 @@
 
 说明：
 
-- V1 会优先保守落地中间产物，不会为了“看起来有结果”而伪造高质量文本
+- 当前实现会优先保守落地中间产物，不会为了“看起来有结果”而伪造高质量文本
 
 ## 4. 图片没有 OCR 文本
 
@@ -79,7 +79,7 @@
 
 说明：
 
-- 当前 V1 对 `.doc` / `.xls` 采用纯 Python 保守 fallback
+- 当前实现对 `.doc` / `.xls` 采用纯 Python 保守 fallback
 - 目标是先保留可读文本片段与基础容器信息
 - 不保证复杂表格、版面、公式和批注高保真恢复
 
@@ -136,7 +136,7 @@
 
 说明：
 
-- V1 的权威账本是 `state/*.jsonl`
+- 当前实现的权威账本是 `state/*.jsonl`
 - 单文件 `claims/*.json` 与 `reviews/*.json` 是便于人工查看与编辑的展开形式
 
 如果你看到的是这类现象：
@@ -157,7 +157,7 @@
 - 如果同一组内容同时挂着多个 live 自动页，应优先把它理解为页面生命周期没有完全收口，而不是预期中的长期并行结构
 - 如果不再需要的自动页面已经退场，只剩 `guide / example / reference` 之类的新页型，但 `lint` 仍提示 warning，那么更可能是这组 claim 本身确实处在语义灰区，需要继续调整 claim 状态、角色或页面归属
 - 如果没有新 source，但 claim 的语义字段变了，重新跑 `ingest` 后页面变化是正常的；当前系统会把这种“语义账本变化”也视作上游变化，而不是简单跳过
-- 如果看到 `claim_semantic_risk_flags_reviewed`，通常表示某些 claim 命中了 `ambiguous_case_keyword / ambiguous_reference_keyword / ambiguous_timeline_keyword / ambiguous_howto_keyword` 等保守风险标记；这不是 ingest 失败，而是在提醒“局部中文关键词不足以自动决定语义角色”
+- 如果看到 `claim_semantic_risk_flags_reviewed`，表示语义决策账本中的某些 claim 带有 `ambiguous` 风险标记；这不是 ingest 失败，而是在提醒对应语义判断仍需复核。当前包内保守 hook 不再因单个中文关键词自动写入旧的 `ambiguous_case_keyword / ambiguous_reference_keyword / ambiguous_timeline_keyword / ambiguous_howto_keyword`
 - 如果看到 `semantic_page_intent_brakes_reviewed`，通常表示某个 specialized page intent 因组级证据不足被降级；优先检查 `state/pages.jsonl` 的 `page_route.route_reason` 和对应 `state/semantic_decisions.jsonl`，不要直接手改 wiki 页面
 
 建议：

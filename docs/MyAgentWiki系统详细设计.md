@@ -242,7 +242,7 @@ flowchart TD
 | Chunk | 可选上下文投影容器 | `state/chunks.jsonl` | CLI | 可由 `normalized` / Evidence Blocks 重新生成 |
 | KnowledgeUnit | 候选知识对象 | `state/knowledge_units.jsonl` 或等价知识单元账本 | CLI；LLM 只能提交候选 | 可重建，但需保留决策链 |
 | Claim | 稳定知识声明层 | `claims/*.json` + `state/claims.jsonl` | CLI，必要时人工编辑后走恢复 | 可重建，但需保留历史态 |
-| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl` | CLI 写入；Agent hook / LLM 提交候选 | 可按输入重跑 |
+| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` | CLI 写入；Agent hook / LLM 提交候选 | 可按输入重跑 |
 | ReviewItem | 风险暂停点与恢复入口 | `reviews/*.json` + `state/reviews.jsonl` | CLI | 不能静默丢失 |
 | WikiPage | 面向人阅读的视图 | `wiki/**/*.md` + `state/pages.jsonl` | CLI 写骨架；LLM 只做受控改写候选 | 可重建，但需遵守生命周期 |
 | Search Index | 排序与快速检索 | `indexes/search_pages.jsonl` | CLI | 可重建 |
@@ -277,7 +277,7 @@ flowchart TD
 - sibling `raw/` 原始资料目录引用
 - `normalized / structure_blocks / evidence_blocks / knowledge_units / claims` 主证据编译产物；其中 `structure_blocks / evidence_blocks / knowledge_units` 是逻辑层名称，当前实际落盘在 `state/*.jsonl`
 - `chunks` 等可选上下文投影产物，用于检索、阅读和回答交接
-- `semantic/` 或等价语义账本目录
+- `semantic/` 批次报告目录与 `state/semantic_decisions.jsonl` 语义账本
 - `wiki / indexes` 展示层产物
 - `state / reviews / reports / logs` 状态与控制层
 - 本地 Git 历史
@@ -288,7 +288,7 @@ flowchart TD
 
 - 母仓库升级时，不应直接覆盖用户工作区里的 `state/`、`claims/`、`reviews/`、`wiki/`
 - 用户工作区内容更新时，也不应反向改写母仓库文档和模板
-- 系统未发布阶段，模板和账本结构演进以“直接更新实现 + 重新生成测试工作区 + 必要时重跑 ingest”收口
+- 当前不提供旧工作区迁移层；模板和账本结构演进以“直接更新实现 + 重新生成测试工作区 + 必要时重跑 ingest”处理
 - Agent 不应跳过 CLI 直接批量手改账本来模拟生成流程
 
 当前不提供旧工作区兼容层或显式迁移命令；`schema_version` 只作为当前格式和协议的可追踪标记，而不是旧版本迁移框架。
@@ -365,7 +365,7 @@ flowchart TD
 #### 5. 语义分析层
 
 - `semantic/`：语义分析结果、批量缓存和中间产物目录
-- `state/semantic_*.jsonl`：语义决策账本文件，用于记录结构化语义判断历史
+- `state/semantic_decisions.jsonl`：语义决策权威账本，用于记录结构化语义判断历史
 
 保存文档结构判定、Claim 角色判定、页面意图判定、批处理缓存和语义决策历史。
 
@@ -785,7 +785,7 @@ evidence_block_ids: [B]
 
 - 当前设计只维护正式页面族谱，不保留早期页型兼容层
 - 页型体系直接以正式页面族谱为准，由 `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 等页型承担主流程
-- 系统未发布阶段不提供旧页型迁移层；CLI 只维护当前正式页型和当前工作区 schema
+- 当前版本不提供旧页型迁移层；CLI 只维护当前正式页型和当前工作区 schema
 
 ### 状态、生命周期与自动化等级
 
@@ -805,12 +805,16 @@ evidence_block_ids: [B]
 
 - `state/sources.jsonl`：来源账本
 - `state/normalized.jsonl`：标准化账本
+- `state/structure_blocks.jsonl`：结构块账本
+- `state/evidence_blocks.jsonl`：证据块账本
+- `state/knowledge_units.jsonl`：知识单元账本
 - `state/chunks.jsonl`：切块账本
 - `state/claims.jsonl`：声明账本
 - `state/reviews.jsonl`：审核账本
 - `state/pages.jsonl`：页面账本
 - `state/ingest_state.jsonl`：流程状态账本
-- `state/semantic_decisions.jsonl` 或 `semantic/*.jsonl`：语义决策账本
+- `state/semantic_decisions.jsonl`：语义决策账本
+- `state/error_log.jsonl`：错误与降级记录
 
 这类文件负责保存对象身份、生命周期、跨文件关系和恢复线索。
 
@@ -826,6 +830,7 @@ evidence_block_ids: [B]
 
 - `indexes/search_pages.jsonl`：页面搜索索引
 - `indexes/aliases.json`：别名与规范页索引
+- `indexes/page_links.json`：页面关联索引
 
 这类文件服务检索和快速定位，原则上可重建。
 
@@ -861,6 +866,9 @@ evidence_block_ids: [B]
 - `python3 -m myagentwiki review-list`：审核列表命令，用来查看当前待处理的审核项
 - `python3 -m myagentwiki review-auto`：保守自动审核命令，用来先自动收口高把握审核项
 - `python3 -m myagentwiki review-apply`：审核应用命令，用来落地审核动作并恢复后续流程
+- `python3 -m myagentwiki render-page`：页面重建与查看命令，用公开 render target 选择页面族
+- `python3 -m myagentwiki semantic-batch`：语义批处理命令，可单独执行公开的四类语义任务
+- `python3 -m myagentwiki claim-set-status`：Claim 状态命令，用来更新 active Claim 并重建受影响页面
 
 ### 为什么初始化必须把骨架一次搭全
 
@@ -891,7 +899,7 @@ evidence_block_ids: [B]
 
 ### 工作区输出约定
 
-主命令的 JSON 输出应统一带 `workspace_summary`，至少包含：
+`init / ingest / lint / query / answer-query / semantic-batch / review-list / review-auto / review-apply` 的 JSON 输出统一带 `workspace_summary`，至少包含：
 
 - `workspace_dir`：工作区绝对路径
 - `workspace_name`：工作区目录名
@@ -1523,9 +1531,11 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 - `page_intent`
 - `page_route`
 
-每类任务都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch` 会把缺字段、低置信度、`abstain` 或 malformed 输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
+每类任务都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch --task` 只公开 `document_analysis / claim_candidate_quality / claim_role / page_intent`；`page_route` 在页面路由时自动落账。批处理会把缺字段、低置信度、`abstain` 或 malformed 输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
 
-真实 LLM 接入采用 CLI-first 策略。默认工作区模板仍使用包内保守 `myagentwiki.agent_hook`；如果需要让 Codex 调用真实模型，可把具体 semantic task 的 command 改为 `python3 -m myagentwiki.agent_cli_hook`。该 hook 会将 payload 包装为结构优先提示词，并要求返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
+默认工作区模板使用包内保守 `myagentwiki.agent_hook`。需要增强效果时，优先把具体任务的 command 改为 `python3 -m myagentwiki.agent_cli_hook`，由 Codex CLI 返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
+
+只有用户明确提供自己的 `config/llm.local.yml` 时，才使用 `python3 -m myagentwiki.agent_online_hook` 直连远程模型。在线 hook 通过 OpenAI SDK 支持 `responses / chat_completions`，并可配置 `transport.verify_ssl`；配置缺失、鉴权失败、协议不匹配或响应格式错误会明确报错。
 
 LLM 必须允许放弃判断：
 
@@ -1826,6 +1836,7 @@ content_tags:
 
 - `title: 5.0`：标题权重最高，最能代表主题命中
 - `aliases: 4.0`：别名权重较高，适合处理中英文别名和旧称
+- `hierarchy: 3.5`：章节路径、父级路径和层级别名权重较高
 - `summary: 3.0`：摘要权重较高，代表页面核心内容
 - `headings: 2.5`：标题层级权重中高，适合定位局部主题
 - `body: 1.0`：正文基础权重
@@ -1835,13 +1846,13 @@ content_tags:
 页面类型权重：
 
 - `overview: 1.25`：综述页默认优先级最高
-- `concept: 1.15`：概念页优先级较高
+- `concept: 1.22`：概念页优先级较高
 - `duty: 1.12`：职责与组织分工页优先级较高
 - `topic: 1.08`：主题页略高于中性页
 - `guide: 1.05`：指南页略高于中性页
-- `reference: 1.00`：参考页中性权重
-- `timeline: 1.00`：时间线页中性权重
-- `source-summary: 0.98`：来源页常规查询略后排，但证据查询可被意图加权提升
+- `reference: 1.04`：参考页略高于中性页
+- `timeline: 1.02`：时间线页略高于中性页
+- `source-summary: 1.00`：来源页使用中性基础权重，证据查询可被意图加权提升
 - `example: 0.95`：示例页略后排
 - `draft: 0.70`：草稿页明显后排
 
@@ -2148,6 +2159,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - query 权重与意图路由
 - 语义批处理与语义账本
 - 真实 LLM CLI hook 的 prompt / schema / 输出解析 / fallback
+- 在线 LLM hook 的本地配置、`responses / chat_completions` 请求、输出解析与错误分流
 - 中文多文档类型混合导入时的结构优先页面路由
 - review 六种动作与恢复闭环
 - lint 报告与非可重试错误分流
@@ -2171,6 +2183,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `tests/test_query_alias_and_lint.py`：查询、别名与 lint 测试
 - `tests/test_semantic_batch.py`：语义批处理、缓存、结构上下文与页面路由重算测试
 - `tests/test_agent_cli_hook.py`：Codex CLI hook 的 prompt、schema 与解析测试
+- `tests/test_agent_online_hook.py`：OpenAI SDK 在线 hook 的配置、两种 API 风格、缓存、节流与错误处理测试
 - `tests/test_page_intent_routing.py`：结构优先页型路由与中文歧义词回归测试
 - `tests/test_claim_role_concept_filter.py`：claim role 对概念候选过滤和结构化参考证据的测试
 - `tests/test_structure_knowledge_pipeline.py`：Structure IR、Evidence Block、Knowledge Unit 与 semantic features 测试
@@ -2193,6 +2206,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑语义批处理阶段，以及会在页面路由时自动落账的 `page_route` 决策
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
 - `agent_cli_hook` 已支持通过 Codex CLI 调用真实 LLM
+- `agent_online_hook` 已支持通过用户自己的 OpenAI 兼容地址调用远程 LLM，并支持 `responses / chat_completions`
 - `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
 - 覆盖主闭环的端到端和关键回归测试
 
@@ -2211,7 +2225,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 过于细碎的版本阶段命名
 - 尚未进入实现计划的成本优化、批量调度和部署形态讨论
 
-系统未发布阶段不维护旧版本兼容专题；当格式变化影响现有样例工作区时，优先通过重跑固定流程、lint 和测试来收口。
+当前不维护旧工作区兼容专题；当格式变化影响现有样例工作区时，优先通过重跑固定流程、lint 和测试处理。
 
 ## 阅读与维护约定（Reading And Maintenance Convention）
 

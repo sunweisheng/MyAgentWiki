@@ -15,7 +15,7 @@
   - 仓库正式发版流程、版本号策略、推荐命令和发布后检查清单。
 
 - [3.0.0发版准备清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/3.0.0发版准备清单.md)
-  - 当前这一轮大改动的发版收口文档，集中记录 `3.0.0` 的发布判断、breaking changes 草案、5 步检查单和当前阶段结论。
+  - `3.0.0` 已发布后的历史发版档案，保留当时的发布判断、breaking changes 草案、5 步检查单和完成结论；当前发版流程以 `RELEASING.md` 为准。
 
 - [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
   - 当前唯一的主详细设计文档，适合先理解系统定位、处理流程、目录边界、数据模型、证据链、语义链、审核恢复链，以及 `reading_pack / answer-ready` 的交接契约。
@@ -26,12 +26,12 @@
   - 不再承担主设计文档职责；若与主文档表述重复或冲突，以主文档为准。
 
 - [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
-  - 当前重构计划主文档，适合配合主详细设计文档一起看“下一步准备怎么落”。
-  - 结构优先链路、阶段性实现顺序、旧机制清理和测试收口等执行规划，建议放在这里持续维护，而不是回灌到主详细设计正文。
+  - 全链路重构的阶段计划与完成状态，适合配合主详细设计文档一起看“当时怎样推进、目前还剩什么”。
+  - 结构优先链路的 Phase 1-7 已进入正式主干；剩余改进项继续在该文档的状态段维护。
 
 - [CLI模块化设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/CLI模块化设计.md)
-  - 当前 CLI 与 Python 模块边界的设计基线，聚焦 `cli.py` 拆分、服务层与仓储层分层、命令入口瘦身、文档转换与账本读写解耦。
-  - 适合在准备做代码级模块化重构时先阅读，用来统一后续目录结构、依赖方向和拆分顺序。
+  - 当前 CLI 与 Python 模块边界的设计基线，同时记录已经拆出的 `cli_parser.py`、`cli_components/`、`app_services/`、`repositories/` 和尚未完成的 `cli.py` 瘦身工作。
+  - 适合继续做代码级模块化重构时先阅读，用来统一依赖方向、拆分顺序和验收口径。
 
 - [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
   - 运行依赖、平台差异、安装方式与降级能力说明。

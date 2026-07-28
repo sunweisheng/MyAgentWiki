@@ -4,7 +4,7 @@
 
 本文档回答一个比主详细设计更聚焦的问题：
 
-`MyAgentWiki` 当前已经具备较完整的 CLI 与知识编译主链路，但 `src/myagentwiki/cli.py` 同时承担了命令入口、应用编排、状态账本读写、文档转换、检索、审核、页面生成和一部分基础设施职责。后续如果继续在这个单文件里扩展功能，维护成本、测试成本和重构风险都会持续上升。
+`MyAgentWiki` 当前已经具备较完整的 CLI 与知识编译主链路，也已拆出 parser、命令适配、服务、仓储和运行时转换模块；但 `src/myagentwiki/cli.py` 仍承担依赖装配、语义与结构规则、页面生成、索引和部分基础设施职责。后续如果继续在这个单文件里扩展功能，维护成本、测试成本和重构风险都会持续上升。
 
 因此，本文档的目标不是讨论“要不要拆”，而是定义：
 
@@ -17,25 +17,31 @@
 
 若本文档与系统主流程、证据链、语义链、审核恢复链的主设计描述发生冲突，以 [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md) 为准；本文档只负责代码组织和模块边界。
 
+## 当前实现快照
+
+当前代码已经完成第一轮拆分，但还没有达到本文档的最终目录目标：
+
+- `src/myagentwiki/cli_parser.py`：集中注册命令和参数
+- `src/myagentwiki/cli_components/`：承接命令适配、参数转 request、结果转 `CommandResult`
+- `src/myagentwiki/app_services/`：承接 init、ingest、query、review、lint、render、semantic batch、运行时转换等服务
+- `src/myagentwiki/repositories/`：承接 query / ingest / review / semantic 等账本读取和持久化
+- `src/myagentwiki/app_services/runtime_services.py`：承接文档转换、OCR、远程图片下载和 hook 运行等运行时能力
+- `src/myagentwiki/cli.py`：仍负责依赖装配，并保留较多语义规则、Structure / Evidence / Knowledge / Claim 编译、页面生成和索引逻辑，尚未成为真正的薄入口
+
+内部流程已经改为复用 `run_*_service`，不再通过调用 `command_*` 复用业务逻辑。本文后面的 `cli/ / app/ / domain/ / infra/` 目录树是长期目标，不是当前文件系统快照；继续拆分时应优先沿用现有模块，再按职责逐步调整命名和边界。
+
 ## 当前问题
 
-### 1. 当前 `cli.py` 已经不是“入口文件”，而是“系统总装配间”
+### 1. 当前 `cli.py` 仍未成为薄入口
 
-当前 `src/myagentwiki/cli.py` 同时包含：
+当前 `src/myagentwiki/cli.py` 已把 parser、命令适配、部分服务、仓储和运行时转换拆出，但仍包含：
 
-- `argparse` 命令注册与参数解析
-- `CommandResult` 和统一输出格式
-- 工作区初始化
-- `raw -> normalized -> structure/evidence/knowledge/chunk/claim/page` 编排
-- `review-list / review-auto / review-apply`
-- `query / answer-query / reading_pack`
-- `lint`
-- 语义批处理
-- 文档转换、OCR、图片处理、下载和 fallback
-- JSONL / JSON 账本读写
-- 索引重建与页面回链
+- 大量依赖装配与兼容包装函数
+- `raw -> normalized -> structure/evidence/knowledge/chunk/claim/page` 的核心规则与部分编排
+- 语义批处理的任务收集、结果投影与页面路由
+- 页面生成、检索常量、索引重建和回链辅助
 
-这说明当前文件已经同时承担了：
+这说明当前文件仍同时承担了：
 
 - interface layer
 - application layer
@@ -47,21 +53,20 @@
 - 新增功能时难以判断“应该放在哪”
 - 变更一处逻辑时容易误伤不相干命令
 - 单元测试难以只测一层
-- 命令函数开始被内部逻辑直接复用，CLI 边界反向渗透到系统内部
 
-### 2. 命令函数和业务服务混用
+### 2. 命令函数与业务服务的混用已经基本解决
 
-当前已经出现“内部逻辑直接调用 `command_*` 函数”的现象，例如 post-ingest 自动审核会直接复用 `command_review_auto(...)` 的命令函数接口，而不是复用一个独立的 review service。
+当前命令适配层会调用 `run_init_service / run_ingest_service / run_query_service / run_review_auto_service / run_lint_service` 等服务，post-ingest 自动审核也复用 service，不再直接调用 `command_review_auto(...)`。
 
-这类耦合的问题在于：
+后续仍需守住下面这些边界：
 
-- 命令参数对象会变成内部调用协议
-- 命令输出格式会绑住内部服务结构
-- 后续如果要增加 API、TUI、Agent hook 或测试夹具复用同一逻辑，会被 CLI 形状拖住
+- 不让 `argparse.Namespace` 重新变成内部调用协议
+- 不让命令输出格式反向绑住 service result
+- 后续增加 API、TUI、Agent hook 或测试夹具时，统一复用 service，不复用 CLI 命令函数
 
-### 3. 基础设施能力与领域逻辑耦合过深
+### 3. 基础设施能力已开始拆分，但领域逻辑仍偏集中
 
-例如文档标准化、PDF/DOCX/XLSX fallback、OCR、下载重试、文件锁、Git 初始化、状态文件写入等能力，本质上都属于基础设施或适配器层，但现在和 ingest、review、query 等领域逻辑放在同一文件里。
+文档标准化、PDF/DOCX/XLSX fallback、OCR、下载重试和 hook 运行已进入 `app_services/runtime_services.py`，多类账本读取与持久化也已进入 `repositories/`。但部分文件锁、Git、索引、结构编译和页面生成能力仍留在 `cli.py`，领域层也尚未形成独立目录。
 
 这会导致：
 
@@ -209,7 +214,7 @@ Domain -X-> argparse
 
 ## 目标目录结构
 
-下面给出建议中的目标目录结构。这里强调的是逻辑边界，不要求一次性全部拆完。
+下面给出长期目标目录结构。当前实现使用较平的 `cli_parser.py / cli_components / app_services / repositories` 结构；这里强调的是逻辑边界，不要求为了目录名一次性搬完。
 
 ```text
 src/myagentwiki/
@@ -729,4 +734,3 @@ repository 层应负责：
 - 主详细设计回答“系统应该做什么”
 - 本文档回答“代码应该怎么组织”
 - 重构实现计划回答“我们准备先做哪一步”
-

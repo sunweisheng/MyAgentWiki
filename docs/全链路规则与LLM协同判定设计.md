@@ -71,7 +71,7 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 灰区候选的 accept / reject / rename / reroute
 - grounded 的可读化改写
 
-当前实现里，真实 LLM 接入不直接依赖某个云 API，而是通过 CLI-first 的 `myagentwiki.agent_cli_hook` 调用 Codex。默认工作区仍使用包内保守 `agent_hook`，因此没有登录 CLI、模型不可用、超时或输出无法解析时，系统会回退到保守路径，而不是中断 `ingest`。
+当前实现默认使用包内保守 `agent_hook`。需要增强效果时，优先通过 `myagentwiki.agent_cli_hook` 调用 Codex CLI；CLI 未登录、模型不可用、超时或输出无法解析时，系统回退到保守路径。只有用户明确提供自己的 `config/llm.local.yml` 时，才使用 `myagentwiki.agent_online_hook` 直连远程模型；该路径支持 `responses / chat_completions`，配置、鉴权或协议错误会明确报错。
 
 ### 3. 语义分析应该作为正式阶段，而不是零散 hook
 
@@ -130,13 +130,15 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 便于缓存、重试和预算管理
 - 便于后续统一审计与回放
 
-当前已落地的语义批处理任务包括：
+当前已落地的语义决策阶段包括：
 
 - `document_analysis`
 - `claim_candidate_quality`
 - `claim_role`
 - `page_intent`
 - `page_route`
+
+其中 `semantic-batch --task` 只公开前四类任务；`page_route` 在页面路由过程中自动落账，不是可单独选择的批处理任务。
 
 批处理 payload 会携带 `structure_context / group_context / semantic_features / source_refs / evidence ids` 等结构信息，提示词也明确要求优先使用结构证据，不要对中文关键词做一票判定。
 

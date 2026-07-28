@@ -116,7 +116,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 当前 CLI 输出还有一条额外约定：
 
-- `init / ingest / lint / query / answer-query / review-list / review-apply` 的 JSON 输出会统一带 `workspace_summary`
+- `init / ingest / lint / query / answer-query / semantic-batch / review-list / review-auto / review-apply` 的 JSON 输出会统一带 `workspace_summary`
 - `workspace_summary` 当前至少包含工作区绝对路径、入口页路径、lint 报告路径；涉及外部原始资料区的命令还会带 `raw_dir`
 - 纯文本模式也会显式打印这些绝对路径，避免 UI 或上层 Agent 只显示目录名时造成“好像跑错目录”的误解
 
@@ -352,13 +352,6 @@ rendering:
       - "-m"
       - "myagentwiki.agent_hook"
     timeout_seconds: 20
-  concept_update:
-    mode: "llm_assisted"
-    command:
-      - "/absolute/path/to/python"
-      - "-m"
-      - "myagentwiki.agent_hook"
-    timeout_seconds: 20
 ```
 
 如果你希望改成自己的 Agent / LLM hook，也可以在工作区 `config/project.yml` 里覆盖：
@@ -414,7 +407,7 @@ export MYAGENTWIKI_CODEX_BIN="codex"
 
 `agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
 
-只有当你明确要直接通过你自己的在线模型地址调用，而不是走 Codex / Claude CLI 时，再改用包内在线 hook：
+只有当你明确要直接通过你自己的在线模型地址调用，而不是走 Codex CLI 时，再改用包内在线 hook：
 
 ```yaml
 semantic:
@@ -445,7 +438,12 @@ provider:
   model: "your-model-name"
   api_key: "your-api-key"
   timeout_seconds: 120
+transport:
+  api_style: "responses"
+  verify_ssl: true
 ```
+
+`transport.api_style` 支持 `responses` 和 `chat_completions`，默认是 `responses`；`transport.verify_ssl` 默认是 `true`。
 
 区别很明确：
 - `agent_cli_hook` 走 Codex CLI
@@ -462,7 +460,7 @@ provider:
 - `semantic-batch` hook 当前支持 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单独执行的任务
 - `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
 - `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
-- `concept_update` hook 当前也会被复用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
+- 配置了 `concept_update` hook 时，它会被用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
 - 若 hook 失败、超时、低于置信阈值，系统会按当前环节回退到保守路径，而不是中断整个流程：
 - `review_auto / stable_promotion` 会保留原状或升级为人工判断项
 - `readable_concept / overview` 会回退到 deterministic render
@@ -553,7 +551,7 @@ Agent 使用约定：
 
 如果是对已有工作区增量更新，通常从 `ingest` 开始即可。
 
-## 当前仓库结构
+## 当前仓库主要结构
 
 ```text
 MyAgentWiki/
@@ -571,8 +569,14 @@ MyAgentWiki/
 │   └── project-materials/
 ├── src/
 │   └── myagentwiki/
-│       ├── __init__.py
-│       └── cli.py
+│       ├── cli.py
+│       ├── cli_parser.py
+│       ├── cli_components/
+│       ├── app_services/
+│       ├── repositories/
+│       ├── agent_hook.py
+│       ├── agent_cli_hook.py
+│       └── agent_online_hook.py
 ├── templates/
 ├── tests/
 └── scripts/
@@ -643,12 +647,17 @@ MyAgentWiki/
 - `myagentwiki review-auto`
 - `myagentwiki render-page`
 - `myagentwiki semantic-batch`
+- `myagentwiki claim-set-status`
 
 当前实现状态：
 
 - `myagentwiki render-page`
   - 当前公开支持的 render target 为 `readable_concept / guide / duty / example / topic / reference / timeline / overview`
   - `qa_note / concept_update` 仍属于内部保留配置名，不作为当前正式 CLI 入口对外暴露
+
+- `myagentwiki claim-set-status`
+  - 支持把 active Claim 更新为 `draft / stable / disputed / needs_review`
+  - 状态更新后会重建受影响页面；历史态 Claim 不允许通过该命令直接改写
 
 - `myagentwiki doctor`
   - 已实现运行环境检查、Python 包检查、可选系统工具检查
@@ -764,7 +773,7 @@ MyAgentWiki/
 - 我们在这个仓库里已经提供了 Windows 命令示例与跨平台验证脚本
 - 但本轮开发环境不是 Windows，因此这里能交付的是“面向 Windows 的实现约束、脚本和清单”，不是本机实跑截图
 
-## 计划中的使用方式
+## 推荐使用方式
 
 面向最终用户的大致流程会是：
 
@@ -812,18 +821,22 @@ python scripts/validate_workflow.py --keep-workspace
 - `wiki/sources/*.md`
   - 首批自动生成的来源摘要页，每个来源至少对应一个 `source-summary` 页面
   - 当前来源摘要页里的 `Chunks` 列表会直接链接到对应 `chunks/<source_id>.jsonl`，并附带 `section_path` 与行号，便于继续定位证据
-- `wiki/concepts/*.md`
+- `wiki/concepts/**/*.md`
   - 基于 Claim 聚合出的概念候选页，作为后续综述页、主题页的起点
   - 当前已加入一层轻量命名清洗，优先使用 `section_path` 和短主题短语生成更像 Wiki 的页面名
   - 当前概念页里的 `Source Pages / Source Evidence` 会分别展示来源摘要页入口、原始来源文件入口、覆盖范围，以及按条列出的匹配 chunk 链接
   - 页面文件名若包含空格等特殊字符，目录页与页面间链接会自动使用 URL 编码后的相对路径
+- `wiki/guides/**/*.md`、`wiki/duties/**/*.md`、`wiki/examples/**/*.md`、`wiki/topics/**/*.md`、`wiki/references/**/*.md`、`wiki/timelines/**/*.md`
+  - 按 `page_intent` 路由生成的正式页面族；只有组级角色、内容标签或结构证据足够时才进入专门页型
 - `wiki/overview/index.md`
   - 工作区级综述入口页，默认在有多个稳定可读概念页时自动生成
   - 当前支持 grounded 的 `llm_assisted` 摘要、主题导览和推荐阅读路径改写
   - 当 overview 改写成功时，会额外生成折叠式 `Rewrite Traceability` 区块，展示改写句与回绑页面
 - `state/*.jsonl`
-  - 全局索引与状态账本，包括 `sources`、`normalized`、`structure_blocks`、`evidence_blocks`、`knowledge_units`、`chunks`、`claims`、`reviews`、`pages`、`error_log`
+  - 全局索引与状态账本，包括 `sources`、`normalized`、`structure_blocks`、`evidence_blocks`、`knowledge_units`、`chunks`、`claims`、`semantic_decisions`、`reviews`、`pages`、`ingest_state`、`error_log`
   - 其中 `state/pages.jsonl` 会保留已被自动移除页面的历史记录，便于追踪页面演化；但 `removed` 页面不会继续进入在线检索与页面索引
+- `semantic/batches/*.json`
+  - 语义批处理的批次报告与缓存产物；语义决策的权威账本仍是 `state/semantic_decisions.jsonl`
 - `indexes/search_pages.jsonl`
   - query 使用的页面检索派生索引，保存字段文本、tokens 和基础页面元数据
   - 当前已支持按页面级内容签名做增量复用，未变化页面会复用既有索引记录
@@ -832,7 +845,7 @@ python scripts/validate_workflow.py --keep-workspace
   - 当前会记录 live page 的 `canonical_id`、`title`、`aliases`，并标出 alias 冲突
 - `reviews/*.json`
   - 需要人工确认的冲突、重复、近似重复等审核项
-  - 当前 V1 使用“前缀 bucket + token 倒排召回 + 否定极性 / 文本相似度复核”来生成审核候选，优先减少明显漏检
+  - 当前实现使用“前缀 bucket + token 倒排召回 + 否定极性 / 文本相似度复核”来生成审核候选，优先减少明显漏检
   - 当前 alias registry 检测到同一 alias 指向多个 canonical 页面时，也会自动生成 `alias_conflict` review
   - 当前 alias conflict review 若已不再对应真实 alias 冲突，会在 `review-list / review-apply / ingest` 的收口过程中自动转入历史态，而不是继续保留为 active/open
 
@@ -881,7 +894,7 @@ python scripts/validate_workflow.py --keep-workspace
 - 语义决策账本与页面路由的 schema 校验继续收口
 - 更深入的 `stable / disputed` Claim 治理
 - `qa-note` 问答笔记能力的后续正式化路径
-- entity / overview 等更高层 Wiki 页面生成与统一页面族谱收口
+- entity 等更高层 Wiki 页面生成，以及 overview 与统一页面族谱的继续完善
 - 更细的 lint 子命令与结构化日志
 - Windows 真机回归验证
 - 可选 Office / PDF / OCR 高保真工具集成
