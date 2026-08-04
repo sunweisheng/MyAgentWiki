@@ -114,11 +114,11 @@ def test_convert_image_to_markdown_with_ocr_text_includes_ocr_section(tmp_path: 
     assert metadata["location_map"]["ocr"]["char_count"] > 0
 
 
-def test_convert_image_to_markdown_uses_agent_assisted_fallback_when_ocr_missing(tmp_path: Path) -> None:
+def test_convert_image_to_markdown_uses_llm_router_when_ocr_missing(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
     (workspace_dir / "config").mkdir(parents=True)
     (workspace_dir / "config" / "project.yml").write_text(
-        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "agent_assisted"\n    command: ["python3", "-m", "myagentwiki.agent_hook"]\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "llm_assisted"\n    task_name: "describe_image"\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
         encoding="utf-8",
     )
     raw_path = tmp_path / "diagram.png"
@@ -132,7 +132,7 @@ def test_convert_image_to_markdown_uses_agent_assisted_fallback_when_ocr_missing
     )
 
     with mock.patch("myagentwiki.cli.runtime_services.command_exists", return_value=False), mock.patch(
-        "myagentwiki.cli.runtime_services.run_json_automation_command",
+        "myagentwiki.cli.runtime_services.request_llm",
         return_value={
             "confidence": 0.92,
             "reason": "mock_llm_image_understanding",
@@ -146,7 +146,7 @@ def test_convert_image_to_markdown_uses_agent_assisted_fallback_when_ocr_missing
     assert "步骤一：收集资料。步骤二：进入 normalized。" in markdown
     assert metadata["location_map"]["llm_image_understanding"]["used"] is True
     assert metadata["location_map"]["llm_image_understanding"]["ok"] is True
-    assert metadata["extraction_method"] == "python_only+agent_assisted"
+    assert metadata["extraction_method"] == "python_only+llm_assisted"
 
 
 def test_enrich_markdown_with_embedded_images_downloads_remote_assets_and_embeds_ocr(tmp_path: Path) -> None:
@@ -308,7 +308,7 @@ def test_enrich_markdown_with_embedded_images_retries_insecure_after_certificate
     assert mocked_urlopen.call_count == 2
 
 
-def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tmp_path: Path) -> None:
+def test_enrich_markdown_with_embedded_images_can_use_llm_router(tmp_path: Path) -> None:
     workspace_dir = tmp_path / "workspace"
     raw_dir = tmp_path / "raw"
     assets_dir = tmp_path / "assets"
@@ -316,7 +316,7 @@ def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tm
     raw_dir.mkdir()
     assets_dir.mkdir()
     (workspace_dir / "config" / "project.yml").write_text(
-        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "agent_assisted"\n    command: ["python3", "-m", "myagentwiki.agent_hook"]\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
+        'workspace:\n  schema_version: "v1"\nautomation:\n  image_to_text:\n    strategy: "llm_assisted"\n    task_name: "describe_image"\n    timeout_seconds: 30\n    min_confidence: 0.7\npaths:\n  raw: "../raw"\n  assets: "../assets"\n',
         encoding="utf-8",
     )
     raw_path = raw_dir / "note.md"
@@ -351,7 +351,7 @@ def test_enrich_markdown_with_embedded_images_can_use_agent_assisted_fallback(tm
     with mock.patch("myagentwiki.cli.runtime_services.urllib.request.urlopen", return_value=FakeResponse(fake_png)), mock.patch(
         "myagentwiki.cli.runtime_services.command_exists", return_value=False
     ), mock.patch(
-        "myagentwiki.cli.runtime_services.run_json_automation_command",
+        "myagentwiki.cli.runtime_services.request_llm",
         return_value={
             "confidence": 0.93,
             "reason": "mock_llm_image_understanding",

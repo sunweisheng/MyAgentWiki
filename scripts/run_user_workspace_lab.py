@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from docx import Document
 from openpyxl import Workbook
+from myagentwiki.runtime_env import load_simple_yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,16 +23,117 @@ def load_manifest(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def cli_environment(*, deterministic: bool = True) -> dict[str, str]:
+    environment = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    if deterministic:
+        environment["MYAGENTWIKI_LLM_MODE"] = "deterministic"
+    return environment
+
+
 def run_cli(*args: str, cwd: Path | None = None) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "myagentwiki.cli", *args, "--json"],
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env=cli_environment(),
         capture_output=True,
         text=True,
         check=True,
     )
     return json.loads(completed.stdout)
+
+
+def validate_default_llm_config(workspace_dir: Path) -> dict:
+    config_path = workspace_dir / "config" / "project.yml"
+    config = load_simple_yaml(config_path)
+    config_text = config_path.read_text(encoding="utf-8")
+    llm = config.get("llm", {})
+    semantic = config.get("semantic", {})
+    automation = config.get("automation", {})
+    rendering = config.get("rendering", {})
+    checks = {
+        "primary_online": llm.get("routing", {}).get("primary") == "online",
+        "fallback_cli": llm.get("routing", {}).get("fallback") == "cli",
+        "semantic_tasks_llm_assisted": all(
+            semantic.get(task_name, {}).get("strategy") == "llm_assisted"
+            for task_name in ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent")
+        ),
+        "automation_tasks_llm_assisted": all(
+            automation.get(task_name, {}).get("strategy") == "llm_assisted"
+            for task_name in ("review_auto", "image_to_text", "stable_promotion", "concept_candidate_review")
+        ),
+        "render_tasks_llm_assisted": all(
+            rendering.get(task_name, {}).get("mode") == "llm_assisted"
+            for task_name in ("readable_concept", "overview")
+        ),
+        "unimplemented_render_tasks_disabled": all(
+            rendering.get(task_name, {}).get("mode") == "disabled"
+            for task_name in ("qa_note", "concept_update")
+        ),
+        "no_task_command": "command:" not in config_text,
+        "no_legacy_llm_module_name": "hook" not in config_text.lower(),
+    }
+    if not all(checks.values()):
+        raise AssertionError(f"Generated LLM configuration failed checks: {checks}")
+    return checks
+
+
+def validate_legacy_configuration_message(workspace_dir: Path, runtime_root: Path) -> dict:
+    migration_workspace = runtime_root / "migration_workspace"
+    if migration_workspace.exists():
+        shutil.rmtree(migration_workspace)
+    shutil.copytree(workspace_dir, migration_workspace)
+    config_path = migration_workspace / "config" / "project.yml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\nsemantic:\n"
+        + "  claim_role:\n"
+        + '    strategy: "agent_assisted"\n'
+        + '    command: ["python3", "-m", "myagentwiki.agent_hook"]\n',
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "myagentwiki.cli",
+            "semantic-batch",
+            "--task",
+            "claim_role",
+            "--target-dir",
+            str(migration_workspace),
+            "--json",
+        ],
+        cwd=str(REPO_ROOT),
+        env=cli_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = json.loads(completed.stdout) if completed.stdout.strip() else {}
+    if completed.returncode == 0 or payload.get("error") != "llm_configuration_migration_required":
+        raise AssertionError(payload or completed.stderr)
+    return {"exit_code": completed.returncode, "payload": payload}
+
+
+def run_live_llm_check(workspace_dir: Path) -> dict:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "debug_llm_routing.py"),
+            "live",
+            "--workspace",
+            str(workspace_dir),
+            "--task",
+            "claim_stable_promotion",
+        ],
+        cwd=str(REPO_ROOT),
+        env=cli_environment(deterministic=False),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = json.loads(completed.stdout) if completed.stdout.strip() else {"stderr": completed.stderr.strip()}
+    return {"exit_code": completed.returncode, "payload": payload}
 
 
 def ensure_clean_dir(path: Path) -> None:
@@ -254,7 +356,14 @@ def run_queries(manifest: dict, workspace_dir: Path) -> dict:
     return results
 
 
-def execute_scenario(fixture_root: Path, runtime_root: Path, scenario: str, clean: bool) -> dict:
+def execute_scenario(
+    fixture_root: Path,
+    runtime_root: Path,
+    scenario: str,
+    clean: bool,
+    *,
+    live_llm_check: bool = False,
+) -> dict:
     manifest = load_manifest(fixture_root / "fixture_manifest.json")
     if clean:
         ensure_clean_dir(runtime_root)
@@ -284,6 +393,8 @@ def execute_scenario(fixture_root: Path, runtime_root: Path, scenario: str, clea
         "--target-dir",
         str(workspace_dir),
     )
+    llm_config_checks = validate_default_llm_config(workspace_dir)
+    migration_check = validate_legacy_configuration_message(workspace_dir, runtime_root)
     ingest_payload = run_cli("ingest", "--target-dir", str(workspace_dir))
     query_payloads = run_queries(manifest, workspace_dir)
     review_payload = run_cli("review-list", "--target-dir", str(workspace_dir))
@@ -295,6 +406,9 @@ def execute_scenario(fixture_root: Path, runtime_root: Path, scenario: str, clea
         "doctor": doctor,
         "bootstrap": bootstrap,
         "init": init_payload,
+        "llm_config_checks": llm_config_checks,
+        "legacy_llm_config_check": migration_check,
+        "live_llm_check": run_live_llm_check(workspace_dir) if live_llm_check else {"status": "skipped"},
         "ingest": ingest_payload,
         "queries": query_payloads,
         "review_list": review_payload,
@@ -312,6 +426,7 @@ def main() -> int:
     parser.add_argument("--scenario", default="baseline")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--keep-runtime", action="store_true")
+    parser.add_argument("--live-llm-check", action="store_true")
     args = parser.parse_args()
 
     fixture_root = Path(args.fixture_root).expanduser().resolve()
@@ -321,6 +436,7 @@ def main() -> int:
         runtime_root=runtime_root,
         scenario=args.scenario,
         clean=bool(args.clean),
+        live_llm_check=bool(args.live_llm_check),
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if not args.keep_runtime:

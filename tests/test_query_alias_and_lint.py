@@ -18,12 +18,21 @@ from myagentwiki.cli import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(*args: str, cwd: Path | None = None) -> dict:
+def run_cli(
+    *args: str,
+    cwd: Path | None = None,
+    llm_mode: str | None = "deterministic",
+) -> dict:
     command = [sys.executable, "-m", "myagentwiki.cli", *args, "--json"]
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    if llm_mode is None:
+        env.pop("MYAGENTWIKI_LLM_MODE", None)
+    else:
+        env["MYAGENTWIKI_LLM_MODE"] = llm_mode
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env=env,
         capture_output=True,
         text=True,
         check=True,
@@ -36,7 +45,11 @@ def run_cli_expect_exit(*args: str, expected_exit_code: int, cwd: Path | None = 
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "MYAGENTWIKI_LLM_MODE": "deterministic",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -82,50 +95,37 @@ def first_active_claim(claim_records: list[dict], contains: str | None = None) -
     raise AssertionError("No matching active claim found.")
 
 
-def configure_llm_assisted_readable_concept(workspace_dir: Path, script_path: Path) -> None:
+def configure_only_llm_task(
+    workspace_dir: Path,
+    *,
+    section: str,
+    target_name: str,
+    base_url: str,
+) -> None:
     config_path = workspace_dir / "config" / "project.yml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8")
-        + "\n"
-        + "rendering:\n"
-        + "  readable_concept:\n"
-        + '    mode: "llm_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{script_path}"\n'
-        + "    timeout_seconds: 20\n",
-        encoding="utf-8",
+    config_text = config_path.read_text(encoding="utf-8")
+    config_text = config_text.replace('strategy: "llm_assisted"', 'strategy: "deterministic"')
+    config_text = config_text.replace('mode: "llm_assisted"', 'mode: "deterministic"')
+    setting_name = "mode" if section == "rendering" else "strategy"
+    target_marker = f'  {target_name}:\n    {setting_name}: "deterministic"\n'
+    if target_marker not in config_text:
+        raise AssertionError(f"Missing task configuration marker: {target_marker!r}")
+    config_text = config_text.replace(
+        target_marker,
+        f'  {target_name}:\n    {setting_name}: "llm_assisted"\n',
+        1,
     )
-
-
-def configure_llm_assisted_overview(workspace_dir: Path, script_path: Path) -> None:
-    config_path = workspace_dir / "config" / "project.yml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8")
-        + "\n"
-        + "rendering:\n"
-        + "  overview:\n"
-        + '    mode: "llm_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{script_path}"\n'
-        + "    timeout_seconds: 20\n",
-        encoding="utf-8",
-    )
-
-
-def configure_llm_assisted_concept_quality(workspace_dir: Path, script_path: Path) -> None:
-    config_path = workspace_dir / "config" / "project.yml"
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8")
-        + "\n"
-        + "rendering:\n"
-        + "  concept_update:\n"
-        + '    mode: "llm_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{script_path}"\n'
-        + "    timeout_seconds: 20\n",
+    config_path.write_text(config_text, encoding="utf-8")
+    (workspace_dir / "config" / "llm.local.yml").write_text(
+        'provider:\n'
+        '  protocol: "openai_compatible"\n'
+        f'  base_url: "{base_url}"\n'
+        '  model: "local-test-model"\n'
+        '  api_key: "local-test-key"\n'
+        '  timeout_seconds: 20\n'
+        'transport:\n'
+        '  api_style: "chat_completions"\n'
+        '  verify_ssl: true\n',
         encoding="utf-8",
     )
 
@@ -138,7 +138,14 @@ def test_render_page_help_hides_internal_render_targets() -> None:
     assert "concept_update" not in completed.stdout
 
 
-def configure_online_hook_missing_config(workspace_dir: Path, section: str, task_name: str, *, mode: str | None = None) -> None:
+def configure_legacy_llm_command(
+    workspace_dir: Path,
+    section: str,
+    task_name: str,
+    module_name: str,
+    *,
+    mode: str | None = None,
+) -> None:
     config_path = workspace_dir / "config" / "project.yml"
     entry_lines = [
         "\n",
@@ -153,7 +160,7 @@ def configure_online_hook_missing_config(workspace_dir: Path, section: str, task
         "    command:\n",
         '      - "python3"\n',
         '      - "-m"\n',
-        '      - "myagentwiki.agent_online_hook"\n',
+        f'      - "{module_name}"\n',
         "    timeout_seconds: 20\n",
     ])
     if mode is None:
@@ -262,7 +269,7 @@ def test_query_returns_alias_hits_and_canonical_targets(tmp_path: Path) -> None:
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
 
-def test_online_hook_missing_local_config_fails_semantic_batch(tmp_path: Path) -> None:
+def test_legacy_online_module_config_returns_migration_guidance(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text("# Topic\n\n系统需要保留来源回链。\n", encoding="utf-8")
@@ -275,7 +282,12 @@ def test_online_hook_missing_local_config_fails_semantic_batch(tmp_path: Path) -
         "--target-dir", str(workspace_dir),
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
-    configure_online_hook_missing_config(workspace_dir, "semantic", "claim_role")
+    configure_legacy_llm_command(
+        workspace_dir,
+        "semantic",
+        "claim_role",
+        "myagentwiki.agent_online_hook",
+    )
     (workspace_dir / "state" / "semantic_decisions.jsonl").write_text("", encoding="utf-8")
     claims_path = workspace_dir / "state" / "claims.jsonl"
     claim_records = load_jsonl(claims_path)
@@ -289,18 +301,23 @@ def test_online_hook_missing_local_config_fails_semantic_batch(tmp_path: Path) -
     write_jsonl(claims_path, claim_records)
 
     result = run_cli_expect_exit("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir), expected_exit_code=1)
-    assert result["error"] == "online_hook_configuration_error"
-    assert "configured to use the online model hook" in result["message"]
+    assert result["error"] == "llm_configuration_migration_required"
+    assert "online is now the primary route" in result["message"]
     assert "config/llm.local.yml" in result["message"]
 
 
-def test_online_hook_missing_local_config_fails_review_auto(tmp_path: Path) -> None:
+def test_legacy_cli_module_config_returns_migration_guidance(tmp_path: Path) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "OnlineHookReviewError")
     reviews_path = workspace_dir / "state" / "reviews.jsonl"
 
     page_ids = inject_shared_alias_override(workspace_dir, "知识层")
     run_cli("ingest", "--target-dir", str(workspace_dir))
-    configure_online_hook_missing_config(workspace_dir, "automation", "review_auto")
+    configure_legacy_llm_command(
+        workspace_dir,
+        "automation",
+        "review_auto",
+        "myagentwiki.agent_cli_hook",
+    )
     live_pages = load_jsonl(workspace_dir / "state" / "pages.jsonl")
     candidate_pages = [record for record in live_pages if record.get("page_id") in page_ids]
     assert len(candidate_pages) == 2
@@ -328,11 +345,11 @@ def test_online_hook_missing_local_config_fails_review_auto(tmp_path: Path) -> N
     )
 
     result = run_cli_expect_exit("review-auto", "--target-dir", str(workspace_dir), expected_exit_code=1)
-    assert result["error"] == "online_hook_configuration_error"
-    assert "do not commit it to Git" in result["message"]
+    assert result["error"] == "llm_configuration_migration_required"
+    assert "automatic fallback route" in result["message"]
 
 
-def test_online_hook_missing_local_config_fails_readable_render(tmp_path: Path) -> None:
+def test_legacy_deterministic_module_config_returns_migration_guidance(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "claim.md").write_text(
@@ -349,7 +366,13 @@ def test_online_hook_missing_local_config_fails_readable_render(tmp_path: Path) 
         "--target-dir", str(workspace_dir),
     )
     run_cli("ingest", "--target-dir", str(workspace_dir))
-    configure_online_hook_missing_config(workspace_dir, "rendering", "readable_concept", mode="llm_assisted")
+    configure_legacy_llm_command(
+        workspace_dir,
+        "rendering",
+        "readable_concept",
+        "myagentwiki.agent_hook",
+        mode="llm_assisted",
+    )
 
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     claim_id = first_active_claim(claim_records, contains="Claim 是位于 chunk 与 wiki 之间")["claim_id"]
@@ -360,7 +383,8 @@ def test_online_hook_missing_local_config_fails_readable_render(tmp_path: Path) 
         "--target-dir", str(workspace_dir),
         expected_exit_code=1,
     )
-    assert result["error"] == "online_hook_configuration_error"
+    assert result["error"] == "llm_configuration_migration_required"
+    assert "set the task to `deterministic`" in result["message"]
 
 
 def test_workspace_schema_guard_blocks_unsupported_workspace_commands(tmp_path: Path) -> None:
@@ -1642,7 +1666,10 @@ def test_lint_requires_single_live_page_type_per_canonical_id(tmp_path: Path) ->
     assert checks["canonical_page_family_valid"]["ok"] is True
 
 
-def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(tmp_path: Path) -> None:
+def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     # 第三阶段允许对 concept 阅读页做 LLM 辅助润色，
     # 但只应在显式开启配置后生效，而且改写内容必须仍然绑在 stable claim 上。
     source_dir = tmp_path / "raw"
@@ -1662,43 +1689,38 @@ def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(t
         "--target-dir", str(workspace_dir),
     )
 
-    rewriter_script = tmp_path / "rewrite_readable_concept.py"
-    rewriter_script.write_text(
-        "import json\n"
-        "import sys\n"
-        "\n"
-        "payload = json.load(sys.stdin)\n"
-        "canonical = payload['canonical_claim']\n"
-        "claim_id = canonical['claim_id']\n"
-        "title = payload['title']\n"
-        "practical_claim_id = next(\n"
-        "    (\n"
-        "        item['claim_id']\n"
-        "        for item in payload['stable_claims']\n"
-        "        if '用于承载可追踪、可合并、可审计的结论' in item['text']\n"
-        "    ),\n"
-        "    claim_id,\n"
-        ")\n"
-        "json.dump({\n"
-        "    'summary': f'{title} 是位于 chunk 与 wiki 之间的独立知识声明层，可作为知识沉淀的稳定阅读入口。',\n"
-        "    'key_points': [\n"
-        "        {\n"
-        "            'claim_id': claim_id,\n"
-        "            'text': f'{title} 是位于 chunk 与 wiki 之间的独立知识声明层。',\n"
-        "        }\n"
-        "    ],\n"
-        "    'practical_notes': [\n"
-        "        {\n"
-        "            'claim_id': practical_claim_id,\n"
-        "            'text': f'{title} 用于承载可追踪、可合并、可审计的结论。',\n"
-        "        }\n"
-        "    ],\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-    configure_llm_assisted_readable_concept(workspace_dir, rewriter_script)
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_readable_concept_page"
+        claim_id = context["canonical_claim"]["claim_id"]
+        title = context["title"]
+        practical_claim_id = next(
+            (
+                item["claim_id"]
+                for item in context["stable_claims"]
+                if "用于承载可追踪、可合并、可审计的结论" in item["text"]
+            ),
+            claim_id,
+        )
+        return {
+            "summary": f"{title} 是位于 chunk 与 wiki 之间的独立知识声明层，可作为知识沉淀的稳定阅读入口。",
+            "key_points": [{
+                "claim_id": claim_id,
+                "text": f"{title} 是位于 chunk 与 wiki 之间的独立知识声明层。",
+            }],
+            "practical_notes": [{
+                "claim_id": practical_claim_id,
+                "text": f"{title} 用于承载可追踪、可合并、可审计的结论。",
+            }],
+        }
 
-    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_only_llm_task(
+        workspace_dir,
+        section="rendering",
+        target_name="readable_concept",
+        base_url=function_call_server(build_result),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     stable_claim_ids = [record["claim_id"] for record in claim_records]
     for claim_id in stable_claim_ids:
@@ -1707,6 +1729,7 @@ def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(t
             claim_id,
             "stable",
             "--target-dir", str(workspace_dir),
+            llm_mode=None,
         )
 
     page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
@@ -1719,7 +1742,10 @@ def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(t
     assert "- 知识声明层 用于承载可追踪、可合并、可审计的结论。" in page_text
 
 
-def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounded(tmp_path: Path) -> None:
+def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounded(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     # 如果 LLM 输出没有绑定到允许的 claim 或内容明显跑偏，应自动回退到第二阶段的确定性模板。
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -1738,26 +1764,23 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
         "--target-dir", str(workspace_dir),
     )
 
-    rewriter_script = tmp_path / "rewrite_readable_concept_bad.py"
-    rewriter_script.write_text(
-        "import json\n"
-        "import sys\n"
-        "\n"
-        "json.load(sys.stdin)\n"
-        "json.dump({\n"
-        "    'summary': '这是一个完全脱离 claim 的新说法。',\n"
-        "    'key_points': [\n"
-        "        {'claim_id': 'claim_fake', 'text': '这个系统主要依赖向量数据库。'}\n"
-        "    ],\n"
-        "    'practical_notes': [\n"
-        "        {'claim_id': 'claim_fake', 'text': '应该直接跳过证据页。'}\n"
-        "    ],\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-    configure_llm_assisted_readable_concept(workspace_dir, rewriter_script)
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_readable_concept_page"
+        claim_id = context["canonical_claim"]["claim_id"]
+        return {
+            "summary": "这是一个完全脱离 claim 的新说法。",
+            "key_points": [{"claim_id": claim_id, "text": "这个系统主要依赖向量数据库。"}],
+            "practical_notes": [{"claim_id": claim_id, "text": "应该直接跳过证据页。"}],
+        }
 
-    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_only_llm_task(
+        workspace_dir,
+        section="rendering",
+        target_name="readable_concept",
+        base_url=function_call_server(build_result),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
     claim_records = load_jsonl(workspace_dir / "state" / "claims.jsonl")
     definition_claim = first_active_claim(claim_records, "知识声明层")
     run_cli(
@@ -1765,6 +1788,7 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
         definition_claim["claim_id"],
         "stable",
         "--target-dir", str(workspace_dir),
+        llm_mode=None,
     )
 
     page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
@@ -1884,45 +1908,47 @@ def test_query_overview_intent_prefers_overview_page_for_macro_question(tmp_path
     assert result["results"][0]["reading_pack"]["focus"] == "workspace_overview"
 
 
-def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(tmp_path: Path) -> None:
+def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverview")
 
-    rewriter_script = tmp_path / "rewrite_overview.py"
-    rewriter_script.write_text(
-        "import json\n"
-        "import sys\n"
-        "\n"
-        "payload = json.load(sys.stdin)\n"
-        "first_theme = payload['theme_rows'][0]\n"
-        "second_theme = payload['theme_rows'][1]\n"
-        "json.dump({\n"
-        "    'summary': '这个工作区主要围绕 Claim 和 Chunk 两个稳定主题展开。',\n"
-        "    'theme_rows': [\n"
-        "        {\n"
-        "            'page_id': first_theme['page_id'],\n"
-        "            'text': '这个主题解释了 Claim 作为独立知识声明层的定位。',\n"
-        "        },\n"
-        "        {\n"
-        "            'page_id': second_theme['page_id'],\n"
-        "            'text': '这个主题说明了 Chunk 作为证据切片单元的作用。',\n"
-        "        },\n"
-        "    ],\n"
-        "    'reading_path': [\n"
-        "        {\n"
-        "            'page_id': first_theme['page_id'],\n"
-        "            'text': '如果你想先建立全局认识，先读 Claim 主题。',\n"
-        "        },\n"
-        "        {\n"
-        "            'page_id': second_theme['page_id'],\n"
-        "            'text': '如果你想继续追证据结构，再看 Chunk 主题。',\n"
-        "        },\n"
-        "    ],\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-    configure_llm_assisted_overview(workspace_dir, rewriter_script)
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_workspace_overview_page"
+        first_theme, second_theme = context["theme_rows"][:2]
+        return {
+            "summary": "这个工作区主要围绕 Claim 和 Chunk 两个稳定主题展开。",
+            "theme_rows": [
+                {
+                    "page_id": first_theme["page_id"],
+                    "text": "这个主题解释了 Claim 作为独立知识声明层的定位。",
+                },
+                {
+                    "page_id": second_theme["page_id"],
+                    "text": "这个主题说明了 Chunk 作为证据切片单元的作用。",
+                },
+            ],
+            "reading_path": [
+                {
+                    "page_id": first_theme["page_id"],
+                    "text": "如果你想先建立全局认识，先读 Claim 主题。",
+                },
+                {
+                    "page_id": second_theme["page_id"],
+                    "text": "如果你想继续追证据结构，再看 Chunk 主题。",
+                },
+            ],
+        }
 
-    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_only_llm_task(
+        workspace_dir,
+        section="rendering",
+        target_name="overview",
+        base_url=function_call_server(build_result),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
     page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
     overview_page = next(record for record in page_records if record.get("type") == "overview")
     page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
@@ -1937,35 +1963,29 @@ def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(tmp_path:
     assert "推荐阅读句: `如果你想先建立全局认识，先读 Claim 主题。`" in page_text
 
 
-def test_llm_assisted_overview_page_falls_back_when_rewrite_is_ungrounded(tmp_path: Path) -> None:
+def test_llm_assisted_overview_page_falls_back_when_rewrite_is_ungrounded(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverviewFallback")
 
-    rewriter_script = tmp_path / "rewrite_overview_bad.py"
-    rewriter_script.write_text(
-        "import json\n"
-        "import sys\n"
-        "\n"
-        "json.load(sys.stdin)\n"
-        "json.dump({\n"
-        "    'summary': '这个工作区的核心是向量数据库和外部缓存。',\n"
-        "    'theme_rows': [\n"
-        "        {\n"
-        "            'page_id': 'page_fake',\n"
-        "            'text': '这个主题主要讲多代理调度系统。',\n"
-        "        }\n"
-        "    ],\n"
-        "    'reading_path': [\n"
-        "        {\n"
-        "            'page_id': 'page_fake',\n"
-        "            'text': '建议先读缓存系统设计。',\n"
-        "        }\n"
-        "    ],\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-    configure_llm_assisted_overview(workspace_dir, rewriter_script)
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_workspace_overview_page"
+        page_id = context["theme_rows"][0]["page_id"]
+        return {
+            "summary": "这个工作区的核心是向量数据库和外部缓存。",
+            "theme_rows": [{"page_id": page_id, "text": "这个主题主要讲多代理调度系统。"}],
+            "reading_path": [{"page_id": page_id, "text": "建议先读缓存系统设计。"}],
+        }
 
-    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_only_llm_task(
+        workspace_dir,
+        section="rendering",
+        target_name="overview",
+        base_url=function_call_server(build_result),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
     page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
     overview_page = next(record for record in page_records if record.get("type") == "overview")
     page_text = (workspace_dir / overview_page["page_path"]).read_text(encoding="utf-8")
@@ -2138,7 +2158,10 @@ def test_ingest_filters_obviously_bad_concept_titles(tmp_path: Path) -> None:
     assert "示例" not in concept_titles
 
 
-def test_gray_concept_title_can_be_renamed_by_llm_hook(tmp_path: Path) -> None:
+def test_gray_concept_title_can_be_renamed_by_llm_client(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "topic.md").write_text(
@@ -2156,23 +2179,24 @@ def test_gray_concept_title_can_be_renamed_by_llm_hook(tmp_path: Path) -> None:
         "--target-dir", str(workspace_dir),
     )
 
-    reviewer_script = tmp_path / "review_concept_title.py"
-    reviewer_script.write_text(
-        "import json\n"
-        "import sys\n"
-        "\n"
-        "payload = json.load(sys.stdin)\n"
-        "json.dump({\n"
-        "    'decision': 'rename',\n"
-        "    'suggested_title': 'BM25',\n"
-        "    'reason': 'test_rewrite_gray_title',\n"
-        "    'confidence': 0.95,\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-    configure_llm_assisted_concept_quality(workspace_dir, reviewer_script)
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_concept_candidate_review"
+        assert "BM25" in context["canonical_claim"]["text"]
+        return {
+            "decision": "rename",
+            "suggested_title": "BM25",
+            "reason": "test_rewrite_gray_title",
+            "confidence": 0.95,
+        }
 
-    run_cli("ingest", "--target-dir", str(workspace_dir))
+    configure_only_llm_task(
+        workspace_dir,
+        section="automation",
+        target_name="concept_candidate_review",
+        base_url=function_call_server(build_result),
+    )
+
+    run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
     page_records = load_jsonl(workspace_dir / "state" / "pages.jsonl")
     concept_titles = {
         record["title"]
@@ -2812,7 +2836,11 @@ def test_review_apply_text_output_includes_absolute_workspace_path(tmp_path: Pat
             "--target-dir", str(workspace_dir),
         ],
         cwd=str(REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "MYAGENTWIKI_LLM_MODE": "deterministic",
+        },
         capture_output=True,
         text=True,
         check=True,

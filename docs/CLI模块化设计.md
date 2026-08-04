@@ -25,7 +25,7 @@
 - `src/myagentwiki/cli_components/`：承接命令适配、参数转 request、结果转 `CommandResult`
 - `src/myagentwiki/app_services/`：承接 init、ingest、query、review、lint、render、semantic batch、运行时转换等服务
 - `src/myagentwiki/repositories/`：承接 query / ingest / review / semantic 等账本读取和持久化
-- `src/myagentwiki/app_services/runtime_services.py`：承接文档转换、OCR、远程图片下载和 hook 运行等运行时能力
+- `src/myagentwiki/app_services/runtime_services.py`：承接文档转换、OCR、远程图片下载和 LLM/确定性任务接入等运行时能力
 - `src/myagentwiki/cli.py`：仍负责依赖装配，并保留较多语义规则、Structure / Evidence / Knowledge / Claim 编译、页面生成和索引逻辑，尚未成为真正的薄入口
 
 内部流程已经改为复用 `run_*_service`，不再通过调用 `command_*` 复用业务逻辑。本文后面的 `cli/ / app/ / domain/ / infra/` 目录树是长期目标，不是当前文件系统快照；继续拆分时应优先沿用现有模块，再按职责逐步调整命名和边界。
@@ -62,11 +62,11 @@
 
 - 不让 `argparse.Namespace` 重新变成内部调用协议
 - 不让命令输出格式反向绑住 service result
-- 后续增加 API、TUI、Agent hook 或测试夹具时，统一复用 service，不复用 CLI 命令函数
+- 后续增加 API、TUI、LLM 客户端或测试夹具时，统一复用 service，不复用 CLI 命令函数
 
 ### 3. 基础设施能力已开始拆分，但领域逻辑仍偏集中
 
-文档标准化、PDF/DOCX/XLSX fallback、OCR、下载重试和 hook 运行已进入 `app_services/runtime_services.py`，多类账本读取与持久化也已进入 `repositories/`。但部分文件锁、Git、索引、结构编译和页面生成能力仍留在 `cli.py`，领域层也尚未形成独立目录。
+MarkItDown 统一文档转换已进入 `app_services/document_conversion.py`；Markdown/图片专用标准化、旧转换器备用路径、OCR、下载重试和 LLM/确定性任务接入仍由 `app_services/runtime_services.py` 承接。多类账本读取与持久化已进入 `repositories/`，但部分文件锁、Git、索引、结构编译和页面生成能力仍留在 `cli.py`，领域层也尚未形成独立目录。
 
 这会导致：
 
@@ -187,7 +187,7 @@
 - Git / subprocess
 - 原始文档转换
 - OCR / 下载 / 外部依赖 fallback
-- Agent hook / semantic hook 调用
+- LLM 调度器、在线客户端、CLI 客户端与确定性处理器调用
 
 这一层提供能力给上层使用，但不决定主业务流程。
 
@@ -222,8 +222,15 @@ src/myagentwiki/
   __main__.py
   cli.py
   semantic.py
-  agent_hook.py
-  agent_cli_hook.py
+  deterministic_processor.py
+  llm/
+    contracts.py
+    online_client.py
+    cli_client.py
+    router.py
+    repair.py
+    errors.py
+    diagnostics.py
 
   cli/
     __init__.py
@@ -292,10 +299,12 @@ src/myagentwiki/
       spreadsheet.py
       image.py
       binary.py
-    hooks/
+    llm/
       __init__.py
-      semantic_runner.py
-      automation_runner.py
+      contracts.py
+      online_client.py
+      cli_client.py
+      router.py
     repositories/
       __init__.py
       workspace_config_repo.py

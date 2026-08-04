@@ -14,11 +14,22 @@ workspace:
 
 python_packages:
   required:
+    - "markitdown"
+    - "mammoth"
+    - "lxml"
+    - "pandas"
+    - "python-pptx"
+    - "xlrd"
+    - "pdfminer-six"
+    - "pdfplumber"
+    - "olefile"
     - "python-docx"
     - "openpyxl"
     - "pypdf"
     - "pillow"
     - "openai"
+    - "json-repair"
+    - "jsonschema"
   optional:
     ocr: []
     office: []
@@ -31,4 +42,4 @@ system_tools:
       purpose: "Optional OCR enhancement for image-heavy sources."
       check:
         command: ["tesseract", "--version"]
-      fallback: "Use agent-assisted image understanding when unavailable."
+      fallback: "Use LLM-assisted image understanding when unavailable."

@@ -15,17 +15,18 @@ from myagentwiki.cli import (
     normalize_semantic_batch_results,
 )
 from myagentwiki.semantic import build_semantic_decision_id, fingerprint_payload
+from myagentwiki.llm.router import build_route_identity
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(*args: str, cwd: Path | None = None) -> dict:
+def run_cli(*args: str, cwd: Path | None = None, llm_mode: str = "deterministic") -> dict:
     command = [sys.executable, "-m", "myagentwiki.cli", *args, "--json"]
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": llm_mode},
         capture_output=True,
         text=True,
         check=True,
@@ -60,7 +61,7 @@ def append_jsonl(path: Path, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-class _SemanticHookHandler(BaseHTTPRequestHandler):
+class _SemanticFunctionHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length).decode("utf-8")
@@ -70,7 +71,7 @@ class _SemanticHookHandler(BaseHTTPRequestHandler):
             prompt_payload = json.loads(payload["messages"][1]["content"])
         else:
             prompt_payload = json.loads(payload["input"])
-        item_id = prompt_payload["payload"]["items"][0]["item_id"]
+        item_id = prompt_payload["items"][0]["item_id"]
         decisions_json = json.dumps({
             "decisions": [
                 {
@@ -79,45 +80,42 @@ class _SemanticHookHandler(BaseHTTPRequestHandler):
                         "knowledge_role": "fact",
                         "page_intent_hints": ["topic"],
                         "concept_candidate_score": 0.52,
+                        "risk_flags": [],
+                        "content_tags": [],
                     },
                     "decision_status": "accepted",
                     "confidence": 0.91,
                     "reason_code": "online_semantic_ok",
+                    "risk_flags": [],
+                    "supporting_ids": [],
+                    "abstain_reason": "",
                 }
             ]
         }, ensure_ascii=False)
         if is_chat_completions:
-            chunks = [
-                {
-                    "id": "chatcmpl-test",
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": decisions_json},
-                            "finish_reason": None,
-                        }
-                    ],
-                },
-                {
-                    "id": "chatcmpl-test",
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                },
-            ]
-            encoded = "".join(
-                f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n" for chunk in chunks
-            ) + "data: [DONE]\n\n"
-            encoded_bytes = encoded.encode("utf-8")
+            response_payload = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call-test",
+                            "type": "function",
+                            "function": {
+                                "name": "submit_claim_role_decisions",
+                                "arguments": decisions_json,
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            }
+            encoded_bytes = json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Type", "application/json")
             self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(encoded_bytes)))
             self.end_headers()
@@ -183,8 +181,11 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
     assert 'schema_version: "v1"' in config_text
     assert "workspace:" in config_text
     assert "semantic:" in config_text
-    assert "agent_cli_hook:" in config_text
-    assert "agent_online_hook:" in config_text
+    assert "llm:" in config_text
+    assert 'primary: "online"' in config_text
+    assert 'fallback: "cli"' in config_text
+    assert "hook" not in config_text.lower()
+    assert "command:" not in config_text
     assert "batch_scheduler:" in config_text
     assert "document_analysis:" in config_text
     assert "claim_candidate_quality:" in config_text
@@ -471,7 +472,7 @@ def test_semantic_batch_claim_candidate_quality_writes_short_claim_decisions(tmp
     assert quality_claim["semantic_projection"]["quality_label"] == quality_claim["quality_label"]
 
 
-def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
+def test_semantic_batch_can_use_online_function_calling(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "concept.md").write_text(
@@ -507,7 +508,7 @@ def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
     )
     (workspace_dir / "state" / "semantic_decisions.jsonl").write_text("", encoding="utf-8")
 
-    server, thread = start_test_server(_SemanticHookHandler)
+    server, thread = start_test_server(_SemanticFunctionHandler)
     try:
         (workspace_dir / "config" / "llm.local.yml").write_text(
             'provider:\n'
@@ -521,25 +522,14 @@ def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
             '  verify_ssl: true\n',
             encoding="utf-8",
         )
-        config_path = workspace_dir / "config" / "project.yml"
-        config_path.write_text(
-            config_path.read_text(encoding="utf-8").replace(
-                '  claim_role:\n'
-                '    strategy: "agent_assisted"\n'
-                '    command:\n'
-                f'      - "{sys.executable}"\n'
-                '      - "-m"\n'
-                '      - "myagentwiki.agent_hook"\n',
-                '  claim_role:\n'
-                '    strategy: "agent_assisted"\n'
-                '    command:\n'
-                '      - "python3"\n'
-                '      - "-m"\n'
-                '      - "myagentwiki.agent_online_hook"\n',
-            ),
-            encoding="utf-8",
+        result = run_cli(
+            "semantic-batch",
+            "--task",
+            "claim_role",
+            "--target-dir",
+            str(workspace_dir),
+            llm_mode="llm_assisted",
         )
-        result = run_cli("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir))
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -548,6 +538,71 @@ def test_semantic_batch_can_use_online_hook(tmp_path: Path) -> None:
     assert result["summary"]["written_decision_count"] >= 1
     semantic_records = load_jsonl(workspace_dir / "state" / "semantic_decisions.jsonl")
     assert any(record.get("reason_code") == "online_semantic_ok" for record in semantic_records)
+
+
+def test_semantic_batch_route_failure_does_not_write_decisions(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    (source_dir / "concept.md").write_text(
+        "# 概念\n\n系统需要保留来源回链。\n",
+        encoding="utf-8",
+    )
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "FailedSemanticBatch",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    decisions_path = workspace_dir / "state" / "semantic_decisions.jsonl"
+    decisions_path.write_text("", encoding="utf-8")
+    claims_path = workspace_dir / "state" / "claims.jsonl"
+    claim_records = load_jsonl(claims_path)
+    for record in claim_records:
+        record["semantic_decision_ids"] = []
+        record["semantic_projection"] = {}
+        record["knowledge_role"] = None
+        record["page_intent_hints"] = []
+        record["concept_candidate_score"] = None
+    claims_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in claim_records) + "\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "myagentwiki.cli",
+            "semantic-batch",
+            "--task",
+            "claim_role",
+            "--target-dir",
+            str(workspace_dir),
+            "--json",
+        ],
+        cwd=str(REPO_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "MYAGENTWIKI_LLM_MODE": "llm_assisted",
+            "MYAGENTWIKI_CODEX_BIN": "/definitely/not-a-codex-executable",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["error"] == "llm_request_failed"
+    assert decisions_path.read_text(encoding="utf-8") == ""
+    failed_claim_records = load_jsonl(claims_path)
+    assert all(not record.get("semantic_decision_ids") for record in failed_claim_records)
 
 
 def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) -> None:
@@ -596,6 +651,11 @@ def test_page_intent_cache_recomputes_after_claim_role_change(tmp_path: Path) ->
         item_payloads=[claim_role_payload],
         prompt_version=claim_role_config.prompt_version,
         schema_version=claim_role_config.schema_version,
+        route_identity=build_route_identity(
+            workspace_dir,
+            "claim_role",
+            strategy="deterministic",
+        ),
     )
     append_jsonl(
         workspace_dir / "state" / "semantic_decisions.jsonl",

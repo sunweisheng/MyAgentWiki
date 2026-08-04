@@ -6,11 +6,16 @@ import sys
 from pathlib import Path
 
 
-COMPACT_TEXT_RE = re.compile(r"[\s，。；：！？、,.!?:;\"'“”‘’（）()\[\]【】`]+")
-IMAGE_SLOT_ALIAS_RE = re.compile(
-    r"^(?:内嵌图片\s*)?(?:image|img|figure|fig|photo|picture|插图|图片)[-_ ]?[a-z0-9]+$",
-    re.IGNORECASE,
+DETERMINISTIC_RULES = json.loads(
+    Path(__file__).with_name("deterministic_rules.json").read_text(encoding="utf-8")
 )
+TEXT_RULES = DETERMINISTIC_RULES["text"]
+ALIAS_RULES = DETERMINISTIC_RULES["aliases"]
+CONCEPT_TITLE_RULES = DETERMINISTIC_RULES["concept_titles"]
+DOCUMENT_ANALYSIS_RULES = DETERMINISTIC_RULES["document_analysis"]
+COMPACT_TEXT_RE = re.compile(r"[\s，。；：！？、,.!?:;\"'“”‘’（）()\[\]【】`]+")
+IMAGE_SLOT_ALIAS_RE = re.compile(ALIAS_RULES["image_slot_pattern"], re.IGNORECASE)
+NOISY_ALIAS_VALUES = frozenset(ALIAS_RULES["noisy_values"])
 
 
 def normalize_text(text: str) -> str:
@@ -19,7 +24,7 @@ def normalize_text(text: str) -> str:
 
 def sentence_score(text: str) -> tuple[int, int, int]:
     cleaned = normalize_text(text)
-    punctuation_bonus = sum(cleaned.count(marker) for marker in ("。", "；", "：", "，"))
+    punctuation_bonus = sum(cleaned.count(marker) for marker in TEXT_RULES["sentence_punctuation"])
     return (
         len(cleaned),
         punctuation_bonus,
@@ -31,7 +36,7 @@ def text_looks_fragmentary(text: str) -> bool:
     cleaned = normalize_text(text)
     if not cleaned:
         return True
-    if cleaned.endswith(("？", "?", "：", ":")):
+    if cleaned.endswith(tuple(TEXT_RULES["fragment_endings"])):
         return True
     return False
 
@@ -44,7 +49,7 @@ def text_is_question_like(text: str) -> bool:
     cleaned = normalize_text(text)
     if not cleaned:
         return False
-    return cleaned.endswith(("？", "?"))
+    return cleaned.endswith(tuple(TEXT_RULES["question_endings"]))
 
 
 def normalize_counter_payload(value: object) -> dict[str, int]:
@@ -92,13 +97,13 @@ def claim_role_structure_hints(item: dict) -> tuple[str | None, list[str], str |
     knowledge_kinds = unit_kinds(item)
     tags = structure_content_tags(item)
     if counter_has_any(block_kinds, ("table_row",)) or counter_has_any(knowledge_kinds, ("table_fact",)):
-        return "fact", ["reference"], "agent_hook_claim_role_structure_reference_evidence"
+        return "fact", ["reference"], "deterministic_processor_claim_role_structure_reference_evidence"
     if counter_has_any(block_kinds, ("code_example",)) or counter_has_any(knowledge_kinds, ("code_example",)):
-        return "example", ["example"], "agent_hook_claim_role_structure_example_evidence"
+        return "example", ["example"], "deterministic_processor_claim_role_structure_example_evidence"
     if tags.get("cases", 0) >= 2:
-        return "example", ["example"], "agent_hook_claim_role_structure_case_cluster"
+        return "example", ["example"], "deterministic_processor_claim_role_structure_case_cluster"
     if tags.get("rules", 0) >= 2:
-        return "fact", ["reference"], "agent_hook_claim_role_structure_rule_cluster"
+        return "fact", ["reference"], "deterministic_processor_claim_role_structure_rule_cluster"
     return None, [], None
 
 
@@ -164,7 +169,7 @@ def choose_keep_both_conflict_reason(candidate_claims: list[dict]) -> str | None
     if all(text_is_question_like(text) for text in texts):
         compacted = [compact_text(text) for text in texts]
         if compacted[0] != compacted[1]:
-            return "agent_hook_kept_distinct_question_claims"
+            return "deterministic_processor_kept_distinct_question_claims"
 
     if not any(text_is_question_like(text) for text in texts):
         left_compact, right_compact = [compact_text(text) for text in texts]
@@ -173,7 +178,7 @@ def choose_keep_both_conflict_reason(candidate_claims: list[dict]) -> str | None
                 re.findall(r"[A-Za-z0-9_+-]+|[\u4e00-\u9fff]+", texts[1])
             )
             if shared_tokens and not (left_compact in right_compact or right_compact in left_compact):
-                return "agent_hook_kept_complementary_conflict_claims"
+                return "deterministic_processor_kept_complementary_conflict_claims"
 
     return None
 
@@ -189,7 +194,7 @@ def choose_weaker_conflict_claim(candidate_claims: list[dict]) -> tuple[dict | N
     ]
     if fragment_flags.count(True) == 1:
         weaker = first if fragment_flags[0] else second
-        return weaker, "agent_hook_archived_fragmentary_conflict_claim"
+        return weaker, "deterministic_processor_archived_fragmentary_conflict_claim"
 
     first_text = normalize_text(first.get("text", ""))
     second_text = normalize_text(second.get("text", ""))
@@ -206,7 +211,7 @@ def choose_weaker_conflict_claim(candidate_claims: list[dict]) -> tuple[dict | N
         and short_compact in long_compact
         and len(short_compact) <= int(len(long_compact) * 0.75)
     ):
-        return shorter, "agent_hook_archived_contained_conflict_claim"
+        return shorter, "deterministic_processor_archived_contained_conflict_claim"
 
     return None, None
 
@@ -243,9 +248,9 @@ def handle_review_auto(payload: dict) -> dict:
                 "alias_value": alias_value,
                 "confidence": 0.96,
                 "reason": (
-                    "agent_hook_assigned_noisy_alias_to_title_owner"
+                    "deterministic_processor_assigned_noisy_alias_to_title_owner"
                     if alias_value in NOISY_ALIAS_VALUES
-                    else "agent_hook_assigned_alias_to_unique_title_owner"
+                    else "deterministic_processor_assigned_alias_to_unique_title_owner"
                 ),
             }
         if (
@@ -256,7 +261,7 @@ def handle_review_auto(payload: dict) -> dict:
                 "decision": "auto_apply",
                 "action": "keep_both",
                 "confidence": 0.94,
-                "reason": "agent_hook_kept_generated_image_aliases_distinct",
+                "reason": "deterministic_processor_kept_generated_image_aliases_distinct",
             }
         if alias_value in NOISY_ALIAS_VALUES and "remove_alias" in review.get("allowed_actions", []):
             normalized_titles = {normalize_text(page.get("title", "")) for page in candidate_pages}
@@ -295,7 +300,7 @@ def handle_review_auto(payload: dict) -> dict:
                     "action": "archive_one",
                     "primary_claim_id": fragments[0].get("claim_id"),
                     "confidence": 0.91,
-                    "reason": "agent_hook_archived_fragmentary_duplicate_claim",
+                    "reason": "deterministic_processor_archived_fragmentary_duplicate_claim",
                 }
             if len(non_fragments) >= 2 and "merge" in review.get("allowed_actions", []):
                 primary_claim_id = choose_primary_claim_id(non_fragments)
@@ -312,7 +317,7 @@ def handle_review_auto(payload: dict) -> dict:
                             "primary_claim_id": primary_claim_id,
                             "secondary_claim_id": secondary_claim_id,
                             "confidence": 0.9,
-                            "reason": "agent_hook_merged_best_supported_duplicate_pair",
+                            "reason": "deterministic_processor_merged_best_supported_duplicate_pair",
                         }
         return {"decision": "escalate", "reason": "duplicate_still_needs_human_judgment"}
 
@@ -327,7 +332,7 @@ def handle_stable_promotion(payload: dict) -> dict:
         return {
             "decision": "promote",
             "confidence": 0.96,
-            "reason": "agent_hook_promoted_multi_source_claim",
+            "reason": "deterministic_processor_promoted_multi_source_claim",
         }
     return {"decision": "skip", "reason": "claim_not_confident_enough_for_promotion"}
 
@@ -345,53 +350,48 @@ def handle_review_concept_candidate(payload: dict) -> dict:
         if text
     )
 
-    generic_titles = {"example", "summary", "note", "method", "appendix", "why", "how"}
+    generic_titles = set(CONCEPT_TITLE_RULES["generic_values"])
     if candidate_title in generic_titles:
         if preferred_section_label and preferred_section_label not in generic_titles and len(preferred_section_label) >= 3:
             return {
                 "decision": "rename",
                 "suggested_title": preferred_section_label,
-                "reason": "agent_hook_promoted_non_generic_section_label",
+                "reason": "deterministic_processor_promoted_non_generic_section_label",
                 "confidence": 0.84,
             }
-        if "bm25" in merged_text.lower():
-            return {
-                "decision": "rename",
-                "suggested_title": "BM25",
-                "reason": "agent_hook_detected_specific_technical_term",
-                "confidence": 0.82,
-            }
-        if "llm-wiki" in merged_text.lower():
-            return {
-                "decision": "rename",
-                "suggested_title": "LLM-Wiki",
-                "reason": "agent_hook_detected_specific_technical_term",
-                "confidence": 0.8,
-            }
+        lowered_text = merged_text.lower()
+        for marker, suggested_title in CONCEPT_TITLE_RULES["technical_terms"].items():
+            if marker in lowered_text:
+                return {
+                    "decision": "rename",
+                    "suggested_title": suggested_title,
+                    "reason": "deterministic_processor_detected_specific_technical_term",
+                    "confidence": 0.82,
+                }
         return {
             "decision": "reject",
-            "reason": "agent_hook_rejected_generic_structural_title",
+            "reason": "deterministic_processor_rejected_generic_structural_title",
             "confidence": 0.95,
         }
 
-    if len(candidate_title) <= 1 and candidate_title not in {"AI"}:
+    if len(candidate_title) <= 1 and candidate_title not in set(CONCEPT_TITLE_RULES["short_allowed_values"]):
         return {
             "decision": "reject",
-            "reason": "agent_hook_rejected_too_short_title",
+            "reason": "deterministic_processor_rejected_too_short_title",
             "confidence": 0.98,
         }
 
     if text_is_question_like(merged_text):
         return {
             "decision": "reject",
-            "reason": "agent_hook_rejected_question_like_candidate",
+            "reason": "deterministic_processor_rejected_question_like_candidate",
             "confidence": 0.9,
         }
 
     return {
         "decision": "accept",
         "suggested_title": candidate_title,
-        "reason": "agent_hook_accepts_candidate_title",
+        "reason": "deterministic_processor_accepts_candidate_title",
         "confidence": 0.72,
     }
 
@@ -474,13 +474,19 @@ def handle_document_analysis_batch(payload: dict) -> dict:
         title = normalize_text(item.get("title", ""))
         if not item_id:
             continue
-        document_kind = "reference" if "faq" in normalized_path.lower() else "note"
+        normalized_path_lower = normalized_path.lower()
+        title_lower = title.lower()
+        document_kind = (
+            "reference"
+            if any(marker in normalized_path_lower for marker in DOCUMENT_ANALYSIS_RULES["reference_path_markers"])
+            else "note"
+        )
         chunk_strategy_hint = "heading_first"
-        if any(marker in title.lower() for marker in ("guide", "tutorial", "how")):
+        if any(marker in title_lower for marker in DOCUMENT_ANALYSIS_RULES["tutorial_title_markers"]):
             document_kind = "tutorial"
-        if "chat" in normalized_path.lower():
+        if any(marker in normalized_path_lower for marker in DOCUMENT_ANALYSIS_RULES["chat_path_markers"]):
             chunk_strategy_hint = "chat_turn"
-        elif "plain" in normalized_path.lower() or "note" in normalized_path.lower():
+        elif any(marker in normalized_path_lower for marker in DOCUMENT_ANALYSIS_RULES["paragraph_path_markers"]):
             chunk_strategy_hint = "paragraph_first"
         decisions.append(
             {
@@ -491,7 +497,7 @@ def handle_document_analysis_batch(payload: dict) -> dict:
                     "chunk_strategy_hint": chunk_strategy_hint,
                 },
                 "confidence": 0.82,
-                "reason_code": "agent_hook_document_analysis_batch_v1",
+                "reason_code": "deterministic_processor_document_analysis_batch_v1",
             }
         )
     return {"decisions": decisions}
@@ -513,28 +519,28 @@ def handle_claim_candidate_quality_batch(payload: dict) -> dict:
         quality_label = "standalone"
         review_required = False
         safe_auto_ready = True
-        reason = "agent_hook_short_claim_kept_as_standalone"
+        reason = "deterministic_processor_short_claim_kept_as_standalone"
 
         if text_is_question_like(cleaned_text):
             quality_label = "fragment"
             review_required = True
             safe_auto_ready = False
-            reason = "agent_hook_short_claim_question_like_fragment"
+            reason = "deterministic_processor_short_claim_question_like_fragment"
         elif text_looks_fragmentary(cleaned_text):
             quality_label = "fragment"
             review_required = True
             safe_auto_ready = False
-            reason = "agent_hook_short_claim_context_dependent_fragment"
+            reason = "deterministic_processor_short_claim_context_dependent_fragment"
         elif natural_char_count <= 4:
             quality_label = "title_shell"
             review_required = False
             safe_auto_ready = False
-            reason = "agent_hook_short_claim_title_shell"
+            reason = "deterministic_processor_short_claim_title_shell"
         else:
             quality_label = "standalone"
             review_required = True
             safe_auto_ready = False
-            reason = "agent_hook_short_claim_kept_but_not_safe_auto"
+            reason = "deterministic_processor_short_claim_kept_but_not_safe_auto"
 
         decisions.append(
             {
@@ -546,7 +552,7 @@ def handle_claim_candidate_quality_batch(payload: dict) -> dict:
                     "reason": reason,
                 },
                 "confidence": 0.86,
-                "reason_code": "agent_hook_claim_candidate_quality_batch_v1",
+                "reason_code": "deterministic_processor_claim_candidate_quality_batch_v1",
             }
         )
     return {"decisions": decisions}
@@ -568,18 +574,18 @@ def handle_claim_role_batch(payload: dict) -> dict:
         concept_candidate_score = 0.45
         content_tags: list[str] = []
         risk_flags: list[str] = []
-        reason_code = "agent_hook_claim_role_conservative_fact"
+        reason_code = "deterministic_processor_claim_role_conservative_fact"
         structure_role, structure_hints, structure_reason = claim_role_structure_hints(item)
         if text_is_question_like(text):
             role = "meta"
             page_intent_hints = ["reject"]
             concept_candidate_score = 0.05
-            reason_code = "agent_hook_claim_role_question_like_reject"
+            reason_code = "deterministic_processor_claim_role_question_like_reject"
         elif structure_role and structure_hints:
             role = structure_role
             page_intent_hints = structure_hints
             concept_candidate_score = 0.2
-            reason_code = structure_reason or "agent_hook_claim_role_structure_evidence"
+            reason_code = structure_reason or "deterministic_processor_claim_role_structure_evidence"
         decisions.append(
             {
                 "item_id": item_id,
@@ -625,25 +631,25 @@ def handle_page_intent_batch(payload: dict) -> dict:
                 tag_text = normalize_text(str(tag))
                 if tag_text and tag_text not in content_tags:
                     content_tags.append(tag_text)
-        reason_code = "agent_hook_page_intent_conservative_topic"
+        reason_code = "deterministic_processor_page_intent_conservative_topic"
         if any(text_is_question_like(text) for text in claim_texts):
             page_intent = "reject"
-            reason_code = "agent_hook_page_intent_question_like_reject"
+            reason_code = "deterministic_processor_page_intent_question_like_reject"
         elif hint_counts.get("timeline", 0) >= 2:
             page_intent = "timeline"
-            reason_code = "agent_hook_page_intent_group_timeline_hints"
+            reason_code = "deterministic_processor_page_intent_group_timeline_hints"
         elif hint_counts.get("reference", 0) >= 2:
             page_intent = "reference"
-            reason_code = "agent_hook_page_intent_group_reference_hints"
+            reason_code = "deterministic_processor_page_intent_group_reference_hints"
         elif hint_counts.get("guide", 0) >= 2:
             page_intent = "guide"
-            reason_code = "agent_hook_page_intent_group_guide_hints"
+            reason_code = "deterministic_processor_page_intent_group_guide_hints"
         elif hint_counts.get("example", 0) >= 2:
             page_intent = "example"
-            reason_code = "agent_hook_page_intent_group_example_hints"
+            reason_code = "deterministic_processor_page_intent_group_example_hints"
         elif hint_counts.get("concept", 0) >= 1:
             page_intent = "concept"
-            reason_code = "agent_hook_page_intent_group_concept_hints"
+            reason_code = "deterministic_processor_page_intent_group_concept_hints"
         decisions.append(
             {
                 "item_id": item_id,
@@ -679,15 +685,14 @@ def handle_describe_image(payload: dict) -> dict:
     return {
         "decision": "report_only",
         "confidence": 0.0,
-        "reason": "agent_hook_image_description_not_implemented",
+        "reason": "deterministic_processor_image_description_not_implemented",
         "summary": "；".join(summary_parts),
         "extracted_text": "",
-        "warnings": ["image_to_text_hook_returned_no_text"],
+        "warnings": ["image_to_text_deterministic_processor_returned_no_text"],
     }
 
 
-def main() -> int:
-    payload = json.load(sys.stdin)
+def process(payload: dict) -> dict:
     task = payload.get("task")
     if task == "review_auto_decision":
         result = handle_review_auto(payload)
@@ -711,6 +716,12 @@ def main() -> int:
         result = handle_describe_image(payload)
     else:
         result = {"decision": "skip", "reason": "unsupported_task"}
+    return result
+
+
+def main() -> int:
+    payload = json.load(sys.stdin)
+    result = process(payload if isinstance(payload, dict) else {})
     json.dump(result, sys.stdout, ensure_ascii=False)
     return 0
 

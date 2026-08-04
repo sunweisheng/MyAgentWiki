@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shlex
 import ssl
@@ -38,11 +39,21 @@ try:
 except ImportError:  # pragma: no cover - 依赖缺失时走降级逻辑
     Image = None
 
-from ..hook_protocol import HookExecutionError, is_online_hook_command, parse_online_hook_error
+from . import document_conversion
+from ..deterministic_processor import process as run_deterministic_processor
+from ..llm.router import request as request_llm
+from ..llm.errors import LLMProjectConfigurationError, legacy_command_migration_message
 from ..runtime_env import build_doctor_payload, command_exists, load_simple_yaml
 
-AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
+AUTOMATION_STRATEGIES = {"safe_auto", "llm_assisted", "deterministic", "disabled"}
+AUTOMATION_LLM_TASKS = {
+    "review_auto": "review_auto_decision",
+    "image_to_text": "describe_image",
+    "stable_promotion": "claim_stable_promotion",
+    "concept_candidate_review": "review_concept_candidate",
+}
 WORKSPACE_SCHEMA_VERSION = "v1"
+NORMALIZER_VERSION = "normalize_v2"
 MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 DOCX_NAMESPACES = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -217,62 +228,40 @@ def load_automation_target_config(config: dict, target_name: str) -> dict:
 
     inherited_strategy = str(automation_config.get("mode", "safe_auto")).strip() or "safe_auto"
     strategy = str(target_config.get("strategy", inherited_strategy)).strip() or inherited_strategy
+    legacy_command = normalize_command_config(target_config.get("command", []))
+    if strategy == "agent_assisted" or legacy_command:
+        raise LLMProjectConfigurationError(
+            legacy_command_migration_message(
+                location=f"automation.{target_name}",
+                command=legacy_command,
+            ),
+            config_path="config/project.yml",
+        )
+    strategy = os.environ.get("MYAGENTWIKI_LLM_MODE", strategy).strip() or strategy
     if strategy not in AUTOMATION_STRATEGIES:
-        strategy = "safe_auto"
+        raise LLMProjectConfigurationError(
+            f"Unsupported strategy `{strategy}` at `automation.{target_name}`.",
+            config_path="config/project.yml",
+        )
+    expected_task_name = AUTOMATION_LLM_TASKS.get(target_name)
+    configured_task_name = str(target_config.get("task_name", "")).strip()
+    if strategy == "llm_assisted" and (
+        expected_task_name is None or configured_task_name != expected_task_name
+    ):
+        raise LLMProjectConfigurationError(
+            f"`automation.{target_name}.task_name` must be `{expected_task_name}` for `llm_assisted`.",
+            config_path="config/project.yml",
+        )
 
-    command = normalize_command_config(target_config.get("command", []))
     timeout_seconds = max(coerce_int(target_config.get("timeout_seconds", 45), 45), 5)
     min_confidence = min(max(coerce_float(target_config.get("min_confidence", 0.8), 0.8), 0.0), 1.0)
     return {
         "strategy": strategy,
-        "command": command,
         "timeout_seconds": timeout_seconds,
         "min_confidence": min_confidence,
-        "enabled": strategy == "agent_assisted" and bool(command),
+        "task_name": configured_task_name or expected_task_name,
+        "enabled": strategy in {"llm_assisted", "deterministic"},
     }
-
-
-def run_json_automation_command(
-    target: Path,
-    command: list[str],
-    payload: dict,
-    timeout_seconds: int,
-) -> dict | None:
-    if not command:
-        return None
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=target,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-    if completed.returncode != 0:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def normalize_text_content(source_type: str, raw_text: str) -> str:
@@ -336,7 +325,7 @@ def normalize_markdown_or_text_record(
         "content_format": "markdown",
         "raw_hash": source_record["source_hash"],
         "normalized_hash": normalized_hash,
-        "normalizer_version": "normalize_v1",
+        "normalizer_version": NORMALIZER_VERSION,
         "document_kind": "note",
         "structure_quality": "unknown",
         "chunk_strategy_hint": "heading_first",
@@ -1349,8 +1338,8 @@ def enrich_markdown_with_embedded_images(
     }
 
 
-def normalize_agent_assisted_image_result(hook_result: dict | None, min_confidence: float) -> tuple[str, dict]:
-    if not isinstance(hook_result, dict):
+def normalize_llm_assisted_image_result(model_result: dict | None, min_confidence: float) -> tuple[str, dict]:
+    if not isinstance(model_result, dict):
         return "", {
             "used": False,
             "ok": False,
@@ -1360,9 +1349,9 @@ def normalize_agent_assisted_image_result(hook_result: dict | None, min_confiden
             "reason": "image_to_text_unavailable",
             "summary": "",
         }
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
-    reason = str(hook_result.get("reason", "")).strip() or "image_to_text_agent_result"
-    warnings = [str(item).strip() for item in hook_result.get("warnings", []) if str(item).strip()]
+    confidence = coerce_float(model_result.get("confidence", 0.0), 0.0)
+    reason = str(model_result.get("reason", "")).strip() or "image_to_text_llm_result"
+    warnings = [str(item).strip() for item in model_result.get("warnings", []) if str(item).strip()]
     if confidence < min_confidence:
         return "", {
             "used": True,
@@ -1371,10 +1360,10 @@ def normalize_agent_assisted_image_result(hook_result: dict | None, min_confiden
             "warnings": sorted(set([*warnings, "image_to_text_low_confidence"])),
             "confidence": confidence,
             "reason": reason,
-            "summary": normalize_binary_snippet_text(str(hook_result.get("summary", ""))),
+            "summary": normalize_binary_snippet_text(str(model_result.get("summary", ""))),
         }
-    extracted_text = normalize_binary_snippet_text(str(hook_result.get("extracted_text") or hook_result.get("text") or ""))
-    summary = normalize_binary_snippet_text(str(hook_result.get("summary", "")))
+    extracted_text = normalize_binary_snippet_text(str(model_result.get("extracted_text") or model_result.get("text") or ""))
+    summary = normalize_binary_snippet_text(str(model_result.get("summary", "")))
     combined_text = extracted_text
     if summary and summary not in combined_text:
         combined_text = f"摘要: {summary}\n\n{extracted_text}".strip() if extracted_text else summary
@@ -1402,7 +1391,7 @@ def normalize_agent_assisted_image_result(hook_result: dict | None, min_confiden
     }
 
 
-def run_agent_assisted_image_to_text(
+def run_llm_assisted_image_to_text(
     target: Path | None,
     raw_path: Path,
     image_context: dict | None = None,
@@ -1425,7 +1414,7 @@ def run_agent_assisted_image_to_text(
             "quality": "disabled",
             "warnings": [],
             "confidence": 0.0,
-            "reason": "image_to_text_agent_disabled",
+            "reason": "image_to_text_llm_disabled",
             "summary": "",
         }
     payload = {
@@ -1434,13 +1423,17 @@ def run_agent_assisted_image_to_text(
         "image_name": raw_path.name,
         "image_context": image_context or {},
     }
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=payload,
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
-    )
-    return normalize_agent_assisted_image_result(hook_result, automation_config.get("min_confidence", 0.8))
+    if automation_config.get("strategy") == "deterministic":
+        model_result = run_deterministic_processor(payload)
+    else:
+        model_result = request_llm(
+            workspace=target,
+            task_name="describe_image",
+            payload=payload,
+            image_paths=[raw_path],
+            timeout_seconds=automation_config.get("timeout_seconds"),
+        )
+    return normalize_llm_assisted_image_result(model_result, automation_config.get("min_confidence", 0.8))
 
 
 def run_tesseract_ocr(raw_path: Path) -> tuple[str, dict]:
@@ -1555,7 +1548,7 @@ def convert_image_to_markdown(
     }
     should_try_llm = not ocr_text or ocr_result.get("quality") in {"missing", "failed", "partial", "empty"}
     if should_try_llm:
-        llm_text, llm_result = run_agent_assisted_image_to_text(
+        llm_text, llm_result = run_llm_assisted_image_to_text(
             target=target,
             raw_path=raw_path,
             image_context=image_context,
@@ -1608,7 +1601,7 @@ def convert_image_to_markdown(
     if ocr_result.get("used"):
         extraction_method += "+tesseract"
     if llm_result.get("used"):
-        extraction_method += "+agent_assisted"
+        extraction_method += "+llm_assisted"
     return markdown, {
         "content_format": "markdown",
         "extraction_method": extraction_method,
@@ -1637,7 +1630,7 @@ def convert_unknown_source_to_placeholder(raw_path: Path, source_type: str) -> t
     }
 
 
-def convert_source_to_normalized_markdown(raw_path: Path, source_type: str) -> tuple[str, dict]:
+def convert_source_with_legacy_fallback(raw_path: Path, source_type: str) -> tuple[str, dict]:
     if source_type in {"markdown", "plain_text"}:
         raw_text = raw_path.read_text(encoding="utf-8")
         return normalize_text_content(source_type, raw_text), {
@@ -1657,6 +1650,53 @@ def convert_source_to_normalized_markdown(raw_path: Path, source_type: str) -> t
     if source_type == "image":
         return convert_image_to_markdown(raw_path)
     return convert_unknown_source_to_placeholder(raw_path, source_type)
+
+
+def convert_source_to_normalized_markdown(raw_path: Path, source_type: str) -> tuple[str, dict]:
+    if source_type in {"markdown", "plain_text"}:
+        return convert_source_with_legacy_fallback(raw_path, source_type)
+    if source_type == "image":
+        return convert_image_to_markdown(raw_path)
+
+    try:
+        return document_conversion.convert_local_document(raw_path)
+    except Exception as exc:
+        markdown, metadata = convert_source_with_legacy_fallback(raw_path, source_type)
+        warnings = [f"markitdown_conversion_failed:{type(exc).__name__}"]
+        warnings.extend(metadata.get("warnings", []))
+        metadata["warnings"] = warnings
+        fallback_method = str(metadata.get("extraction_method", "python_only"))
+        metadata["extraction_method"] = f"markitdown_failed+{fallback_method}"
+        location_map = dict(metadata.get("location_map", {}))
+        location_map["markitdown"] = {
+            "status": "failed",
+            "converter": "microsoft/markitdown",
+            "converter_version": document_conversion.get_markitdown_version(),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)[:500],
+        }
+        metadata["location_map"] = location_map
+        return markdown, metadata
+
+
+def normalized_record_is_current(normalized_record: dict) -> bool:
+    if normalized_record.get("normalizer_version") != NORMALIZER_VERSION:
+        return False
+
+    extraction_method = str(normalized_record.get("extraction_method", ""))
+    if not extraction_method.startswith("markitdown"):
+        return True
+
+    location_map = normalized_record.get("location_map", {})
+    if extraction_method == "markitdown":
+        markitdown_metadata = location_map
+    else:
+        markitdown_metadata = location_map.get("markitdown", {})
+    return (
+        markitdown_metadata.get("converter") == "microsoft/markitdown"
+        and markitdown_metadata.get("converter_version")
+        == document_conversion.get_markitdown_version()
+    )
 
 
 def build_failed_conversion_placeholder(raw_path: Path, source_type: str, exc: Exception) -> tuple[str, dict]:
@@ -1719,7 +1759,7 @@ def normalize_source_record(
         "content_format": metadata.get("content_format", "markdown"),
         "raw_hash": source_record["source_hash"],
         "normalized_hash": normalized_hash,
-        "normalizer_version": "normalize_v1",
+        "normalizer_version": NORMALIZER_VERSION,
         "document_kind": "note",
         "structure_quality": "unknown",
         "chunk_strategy_hint": "heading_first",

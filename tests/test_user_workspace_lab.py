@@ -14,7 +14,7 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "myagentwiki.cli", *args, "--json"],
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": "deterministic"},
         capture_output=True,
         text=True,
         check=True,
@@ -38,7 +38,7 @@ def run_lab(tmp_path: Path, scenario: str) -> dict:
             "--clean",
         ],
         cwd=str(REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": "deterministic"},
         capture_output=True,
         text=True,
         check=True,

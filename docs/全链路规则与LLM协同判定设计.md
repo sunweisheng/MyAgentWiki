@@ -71,11 +71,11 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 - 灰区候选的 accept / reject / rename / reroute
 - grounded 的可读化改写
 
-当前实现默认使用包内保守 `agent_hook`。需要增强效果时，优先通过 `myagentwiki.agent_cli_hook` 调用 Codex CLI；CLI 未登录、模型不可用、超时或输出无法解析时，系统回退到保守路径。只有用户明确提供自己的 `config/llm.local.yml` 时，才使用 `myagentwiki.agent_online_hook` 直连远程模型；该路径支持 `responses / chat_completions`，配置、鉴权或协议错误会明确报错。
+当前实现把真实模型请求统一交给 LLM 调度器：在线客户端是主线路，Codex CLI 客户端是备用线路。在线配置缺失、遇到不可重试错误，或重试后仍失败时，调度器只为当前逻辑请求切换到 CLI；CLI 也失败时，当前命令明确失败，不使用确定性结果掩盖错误。需要完全离线时，必须在任务配置中显式选择 `deterministic`。
 
-### 3. 语义分析应该作为正式阶段，而不是零散 hook
+### 3. 语义分析应该作为正式阶段，而不是零散外挂点
 
-如果把 LLM 只当作若干 hook，系统会长期面临几个问题：
+如果把 LLM 只当作若干零散外挂点，系统会长期面临几个问题：
 
 - 同一类判断散落在多个命令里
 - 不同命令对同一问题使用不同话语体系
@@ -122,7 +122,7 @@ LLM 不应作为事实来源，也不应作为任意文本重写器。
 
 - 默认优先批量调用 LLM
 - 以同一任务类型、同一阶段、同一上下文模板为单位组织批次
-- 输出必须满足严格 JSON schema
+- 输出必须通过任务专属 Function Calling 合同和严格 JSON Schema
 
 这样做的原因是：
 
@@ -213,7 +213,8 @@ LLM 只能在已有 `normalized / structure_blocks / evidence_blocks / knowledge
 
 - 各类语义分析阶段的输入 schema 与输出 schema 的稳定化说明
 - 批调度器如何分桶、分片、缓存、重试和预算控制
-- `abstain` 与 fallback 的标准协议
+- `abstain`、主备切换和命令失败的标准协议
+- 十个任务专属 Function Calling 合同的版本维护
 - 语义决策如何参与 lint、review 和 page rebuild
 - 如何把 warning 级 semantic brakes 展示给用户，而不是只留在 JSON / lint report
 

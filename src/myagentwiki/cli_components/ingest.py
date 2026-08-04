@@ -116,6 +116,7 @@ class IngestCliDeps:
     build_source_version_group: object
     append_jsonl: object
     normalize_source_record: object
+    normalized_record_is_current: object
     load_normalized_records: object
     append_error_record: object
     run_semantic_batch_task: object
@@ -280,6 +281,7 @@ def build_ingest_cli_deps(provider: Any) -> IngestCliDeps:
         build_source_version_group=provider.build_source_version_group,
         append_jsonl=provider.append_jsonl,
         normalize_source_record=provider.normalize_source_record,
+        normalized_record_is_current=provider.normalized_record_is_current,
         load_normalized_records=lambda normalized_path: repo_load_normalized_records(
             normalized_path,
             load_jsonl=load_jsonl,
@@ -516,6 +518,7 @@ def build_ingest_registration_deps(deps: IngestCliDeps) -> IngestRegistrationDep
         load_source_records=deps.load_source_records,
         load_normalized_records=deps.load_normalized_records,
         normalize_source_record=deps.normalize_source_record,
+        normalized_record_is_current=deps.normalized_record_is_current,
         append_error_record=deps.append_error_record,
         run_semantic_batch_task=deps.run_semantic_batch_task,
         apply_document_analysis_decisions_to_normalized_records=deps.apply_document_analysis_decisions_to_normalized_records,

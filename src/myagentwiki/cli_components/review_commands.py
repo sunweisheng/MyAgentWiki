@@ -33,7 +33,7 @@ class ReviewCliDeps:
     propose_review_auto_action: object
     is_actionable_review_record: object
     claim_record_is_safe_auto_stable_candidate: object
-    maybe_get_agent_assisted_stable_promotion: object
+    maybe_get_llm_assisted_stable_promotion: object
     utc_now_iso: object
     build_review_auto_escalation_entry: object
     build_review_auto_agent_handoff: object
@@ -138,7 +138,7 @@ def command_review_auto(deps: ReviewCliDeps, args: argparse.Namespace) -> Comman
         is_actionable_review_record=deps.is_actionable_review_record,
         apply_review_action=deps.apply_review_action,
         claim_record_is_safe_auto_stable_candidate=deps.claim_record_is_safe_auto_stable_candidate,
-        maybe_get_agent_assisted_stable_promotion=deps.maybe_get_agent_assisted_stable_promotion,
+        maybe_get_llm_assisted_stable_promotion=deps.maybe_get_llm_assisted_stable_promotion,
         utc_now_iso=deps.utc_now_iso,
         rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
         build_review_auto_escalation_entry=deps.build_review_auto_escalation_entry,
@@ -222,7 +222,7 @@ def run_post_ingest_review_auto(deps: ReviewCliDeps, target: Path) -> dict:
         is_actionable_review_record=deps.is_actionable_review_record,
         apply_review_action=deps.apply_review_action,
         claim_record_is_safe_auto_stable_candidate=deps.claim_record_is_safe_auto_stable_candidate,
-        maybe_get_agent_assisted_stable_promotion=deps.maybe_get_agent_assisted_stable_promotion,
+        maybe_get_llm_assisted_stable_promotion=deps.maybe_get_llm_assisted_stable_promotion,
         utc_now_iso=deps.utc_now_iso,
         rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
         build_review_auto_escalation_entry=deps.build_review_auto_escalation_entry,

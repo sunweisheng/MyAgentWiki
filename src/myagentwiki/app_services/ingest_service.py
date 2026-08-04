@@ -120,6 +120,7 @@ class IngestRegistrationDeps:
     load_source_records: Callable[[Path], list[dict]]
     load_normalized_records: Callable[[Path], list[dict]]
     normalize_source_record: Callable[..., dict | None]
+    normalized_record_is_current: Callable[[dict], bool]
     append_error_record: Callable[..., dict]
     run_semantic_batch_task: Callable[..., None]
     apply_document_analysis_decisions_to_normalized_records: Callable[..., list[dict]]
@@ -532,7 +533,17 @@ def run_ingest_registration_and_normalization_stage(
     for file_path in deps.collect_files(raw_dir):
         source_hash = deps.file_sha256(file_path)
         relative_path = os.path.relpath(file_path, start=target).replace(os.sep, "/")
-        if source_hash in existing_by_hash:
+        previous_path_record = latest_source_by_path.get(relative_path)
+        previous_normalized_record = (
+            existing_normalized.get(previous_path_record["source_id"])
+            if previous_path_record is not None
+            else None
+        )
+        needs_normalizer_refresh = (
+            previous_normalized_record is not None
+            and not deps.normalized_record_is_current(previous_normalized_record)
+        )
+        if source_hash in existing_by_hash and not needs_normalizer_refresh:
             skipped_sources.append({
                 "path": str(file_path),
                 "source_hash": source_hash,
@@ -541,7 +552,6 @@ def run_ingest_registration_and_normalization_stage(
             })
             continue
 
-        previous_path_record = latest_source_by_path.get(relative_path)
         if previous_path_record is not None:
             source_id = previous_path_record["source_id"]
             version_group = (
@@ -660,7 +670,11 @@ def run_ingest_registration_and_normalization_stage(
         if normalized_record is None:
             continue
 
-        deps.append_jsonl(normalized_path, normalized_record)
+        deps.replace_source_scoped_jsonl_records(
+            normalized_path,
+            source_record["source_id"],
+            [normalized_record],
+        )
         normalized_sources.append(normalized_record)
 
         if normalized_record["extraction_quality"] in {"failed", "poor", "partial"}:

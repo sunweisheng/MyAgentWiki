@@ -30,7 +30,7 @@ def run_review_auto_service(
     is_actionable_review_record: Callable[[dict], bool],
     apply_review_action: Callable[..., dict],
     claim_record_is_safe_auto_stable_candidate: Callable[[dict, dict[str, dict]], tuple[bool, str | None]],
-    maybe_get_agent_assisted_stable_promotion: Callable[..., tuple[bool, str | None]],
+    maybe_get_llm_assisted_stable_promotion: Callable[..., tuple[bool, str | None]],
     utc_now_iso: Callable[[], str],
     rebuild_review_affected_pages: Callable[[Path, dict[str, dict], dict[str, dict]], None],
     build_review_auto_escalation_entry: Callable[[dict, dict, dict[str, dict]], dict],
@@ -135,14 +135,14 @@ def run_review_auto_service(
         for claim_record in sorted(live_claims_by_id.values(), key=lambda item: item["claim_id"]):
             is_safe, reason = claim_record_is_safe_auto_stable_candidate(claim_record, live_reviews_by_id)
             if not is_safe:
-                promoted_by_hook, hook_reason = maybe_get_agent_assisted_stable_promotion(
+                promoted_by_llm, llm_reason = maybe_get_llm_assisted_stable_promotion(
                     target=target,
                     claim_record=claim_record,
                     automation_config=stable_automation_config,
                 )
-                if not promoted_by_hook:
+                if not promoted_by_llm:
                     continue
-                reason = hook_reason
+                reason = llm_reason
             claim_record["status"] = "stable"
             claim_record["review_reason"] = None
             claim_record["updated_at"] = utc_now_iso()

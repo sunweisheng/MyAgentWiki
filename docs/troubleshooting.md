@@ -16,7 +16,7 @@
 说明：
 
 - 当前运行基线是 `Python 3.12+`
-- 这样可以兼顾 `.docx` / `.xlsx` / `pypdf` 依赖稳定性与 Windows 兼容性
+- 这样可以兼顾 MarkItDown 及其 DOCX、XLSX、PPTX、PDF 依赖与 Windows 兼容性
 
 ## 2. `bootstrap` 安装依赖失败
 
@@ -79,16 +79,28 @@
 
 说明：
 
-- 当前实现对 `.doc` / `.xls` 采用纯 Python 保守 fallback
+- 当前实现会先调用 MarkItDown；只有失败时才采用纯 Python 保守 fallback
 - 目标是先保留可读文本片段与基础容器信息
 - 不保证复杂表格、版面、公式和批注高保真恢复
 
 建议：
 
 - 有条件时优先把老格式转换成 `.docx` / `.xlsx`
-- 或安装 `libreoffice` 作为后续增强路径
 
-## 6. `query` 没有命中结果
+## 6. 出现 `markitdown_conversion_failed` 告警
+
+说明：
+
+- MarkItDown 没有成功转换该文件，系统已经尝试旧转换器或生成占位文档
+- 具体错误类型记录在 `state/error_log.jsonl` 和 `state/normalized.jsonl` 的 `warnings / location_map.markitdown` 中
+
+处理：
+
+1. 运行 `python3 -m myagentwiki doctor`，确认 MarkItDown 及文档格式依赖完整。
+2. 重新执行 `python -m pip install -e .` 修复依赖。
+3. 检查原文件是否损坏、加密或使用 MarkItDown 暂不支持的老格式。
+
+## 7. `query` 没有命中结果
 
 先检查：
 
@@ -104,7 +116,7 @@
 3. 查看 `indexes/aliases.json` 是否已有对应 alias / canonical
 4. 如果你已经命中到正确页面，但还想一次拿到更完整的 Claim / Chunk / 来源路径，改用 `--reading-depth deep`
 
-## 7. 出现 alias conflict review
+## 8. 出现 alias conflict review
 
 现象：
 
@@ -157,7 +169,7 @@
 - 如果同一组内容同时挂着多个 live 自动页，应优先把它理解为页面生命周期没有完全收口，而不是预期中的长期并行结构
 - 如果不再需要的自动页面已经退场，只剩 `guide / example / reference` 之类的新页型，但 `lint` 仍提示 warning，那么更可能是这组 claim 本身确实处在语义灰区，需要继续调整 claim 状态、角色或页面归属
 - 如果没有新 source，但 claim 的语义字段变了，重新跑 `ingest` 后页面变化是正常的；当前系统会把这种“语义账本变化”也视作上游变化，而不是简单跳过
-- 如果看到 `claim_semantic_risk_flags_reviewed`，表示语义决策账本中的某些 claim 带有 `ambiguous` 风险标记；这不是 ingest 失败，而是在提醒对应语义判断仍需复核。当前包内保守 hook 不再因单个中文关键词自动写入旧的 `ambiguous_case_keyword / ambiguous_reference_keyword / ambiguous_timeline_keyword / ambiguous_howto_keyword`
+- 如果看到 `claim_semantic_risk_flags_reviewed`，表示语义决策账本中的某些 claim 带有 `ambiguous` 风险标记；这不是 ingest 失败，而是在提醒对应语义判断仍需复核。确定性处理器不再因单个中文关键词自动写入旧的 `ambiguous_case_keyword / ambiguous_reference_keyword / ambiguous_timeline_keyword / ambiguous_howto_keyword`
 - 如果看到 `semantic_page_intent_brakes_reviewed`，通常表示某个 specialized page intent 因组级证据不足被降级；优先检查 `state/pages.jsonl` 的 `page_route.route_reason` 和对应 `state/semantic_decisions.jsonl`，不要直接手改 wiki 页面
 
 建议：
@@ -199,3 +211,38 @@ py -3.12 -m venv .venv
 现象：
 
 - `query`、`ingest`、`lint`、`review-apply` 等写链路或读链路命令直接报 schema guard
+
+处理：
+
+- 确认工作区来自当前版本的 `init` 模板
+- 按错误提示补齐或迁移 `config/project.yml`，不要直接跳过检查改写账本
+
+## 12. `llm_request_failed`
+
+含义：
+
+- 在线主线路和 Codex CLI 备用线路都没有得到通过合同检查的结果
+- 当前命令会返回非零状态，不写空决策，也不会自动切换到确定性处理器
+- 已经完成并落盘的前序阶段仍然保留，可以修复线路后按现有状态恢复机制重跑
+
+优先检查：
+
+1. 查看 `logs/llm_requests.jsonl` 中对应 `request_id` 的线路、尝试次数、错误类型和 HTTP 状态。该日志不包含 API Key、完整正文、图片内容或完整原始输出。
+2. 如在线线路报配置错误，检查工作区私有的 `config/llm.local.yml`；不要输出或提交其中的 API Key。
+3. 如在线线路报 403、404 等不可重试错误，它只会请求一次并立即切到 CLI，这属于预期行为。
+4. 如在线线路报 429、5xx、超时或结果合同错误，它最多执行三次，然后切到 CLI。
+5. 检查 `codex` 是否可执行、是否已登录；必要时核对 `MYAGENTWIKI_CODEX_BIN`、`MYAGENTWIKI_CODEX_MODEL`、`MYAGENTWIKI_CODEX_TIMEOUT_SECONDS`。
+
+可用调试命令：
+
+```bash
+python3 scripts/debug_llm_routing.py contract --task claim_role
+python3 scripts/debug_llm_routing.py simulate --scenario http_404_to_cli
+python3 scripts/debug_llm_routing.py live --workspace /path/to/workspace --task claim_role --payload /path/to/payload.json
+```
+
+需要完全离线运行时，应在对应任务配置中显式使用 `deterministic`。不要把它当成线路失败后的自动降级。
+
+## 13. `llm_configuration_migration_required`
+
+这表示旧工作区仍在任务下配置 Python `command`。当前版本不执行任务级命令，也不会猜测自定义集成的意图。按错误中的一一对应建议删除旧字段，选择 `llm_assisted` 或 `deterministic`，再重跑原命令。

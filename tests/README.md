@@ -26,6 +26,16 @@
   - 用户工程测试实验场回归测试
   - 覆盖 `tests/fixtures/user_project_lab/` 定义与 `scripts/run_user_workspace_lab.py` 本地运行入口
   - 覆盖基线主链路、原始资料更新 / 新增、Markdown 表格与本地图片混排、页面关联扩展读取
+- `test_llm_contracts.py` / `test_llm_repair.py`
+  - 十个任务的函数名、上下文、严格 Schema、业务边界和 JSON 修复测试
+- `test_llm_online_client.py` / `test_llm_cli_client.py`
+  - 两种在线 API 风格的强制非流式 Function Calling，以及 CLI 输出合同、图片传入和客户端关闭测试
+- `test_llm_router.py`
+  - 在线最多三次、不可重试错误立即切换、CLI 只执行一次、主备失败和脱敏诊断测试
+- `test_deterministic_processor.py`
+  - 显式确定性模式及配置化规则测试
+- `test_debug_llm_routing.py`
+  - `contract / simulate / live` 调试入口的离线回归测试
 
 ## 用户工程实验场
 
@@ -41,6 +51,14 @@
 ```bash
 python3 scripts/run_user_workspace_lab.py --clean --scenario baseline
 python3 scripts/run_user_workspace_lab.py --clean --scenario update_raw
+```
+
+实验场默认注入本地确定性测试模式，不依赖个人在线 API 或 Codex 登录。需要额外检查真实主备线路时，显式增加 `--live-llm-check`。
+
+LLM 专项测试可单独执行：
+
+```bash
+python3 -m pytest tests/test_llm_*.py tests/test_debug_llm_routing.py tests/test_deterministic_processor.py -q
 ```
 
 默认会在本地生成完整：

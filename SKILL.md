@@ -25,10 +25,10 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 
 - 固定流程优先走 CLI，不直接批量改写 `state/*.jsonl`
 - `raw/` 视为原始资料区，不自动改写
-- 若用户只是想先正常使用，默认不要求配置在线模型；优先走包内保守 `agent_hook`
-- 若用户想增强 `ingest / review / grounded` 改写效果，优先建议配置 `agent_cli_hook`，不默认先推 `agent_online_hook`
-- 只有当工作区脚本明确将调用远程 LLM（例如某些任务配置为 `myagentwiki.agent_online_hook`）时，Codex / Claude Code 才应要求当前用户先单独配置 `config/llm.local.yml`
-- 这份 `config/llm.local.yml` 必须是当前用户自己的 API 配置；若缺失、不可读或明显未填完，应明确告诉用户必须先补这份配置，不要把 API-Key 写入 `config/project.yml`、命令参数或任何会进 Git 的文件
+- 已实现的 LLM 任务默认由调度器先请求在线客户端，在线配置缺失或请求失败时自动改用 Codex CLI 客户端
+- 两条线路都失败时当前命令应失败，不返回空结果，也不调用确定性处理器掩盖错误；已完成阶段按现有状态恢复机制保留
+- `config/llm.local.yml` 只保存当前用户自己的在线模型配置，不应提交到 Git；缺失时允许直接尝试 CLI 备用线路
+- 完全离线执行时，应在任务配置或本地测试环境中显式选择 `deterministic`
 - 若用户当前点名的目录里已经存在顶层 `raw/`，默认就把这个顶层 `raw/` 当作唯一资料源；不要再主动把同目录下的 `Clippings/`、其他顶层目录或零散文件并入同一次初始化/导入，除非用户明确要求合并
 - 若用户已明确给出 `raw/` 路径，初始化或导入前的默认检查范围也应限制在该 `raw/` 内；不要为了确认导入范围先读取它的父目录、其他兄弟目录或整库内容，除非用户明确要求扩大发现范围
 - 若用户还没有明确给出 `raw/` 路径，也不要主动探测附近已有工作区、兄弟目录或父目录来替用户猜测来源；默认只围绕用户当前点名的目录继续，必须改目录结构时先明确说明假设

@@ -19,7 +19,11 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "MYAGENTWIKI_LLM_MODE": "deterministic",
+        },
         capture_output=True,
         text=True,
         check=True,

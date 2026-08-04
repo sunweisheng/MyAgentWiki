@@ -89,8 +89,8 @@ def build_review_auto_decision_payload(
     return payload
 
 
-def normalize_review_auto_hook_plan(
-    hook_result: dict,
+def normalize_review_auto_llm_plan(
+    model_result: dict,
     review_record: dict,
     base_plan: dict,
     live_claims_by_id: dict[str, dict],
@@ -99,15 +99,15 @@ def normalize_review_auto_hook_plan(
     coerce_float: object,
     choose_auto_merge_primary_claim_id: object,
 ) -> dict | None:
-    decision = str(hook_result.get("decision", "")).strip().lower()
+    decision = str(model_result.get("decision", "")).strip().lower()
     if decision != "auto_apply":
         return None
 
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
+    confidence = coerce_float(model_result.get("confidence", 0.0), 0.0)
     if confidence < min_confidence:
         return None
 
-    action = str(hook_result.get("action", "")).strip()
+    action = str(model_result.get("action", "")).strip()
     allowed_actions = set(review_record.get("allowed_actions", []))
     if action not in allowed_actions:
         return None
@@ -118,17 +118,17 @@ def normalize_review_auto_hook_plan(
     plan.update({
         "decision": "auto_apply",
         "action": action,
-        "reason": str(hook_result.get("reason", "agent_hook_auto_apply")).strip() or "agent_hook_auto_apply",
+        "reason": str(model_result.get("reason", "llm_auto_apply")).strip() or "llm_auto_apply",
         "confidence": confidence,
     })
 
     if action in {"merge", "archive_one"}:
-        primary_claim_id = str(hook_result.get("primary_claim_id", "")).strip()
+        primary_claim_id = str(model_result.get("primary_claim_id", "")).strip()
         if primary_claim_id not in candidate_claim_ids:
             return None
         plan["primary_claim_id"] = primary_claim_id
         if action == "merge":
-            secondary_claim_id = str(hook_result.get("secondary_claim_id", "")).strip()
+            secondary_claim_id = str(model_result.get("secondary_claim_id", "")).strip()
             if secondary_claim_id not in candidate_claim_ids or secondary_claim_id == primary_claim_id:
                 ranked_primary = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
                 if ranked_primary is None:
@@ -141,10 +141,10 @@ def normalize_review_auto_hook_plan(
                 plan["primary_claim_id"] = primary_claim_id
             plan["secondary_claim_id"] = secondary_claim_id
     elif action in {"assign_alias", "remove_alias"}:
-        primary_page_id = str(hook_result.get("primary_page_id", "")).strip()
+        primary_page_id = str(model_result.get("primary_page_id", "")).strip()
         if primary_page_id not in candidate_page_ids:
             return None
-        alias_value = str(hook_result.get("alias_value", "")).strip()
+        alias_value = str(model_result.get("alias_value", "")).strip()
         if not alias_value:
             evidence = review_record.get("evidence", [])
             alias_value = str(evidence[0].get("alias", "")).strip() if evidence else ""
@@ -155,7 +155,7 @@ def normalize_review_auto_hook_plan(
     return plan
 
 
-def maybe_get_agent_assisted_review_plan(
+def maybe_get_llm_assisted_review_plan(
     target: Path,
     review_record: dict,
     live_claims_by_id: dict[str, dict],
@@ -163,8 +163,9 @@ def maybe_get_agent_assisted_review_plan(
     base_plan: dict,
     *,
     build_review_auto_decision_payload: object,
-    run_json_automation_command: object,
-    normalize_review_auto_hook_plan: object,
+    request_llm: object,
+    run_deterministic_processor: object,
+    normalize_review_auto_llm_plan: object,
 ) -> dict | None:
     if not automation_config.get("enabled"):
         return None
@@ -174,17 +175,17 @@ def maybe_get_agent_assisted_review_plan(
         live_claims_by_id=live_claims_by_id,
         target=target,
     )
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=payload,
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
-    )
-    if hook_result is None:
-        return None
-
-    return normalize_review_auto_hook_plan(
-        hook_result=hook_result,
+    if automation_config.get("strategy") == "deterministic":
+        model_result = run_deterministic_processor(payload)
+    else:
+        model_result = request_llm(
+            workspace=target,
+            task_name="review_auto_decision",
+            payload=payload,
+            timeout_seconds=automation_config.get("timeout_seconds"),
+        )
+    return normalize_review_auto_llm_plan(
+        model_result=model_result,
         review_record=review_record,
         base_plan=base_plan,
         live_claims_by_id=live_claims_by_id,
@@ -258,32 +259,34 @@ def build_stable_promotion_payload(claim_record: dict) -> dict:
     }
 
 
-def maybe_get_agent_assisted_stable_promotion(
+def maybe_get_llm_assisted_stable_promotion(
     target: Path,
     claim_record: dict,
     automation_config: dict,
     *,
-    run_json_automation_command: object,
+    request_llm: object,
+    run_deterministic_processor: object,
     build_stable_promotion_payload: object,
     coerce_float: object,
 ) -> tuple[bool, str | None]:
     if not automation_config.get("enabled"):
         return False, None
 
-    hook_result = run_json_automation_command(
-        target=target,
-        command=automation_config.get("command", []),
-        payload=build_stable_promotion_payload(claim_record),
-        timeout_seconds=automation_config.get("timeout_seconds", 45),
-    )
-    if hook_result is None:
-        return False, None
-
-    decision = str(hook_result.get("decision", "")).strip().lower()
-    confidence = coerce_float(hook_result.get("confidence", 0.0), 0.0)
+    payload = build_stable_promotion_payload(claim_record)
+    if automation_config.get("strategy") == "deterministic":
+        model_result = run_deterministic_processor(payload)
+    else:
+        model_result = request_llm(
+            workspace=target,
+            task_name="claim_stable_promotion",
+            payload=payload,
+            timeout_seconds=automation_config.get("timeout_seconds"),
+        )
+    decision = str(model_result.get("decision", "")).strip().lower()
+    confidence = coerce_float(model_result.get("confidence", 0.0), 0.0)
     if decision != "promote" or confidence < automation_config.get("min_confidence", 0.8):
         return False, None
-    reason = str(hook_result.get("reason", "agent_hook_promoted_to_stable")).strip() or "agent_hook_promoted_to_stable"
+    reason = str(model_result.get("reason", "llm_promoted_to_stable")).strip() or "llm_promoted_to_stable"
     return True, reason
 
 
@@ -295,7 +298,7 @@ def propose_review_auto_action(
     *,
     review_display_id: object,
     is_actionable_review_record: object,
-    maybe_get_agent_assisted_review_plan: object,
+    maybe_get_llm_assisted_review_plan: object,
     choose_auto_merge_primary_claim_id: object,
 ) -> dict:
     review_id = review_record["review_id"]
@@ -355,7 +358,7 @@ def propose_review_auto_action(
             })
             return plan
         plan["reason"] = "alias_conflict_needs_human_owner_choice"
-        agent_plan = maybe_get_agent_assisted_review_plan(
+        agent_plan = maybe_get_llm_assisted_review_plan(
             target=target,
             review_record=review_record,
             live_claims_by_id=live_claims_by_id,
@@ -369,7 +372,7 @@ def propose_review_auto_action(
         primary_claim_id = choose_auto_merge_primary_claim_id(candidate_claim_ids, live_claims_by_id)
         if primary_claim_id is None:
             plan["reason"] = "duplicate_review_needs_human_merge_choice"
-            agent_plan = maybe_get_agent_assisted_review_plan(
+            agent_plan = maybe_get_llm_assisted_review_plan(
                 target=target,
                 review_record=review_record,
                 live_claims_by_id=live_claims_by_id,
@@ -391,7 +394,7 @@ def propose_review_auto_action(
         return plan
 
     if kind == "claim_conflict":
-        agent_plan = maybe_get_agent_assisted_review_plan(
+        agent_plan = maybe_get_llm_assisted_review_plan(
             target=target,
             review_record=review_record,
             live_claims_by_id=live_claims_by_id,
@@ -400,7 +403,7 @@ def propose_review_auto_action(
         )
         return agent_plan or plan
 
-    agent_plan = maybe_get_agent_assisted_review_plan(
+    agent_plan = maybe_get_llm_assisted_review_plan(
         target=target,
         review_record=review_record,
         live_claims_by_id=live_claims_by_id,

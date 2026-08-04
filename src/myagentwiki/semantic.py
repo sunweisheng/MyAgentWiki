@@ -59,7 +59,6 @@ SEMANTIC_TASK_CONTRACTS = {
 class SemanticTaskConfig:
     task_name: str
     strategy: str
-    command: list[str]
     timeout_seconds: int
     min_confidence: float
     batch_size: int
@@ -103,7 +102,7 @@ def semantic_decision_missing_fields(task_name: str, decision: dict) -> list[str
     ]
 
 
-def normalize_semantic_hook_decision(task_name: str, raw_decision: dict) -> dict:
+def normalize_semantic_model_decision(task_name: str, raw_decision: dict) -> dict:
     decision_payload = raw_decision.get("decision")
     decision_status = str(raw_decision.get("decision_status", "")).strip().lower()
     if not decision_status:
@@ -140,13 +139,20 @@ def normalize_semantic_hook_decision(task_name: str, raw_decision: dict) -> dict
     }
 
 
-def fingerprint_payload(task_name: str, item_payloads: list[dict], prompt_version: str, schema_version: str) -> str:
+def fingerprint_payload(
+    task_name: str,
+    item_payloads: list[dict],
+    prompt_version: str,
+    schema_version: str,
+    route_identity: dict | None = None,
+) -> str:
     raw = json.dumps(
         {
             "task_name": task_name,
             "items": item_payloads,
             "prompt_version": prompt_version,
             "schema_version": schema_version,
+            "route_identity": route_identity or {},
         },
         ensure_ascii=False,
         sort_keys=True,

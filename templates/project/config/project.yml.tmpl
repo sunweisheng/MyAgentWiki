@@ -27,74 +27,68 @@ query:
   canonical_resolution: true
   preferred_language: "zh"
 
+llm:
+  contract_version: "v2"
+  routing:
+    primary: "online"
+    fallback: "cli"
+  retry:
+    online_max_retries: 2
+    backoff_seconds: [1.0, 2.0]
+    jitter_max_seconds: 0.25
+    http_statuses: [408, 409, 429]
+    http_status_min: 500
+  context:
+    document_max_chars: 24000
+    image_max_bytes: 20971520
+    image_mime_types: ["image/png", "image/jpeg", "image/webp", "image/gif"]
+  cli:
+    executable: "codex"
+    timeout_seconds: 120
+    model: ""
+    executable_env: "MYAGENTWIKI_CODEX_BIN"
+    model_env: "MYAGENTWIKI_CODEX_MODEL"
+    timeout_env: "MYAGENTWIKI_CODEX_TIMEOUT_SECONDS"
+
 semantic:
-  agent_cli_hook:
-    # 默认使用包内保守模拟器；如需通过 Codex 调用真实 LLM，把具体任务 command 改为：
-    #   - "${python_executable}"
-    #   - "-m"
-    #   - "myagentwiki.agent_cli_hook"
-    # 并设置 MYAGENTWIKI_AGENT_CLI=codex 以及对应 CLI 登录/模型环境变量。
-    provider_env: "MYAGENTWIKI_AGENT_CLI"
-    command_env: "MYAGENTWIKI_AGENT_CLI_COMMAND"
-    timeout_env: "MYAGENTWIKI_AGENT_CLI_TIMEOUT_SECONDS"
-  agent_online_hook:
-    # 如需通过你自己提供的在线模型地址调用真实 LLM，把具体任务 command 改为：
-    #   - "${python_executable}"
-    #   - "-m"
-    #   - "myagentwiki.agent_online_hook"
-    # 并在当前工作区单独创建 `config/llm.local.yml`。
-    config_path: "config/llm.local.yml"
   batch_scheduler:
     default_batch_size: 12
-    max_retries: 1
   document_analysis:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "document_analysis"
     timeout_seconds: 45
     min_confidence: 0.7
     batch_size: 10
-    model_key: "local-default"
-    prompt_version: "v1"
-    schema_version: "v1"
+    model_key: "llm-router-v1"
+    prompt_version: "v2"
+    schema_version: "v2"
   claim_candidate_quality:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "claim_candidate_quality"
     timeout_seconds: 45
     min_confidence: 0.75
     batch_size: 12
-    model_key: "local-default"
-    prompt_version: "v1"
-    schema_version: "v1"
+    model_key: "llm-router-v1"
+    prompt_version: "v2"
+    schema_version: "v2"
   claim_role:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "claim_role"
     timeout_seconds: 45
     min_confidence: 0.72
     batch_size: 12
-    model_key: "local-default"
-    prompt_version: "v1"
-    schema_version: "v1"
+    model_key: "llm-router-v1"
+    prompt_version: "v2"
+    schema_version: "v2"
   page_intent:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "page_intent"
     timeout_seconds: 45
     min_confidence: 0.72
     batch_size: 8
-    model_key: "local-default"
-    prompt_version: "v1"
-    schema_version: "v1"
+    model_key: "llm-router-v1"
+    prompt_version: "v2"
+    schema_version: "v2"
 
 automation:
   mode: "safe_auto"
@@ -102,52 +96,40 @@ automation:
   post_ingest:
     review_auto: true
   review_auto:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "review_auto_decision"
     timeout_seconds: 45
     min_confidence: 0.8
   image_to_text:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "describe_image"
     timeout_seconds: 45
     min_confidence: 0.7
   stable_promotion:
-    strategy: "agent_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "claim_stable_promotion"
     timeout_seconds: 45
     min_confidence: 0.85
+  concept_candidate_review:
+    strategy: "llm_assisted"
+    task_name: "review_concept_candidate"
+    timeout_seconds: 20
+    min_confidence: 0.75
 
 rendering:
   readable_concept:
     mode: "llm_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    task_name: "render_readable_concept_page"
     timeout_seconds: 20
   overview:
     mode: "llm_assisted"
-    command:
-      - "${python_executable}"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    task_name: "render_workspace_overview_page"
     timeout_seconds: 20
   qa_note:
-    mode: "llm_assisted"
-    command: []
+    mode: "disabled"
     timeout_seconds: 20
   concept_update:
-    mode: "llm_assisted"
-    command: []
+    mode: "disabled"
     timeout_seconds: 20
 
 agent:

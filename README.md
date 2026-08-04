@@ -2,13 +2,9 @@
 
 MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
-一个最实用的判断是：
+新工作区默认启用统一 LLM 调度器：先请求在线客户端；在线配置缺失、不可用或重试仍失败时，自动改用 Codex CLI 客户端。只有两条线路都失败，当前命令才以非零状态结束。
 
-- 如果你只是想先正常把系统用起来：默认不用配在线模型，直接使用包内保守 `agent_hook` 即可
-- 如果你想让 `ingest / review / grounded` 改写效果更强：优先建议改配 `agent_cli_hook`，不必先上 `agent_online_hook`
-- 如果你明确要让工作区脚本直连你自己的远程模型 API：再配置 `config/llm.local.yml`
-
-只要工作区脚本准备调用远程 LLM，这份 `config/llm.local.yml` 就必须由当前用户用自己的 API 配置单独提供。它不应提交到 Git，仓库只会提供 `config/llm.local.example.yml` 示例；如果缺失、不可读或明显未填完，Agent 必须明确提醒用户先补这份配置，而不是继续假定可以正常调用远程模型。
+在线客户端读取当前用户单独填写的 `config/llm.local.yml`。这份文件不应提交到 Git，仓库只提供 `config/llm.local.example.yml`。没有在线配置时无需中断配置流程，调度器会直接尝试 CLI 客户端。完全不使用 LLM 时，必须把相关任务显式设为 `deterministic`。
 
 当前仓库既是：
 
@@ -39,7 +35,7 @@ MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge 
 
 - 事实层、证据层、状态层优先由脚本和显式数据结构生成
 - LLM 主要参与文档结构判定、Claim 角色判定、页面意图判定和 grounded 改写
-- 一切 LLM 输出都必须 grounded，无法回绑时自动回退到保守 deterministic 路径
+- 一切 LLM 输出都必须经过 Function Calling 合同、JSON 修复、Schema 和业务检查；主备结果都无效时命令失败
 
 如果只看主链路，可以先把系统理解成：
 
@@ -49,8 +45,8 @@ MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge 
 
 - 默认假设它会运行在 Codex 这样的 Agent 环境里
 - 固定流程由 CLI 保证可重复和可回滚
-- 需要语义判断的步骤优先交给 Agent / LLM hook 自动推进
-- 只有在高风险冲突、归属不清或 hook 没给出高置信结论时，才升级为人工判断
+- 需要语义判断的步骤由 LLM 调度器自动选择在线主线路或 CLI 备用线路
+- 高风险冲突、归属不清或模型明确给出低置信结论时升级为人工判断；线路错误不会伪装成人工判断结果
 
 ## 核心理念
 
@@ -88,7 +84,7 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 - Python `3.12+` CLI 基础入口
 - `source -> normalized -> structure_block -> evidence_block -> knowledge_unit -> claim / metadata -> page` 主证据链打通，并保留 chunk 作为检索和增量处理容器
-- Word、Excel、PDF、Markdown、图片五类输入的标准化优先级
+- MarkItDown 统一文档转换，以及 Markdown、图片的专用标准化路径
 - Claim 声明层
 - BM25 多字段检索与页面权重设计
 - review 审核队列与状态恢复机制
@@ -136,14 +132,9 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 这层扩展不是替代 `alias / canonical / hierarchy / source_refs`，而是在这些已有证据链之上补充“页面之间还应该继续读什么”。
 
-当前系统不把这些当成必须前提：
+当前文档转换不要求安装 LibreOffice、Pandoc 或 pdftotext。PDF、Word、Excel、PowerPoint、HTML、JSON/XML、ZIP、EPUB、Outlook 等格式统一通过 [microsoft/markitdown](https://github.com/microsoft/markitdown) 及其 Python 依赖处理。
 
-- LibreOffice
-- Pandoc
-- pdftotext
-- tesseract
-
-这些系统工具属于可选增强能力，缺失时应通过 `doctor` 明确提示，并采用降级策略。
+`tesseract` 只作为图片 OCR 的可选增强工具；缺失时由 `doctor` 明确提示，并采用图片元数据或 LLM 图片理解路径。
 
 需要说明的是：
 
@@ -313,121 +304,70 @@ python3 -m myagentwiki review-auto --target-dir /path/to/MyNotesWiki --format me
 - 想保留 `query` 的调用方式但直接拿回答层输入时，用 `query --answer-ready`
 - 想让 Agent 先自动收口高把握审核项，再把剩余需要你判断的部分整理成继续对话的输入时，用 `review-auto`
 
-当前新初始化工作区默认会把审核、stable 提升、可读概念页和综述页所需的包内 Agent hook 一并接好；后续是否真的产出 `stable / concept / overview`，仍取决于 review 收口结果、hook 判定和页面生成条件：
+当前新初始化工作区会为十个已实现任务启用统一 LLM 调度器。任务配置只声明策略、合同任务名、超时、置信度和批次参数，不再配置 Python 命令或指定某条线路：
 
 ```yaml
+llm:
+  contract_version: "v2"
+  routing:
+    primary: "online"
+    fallback: "cli"
+  retry:
+    online_max_retries: 2
+    backoff_seconds: [1.0, 2.0]
+    jitter_max_seconds: 0.25
+    http_statuses: [408, 409, 429]
+    http_status_min: 500
+  context:
+    document_max_chars: 24000
+    image_max_bytes: 20971520
+    image_mime_types: ["image/png", "image/jpeg", "image/webp", "image/gif"]
+  cli:
+    executable: "codex"
+    timeout_seconds: 120
+    model: ""
+
 automation:
   mode: "safe_auto"
   post_ingest:
     review_auto: true
   review_auto:
-    strategy: "agent_assisted"
-    command:
-      - "/absolute/path/to/python"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "review_auto_decision"
     timeout_seconds: 45
     min_confidence: 0.8
   stable_promotion:
-    strategy: "agent_assisted"
-    command:
-      - "/absolute/path/to/python"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    strategy: "llm_assisted"
+    task_name: "claim_stable_promotion"
     timeout_seconds: 45
     min_confidence: 0.85
 
 rendering:
   readable_concept:
     mode: "llm_assisted"
-    command:
-      - "/absolute/path/to/python"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    task_name: "render_readable_concept_page"
     timeout_seconds: 20
   overview:
     mode: "llm_assisted"
-    command:
-      - "/absolute/path/to/python"
-      - "-m"
-      - "myagentwiki.agent_hook"
+    task_name: "render_workspace_overview_page"
     timeout_seconds: 20
 ```
 
-如果你希望改成自己的 Agent / LLM hook，也可以在工作区 `config/project.yml` 里覆盖：
+线路顺序固定如下：
 
-```yaml
-automation:
-  mode: "safe_auto"
-  post_ingest:
-    review_auto: true
-  review_auto:
-    strategy: "agent_assisted"
-    command:
-      - "python3"
-      - "/absolute/path/to/review_hook.py"
-    timeout_seconds: 45
-    min_confidence: 0.9
-  stable_promotion:
-    strategy: "agent_assisted"
-    command:
-      - "python3"
-      - "/absolute/path/to/stable_hook.py"
-    timeout_seconds: 45
-    min_confidence: 0.9
-```
+- 在线客户端每个逻辑请求最多执行三次，即首次加两次重试。
+- 连接失败、超时、HTTP 408/409/429、5xx 和结果合同错误可重试。
+- 其他 4xx、在线配置错误和 TLS 配置错误跳过剩余在线尝试，立即改用 CLI 客户端。
+- CLI 客户端只执行一次。主备都失败时抛出 `LLMRouteError`，不返回空结果，也不调用确定性处理器掩盖失败。
+- 不同逻辑请求之间没有额外等待；每个逻辑请求创建并关闭自己的在线客户端。
 
-如果你只是想先把效果增强，但不想先接自己的远程 API，优先建议通过 Codex 调用真实 LLM，也就是改用包内 `agent_cli_hook`：
-
-```yaml
-semantic:
-  claim_role:
-    strategy: "agent_assisted"
-    command:
-      - "python3"
-      - "-m"
-      - "myagentwiki.agent_cli_hook"
-    timeout_seconds: 90
-    min_confidence: 0.75
-    batch_size: 8
-    model_key: "codex-cli"
-    prompt_version: "v1"
-    schema_version: "v1"
-```
-
-并设置环境变量：
+在线客户端存在有效配置时优先使用；配置缺失时直接尝试 Codex CLI。CLI 可通过下面的环境变量调整：
 
 ```bash
-# 仅支持 codex
-export MYAGENTWIKI_AGENT_CLI="codex"
-# 可选：指定模型或二进制路径
 export MYAGENTWIKI_CODEX_MODEL="gpt-5.1-codex"
 export MYAGENTWIKI_CODEX_BIN="codex"
+export MYAGENTWIKI_CODEX_TIMEOUT_SECONDS="120"
 ```
-
-`agent_cli_hook` 会把 semantic batch payload 包成结构优先的 JSON 任务交给 Codex CLI，并要求返回 `{"decisions":[...]}`。如果 CLI 失败、超时或输出无法解析，系统会回到现有保守路径，不会中断整个 `ingest`。
-
-只有当你明确要直接通过你自己的在线模型地址调用，而不是走 Codex CLI 时，再改用包内在线 hook：
-
-```yaml
-semantic:
-  claim_role:
-    strategy: "agent_assisted"
-    command:
-      - "python3"
-      - "-m"
-      - "myagentwiki.agent_online_hook"
-    timeout_seconds: 90
-    min_confidence: 0.75
-    batch_size: 8
-    model_key: "remote-online"
-    prompt_version: "v1"
-    schema_version: "v1"
-```
-
-在线 hook 固定读取当前工作区的 `config/llm.local.yml`。这份文件必须由每个使用者单独填写自己的 API 配置，不应提交到 Git。`init` 会生成 `config/llm.local.example.yml` 作为示例。
-
-对 Codex 用户来说，这不是可选提醒，而是前置检查项：只要脚本配置准备调用在线模型，就必须先确认当前工作区已有用户自己填写好的 `config/llm.local.yml`。
 
 OpenAI 兼容示例：
 
@@ -441,31 +381,17 @@ provider:
 transport:
   api_style: "responses"
   verify_ssl: true
+  stream: false
 ```
 
-`transport.api_style` 支持 `responses` 和 `chat_completions`，默认是 `responses`；`transport.verify_ssl` 默认是 `true`。
+`transport.api_style` 支持 `responses` 和 `chat_completions`，默认 `responses`。两者都强制唯一函数调用、关闭并行调用并使用非流式请求。CLI 客户端使用同一参数 Schema，通过 `codex exec --output-schema` 返回 `function_name + arguments_json`；图片用 `-i` 传入绝对路径。
 
-区别很明确：
-- `agent_cli_hook` 走 Codex CLI
-- `agent_online_hook` 直接走你提供的在线模型地址
+函数参数先经 `json_repair.loads` 处理常见 JSON 问题，再使用同一份 JSON Schema 和任务业务规则检查。十个已实现合同见 [LLM 主备线路与 Function Calling 设计](docs/LLM主备线路与Function%20Calling设计.md)。`qa_note`、`concept_update` 尚无实际合同，因此保持禁用。
 
-如果某个任务已经显式配置成 `myagentwiki.agent_online_hook`，但 `config/llm.local.yml` 缺失、字段不完整、不是用户自己的有效 API 配置、鉴权失败或协议不匹配，命令会直接报错并提醒你必须先补好这份本地配置，而不会静默回退。
+如需完全离线、确定性执行，可把具体任务的 `strategy` 或 `mode` 显式改为 `deterministic`。旧工作区中的任务级 `command` 不再执行；加载器会针对三个已知旧模块给出迁移建议，自定义命令必须人工选择新线路或确定性模式。
 
-约定很简单：
-- hook 从标准输入接收 JSON payload
-- 成功时向标准输出返回 JSON
-- `confidence` 当前仅用于 `review_auto`、`stable_promotion` 等自动化决策对象
-- `review_auto` hook 可返回 `decision=auto_apply`，并附带 `action`、`primary_claim_id`、`secondary_claim_id`、`primary_page_id`、`alias_value`、`confidence`
-- `stable_promotion` hook 可返回 `decision=promote` 与 `confidence`
-- `semantic-batch` hook 当前支持 `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单独执行的任务
-- `readable_concept` hook 可返回 `summary`、`key_points`、`practical_notes`
-- `overview` hook 可返回 `summary`、`theme_rows`、`reading_path`
-- 配置了 `concept_update` hook 时，它会被用于灰区概念标题判别，输入 `review_concept_candidate` 任务，输出 `decision=accept|reject|rename`，并可附带 `suggested_title`
-- 若 hook 失败、超时、低于置信阈值，系统会按当前环节回退到保守路径，而不是中断整个流程：
-- `review_auto / stable_promotion` 会保留原状或升级为人工判断项
-- `readable_concept / overview` 会回退到 deterministic render
 - 默认 `safe_auto` 提稳不再要求多个独立来源；单一来源的 claim 只要可追踪、无开放 review / duplicate / conflict，且文本本身不是明显碎片或噪声，也可以提升为 `stable`
-- 对短句 / 短 claim，系统当前不再主要依赖固定字符数阈值；脚本只过滤明显垃圾，短句灰区会进入 `claim_candidate_quality` 语义批处理，由 hook 返回 `quality_label / review_required / safe_auto_ready` 这类结构化结论
+- 对短句 / 短 claim，系统当前不再主要依赖固定字符数阈值；脚本只过滤明显垃圾，短句灰区会进入 `claim_candidate_quality` 语义批处理，由函数合同返回 `quality_label / review_required / safe_auto_ready` 等结构化结论
 
 如果 `automation.post_ingest.review_auto: true`，那么每次 `ingest` 结束后，系统会自动接着跑一轮 `review-auto`。
 这意味着默认推荐流程会尽量串成一条连续自动化链：
@@ -474,7 +400,7 @@ transport:
 - `review-auto` 会优先自动收口高把握 review，并尝试提升可安全稳定化的 claim
 - 当 claim 真正被提升为 `stable` 后，系统会继续自动生成或刷新可读 `concept` 页
 - 当工作区里已有多个稳定可读概念页时，系统会继续自动生成或刷新工作区级 `overview` 页
-- `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写；若不满足校验或生成条件，会回退到 deterministic fallback，或暂不产出对应页面
+- `concept` 与 `overview` 默认都会先尝试 grounded 的 `llm_assisted` 改写；函数结果通过合同后，如果页面级 grounding 仍不足，使用确定性页面模板；若主备请求本身都失败，命令直接失败
 - 只有仍然 escalated 的 review 才需要人工判断
 
 如果你主要是在 Codex 这类 Agent 界面里使用，推荐把它当成“我描述目标，Agent 负责执行流程”的工具，而不是自己记内部命令或状态结构。
@@ -574,9 +500,15 @@ MyAgentWiki/
 │       ├── cli_components/
 │       ├── app_services/
 │       ├── repositories/
-│       ├── agent_hook.py
-│       ├── agent_cli_hook.py
-│       └── agent_online_hook.py
+│       ├── deterministic_processor.py
+│       └── llm/
+│           ├── contracts.py
+│           ├── online_client.py
+│           ├── cli_client.py
+│           ├── router.py
+│           ├── repair.py
+│           ├── errors.py
+│           └── diagnostics.py
 ├── templates/
 ├── tests/
 └── scripts/
@@ -617,6 +549,7 @@ MyAgentWiki/
 
 - Python `3.12+`
 - `git`
+- `microsoft/markitdown >=0.1.6,<0.2.0` 及项目声明的文档格式依赖
 
 目标平台：
 
@@ -627,9 +560,6 @@ MyAgentWiki/
 可选增强依赖：
 
 - `tesseract`
-- `libreoffice`
-- `pandoc`
-- `pdftotext`
 
 ## 当前 CLI 命令实现状态
 
@@ -669,7 +599,10 @@ MyAgentWiki/
   - 已实现工作区初始化、模板生成、状态文件创建、Git 基线提交
   - 当前会初始化 `indexes/aliases.json`、工作区级 `AGENTS.md`、以及 query/agent 基础配置
 - `myagentwiki ingest`
-  - 已实现 `raw/` 递归扫描、来源登记、Markdown/纯文本标准化、Word/XLSX/PDF fallback 标准化、图片元数据标准化与 `tesseract` OCR 增强、`.doc / .xls` 老格式保守 fallback、Structure IR / Evidence Block / Knowledge Unit 编译、chunk 上下文容器生成、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
+  - 已实现 `raw/` 递归扫描、来源登记、MarkItDown 统一文档转换、Markdown/纯文本专用标准化、图片元数据与 `tesseract` OCR 增强、Structure IR / Evidence Block / Knowledge Unit 编译、chunk 上下文容器生成、规则式 Claim 草稿抽取、review 项生成，以及失败/降级信息写入 `state/error_log.jsonl`
+  - PDF、DOCX、XLS/XLSX、CSV、PPTX、HTML、JSON/XML、ZIP、EPUB、IPYNB、Outlook MSG 等非 Markdown 文档默认先走 `MarkItDown.convert_local()`；插件默认关闭，不会自动连接云服务
+  - MarkItDown 转换失败时，已存在的 PDF、Word、Excel 保守转换器才会接手，并在 `warnings` 中记录 `markitdown_conversion_failed:<错误类型>`
+  - 每次导入会核对 `normalizer_version`；MarkItDown 结果还会核对转换器版本。版本变化时即使原文件内容未变，也会复用原 `source_id` 重新生成该来源及其下游数据
   - 扫描 `raw/` 时当前会统一跳过所有 `.` 开头的文件和目录，例如 `.DS_Store`、`.obsidian/` 及其子内容，不把这些隐藏项纳入 ingest
   - 当前 Markdown 标准化会尝试下载内嵌的远程图片，并把下载结果落到工作区外部 sibling `assets/` 目录；图片存储路径按 `source_id / image_index` 组织，便于后续回链
   - 远程图片下载会先严格校验证书；若命中证书校验失败，脚本会默认只对 Markdown 图片下载自动重试一次不校验证书的受控回退；如需关闭该行为，可显式传入 `--disable-insecure-download-retry`
@@ -680,14 +613,14 @@ MyAgentWiki/
   - 当前概念页选择“代表陈述 / 核心陈述”时，不再单纯偏向更长的句子，而会优先选择能独立理解、且更适合直接展示给人的 Claim；`一种……的模式` 这类短语会优先于说明性长句
   - 当前概念页展示层直接展示选出的代表 Claim，不再靠中文“是 / 用于”等词面把短语强行改写成定义句
   - 当前概念页里的 `Source Pages / Source Evidence` 会优先用更适合人阅读的多行结构展示来源摘要页、原始来源文件、匹配 chunk 和次级 ID，方便顺着 `page -> claim -> knowledge_unit -> evidence_block -> source` 主证据链继续下钻，并按需读取 chunk 上下文
-  - 当前概念页生成已加入四层收口规则：先用强规则过滤明显坏标题，再做标题质量评分；灰区候选才会交给 Agent hook 做受限判别；最终 `lint` 会把低质量概念标题显式报成 warning
+  - 当前概念页生成已加入四层处理规则：先用强规则过滤明显坏标题，再做标题质量评分；灰区候选才会交给 LLM 调度器做受限判别；最终 `lint` 会把低质量概念标题显式报成 warning
   - 强规则当前会优先拦截 `示例`、`总结`、单字中文标题、问句壳标题这类明显更像结构节点而不是概念名的候选，减少“章节标题被误生成为概念页”
   - 标题质量评分会综合标题本身、canonical claim 可读性、是否跨来源、是否只是 topic shell、是否像定义句等信号，避免继续单纯依赖 `section_path` 最后一段命名
-  - 灰区标题当前只允许 Agent hook 返回 `accept / reject / rename` 这三种受限决策，不直接把自由生成的标题写成 canonical，优先保证 `canonical_id` 稳定
+  - 灰区标题函数合同只允许返回 `accept / reject / rename`，`rename` 还必须有输入证据支持；不直接把无约束文本写成 canonical，优先保证 `canonical_id` 稳定
   - `wiki/index.md` 与页面间 Markdown 链接会对空格等特殊字符做 URL 编码，尽量兼容不同查看器
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
   - 当前已支持自动生成人类可读 `concept` 页；工作区级 `overview` 页会在满足生成条件时自动产出，两个页面族默认都会先尝试 `llm_assisted` 渲染
-  - 当前新初始化工作区默认已经接上统一包内 Agent hook，目标是让 `ingest -> review-auto -> stable -> concept/overview` 作为一条连续自动化链默认运行，而不需要用户再手工补配置
+  - 当前新初始化工作区默认已经接上统一 LLM 调度器，目标是让 `ingest -> review-auto -> stable -> concept/overview` 作为一条连续自动化链默认运行；完全离线时需要显式选择确定性模式
   - `concept` 与 `overview` 的 LLM 改写都要求 grounded；不合格时会自动回退到 deterministic fallback
   - `overview` 页当前支持 grounded overview rewrite，并在 `llm_assisted` 成功时显示折叠式 `Rewrite Traceability`
 - `myagentwiki lint`
@@ -912,6 +845,10 @@ python scripts/validate_workflow.py --keep-workspace
   - 覆盖 `.doc / .xls` 老格式 fallback
   - 覆盖图片在“无 tesseract”与“有 OCR 文本”两种情况下的标准化输出
 
+- `tests/test_runtime_services_converters.py`
+  - 使用真实 DOCX、XLSX、PPTX、HTML 验证 MarkItDown 主转换路径
+  - 覆盖 MarkItDown 失败后的告警、旧转换器备用路径和转换器版本判断
+
 - [tests/test_query_alias_and_lint.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/test_query_alias_and_lint.py)
   - 覆盖 alias/canonical 命中、intent focus、lint 报告写回
   - 覆盖 alias conflict review、`assign_alias / remove_alias`、re-ingest 后的持久化行为，以及过期 alias review 自动收口
@@ -919,6 +856,7 @@ python scripts/validate_workflow.py --keep-workspace
 - [tests/test_e2e_workflow.py](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/tests/test_e2e_workflow.py)
   - 覆盖 `init -> ingest -> query -> review -> lint` 主闭环
   - 覆盖 `raw/` 子目录递归扫描与 alias conflict 收口
+  - 覆盖原文件不变时，旧标准化版本的自动重新处理
 
 建议先安装开发依赖：
 

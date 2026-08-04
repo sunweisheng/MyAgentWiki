@@ -122,9 +122,9 @@ from .app_services.review_auto_helpers import (
     build_review_auto_messages as build_review_auto_messages_helper,
     build_stable_promotion_payload as build_stable_promotion_payload_helper,
     claim_record_is_safe_auto_stable_candidate as claim_record_is_safe_auto_stable_candidate_helper,
-    maybe_get_agent_assisted_review_plan as maybe_get_agent_assisted_review_plan_helper,
-    maybe_get_agent_assisted_stable_promotion as maybe_get_agent_assisted_stable_promotion_helper,
-    normalize_review_auto_hook_plan as normalize_review_auto_hook_plan_helper,
+    maybe_get_llm_assisted_review_plan as maybe_get_llm_assisted_review_plan_helper,
+    maybe_get_llm_assisted_stable_promotion as maybe_get_llm_assisted_stable_promotion_helper,
+    normalize_review_auto_llm_plan as normalize_review_auto_llm_plan_helper,
     propose_review_auto_action as propose_review_auto_action_helper,
     render_review_auto_chatml as render_review_auto_chatml_helper,
     render_review_auto_message as render_review_auto_message_helper,
@@ -153,7 +153,13 @@ from .cli_components.misc_commands import MiscCliDeps, build_misc_cli_deps as bu
 from .cli_components.query_commands import QueryCliDeps
 from .cli_components.review_commands import ReviewCliDeps
 from .cli_components.result import CommandResult, print_result
-from .hook_protocol import HookExecutionError, is_online_hook_command, parse_online_hook_error
+from .llm.errors import (
+    LLMProjectConfigurationError,
+    LLMRouteError,
+    legacy_command_migration_message,
+)
+from .llm.router import build_route_identity, request as request_llm
+from .deterministic_processor import process as run_deterministic_processor
 from .repositories.state_views import (
     build_claim_state_maps_loader as repo_build_claim_state_maps_loader,
     build_page_state_records_loader as repo_build_page_state_records_loader,
@@ -226,7 +232,7 @@ from .semantic import (
     fingerprint_payload,
     item_type_for_task,
     normalize_string_list,
-    normalize_semantic_hook_decision,
+    normalize_semantic_model_decision,
     semantic_batches_dir,
 )
 
@@ -236,6 +242,7 @@ convert_legacy_doc_to_markdown = runtime_services.convert_legacy_doc_to_markdown
 convert_legacy_xls_to_markdown = runtime_services.convert_legacy_xls_to_markdown
 enrich_markdown_with_embedded_images = runtime_services.enrich_markdown_with_embedded_images
 normalize_source_record = runtime_services.normalize_source_record
+normalized_record_is_current = runtime_services.normalized_record_is_current
 
 DEFAULT_CHUNK_TARGET_TOKENS = 1000
 DEFAULT_CHUNK_MAX_TOKENS = 1600
@@ -372,8 +379,18 @@ PAGE_LINKS_INDEX_VERSION = "page_links_v1"
 QUERY_ANSWER_HANDOFF_CONTRACT_VERSION = "query_answer_handoff/v1"
 REVIEW_AUTO_HANDOFF_CONTRACT_VERSION = "review_auto_handoff/v1"
 ANSWER_READY_OUTPUT_VERSION = "answer_ready_query/v1"
-AUTOMATION_STRATEGIES = {"safe_auto", "agent_assisted"}
+AUTOMATION_STRATEGIES = {"safe_auto", "llm_assisted", "deterministic", "disabled"}
 SEMANTIC_TASK_NAMES = ("document_analysis", "claim_candidate_quality", "claim_role", "page_intent")
+AUTOMATION_LLM_TASKS = {
+    "review_auto": "review_auto_decision",
+    "image_to_text": "describe_image",
+    "stable_promotion": "claim_stable_promotion",
+    "concept_candidate_review": "review_concept_candidate",
+}
+RENDER_LLM_TASKS = {
+    "readable_concept": "render_readable_concept_page",
+    "overview": "render_workspace_overview_page",
+}
 WORKSPACE_SCHEMA_VERSION = "v1"
 QUERY_INTENT_MARKERS = {
     "overview": (
@@ -802,6 +819,16 @@ def infer_source_type(path: Path) -> str:
         ".xlsx": "spreadsheet",
         ".xls": "spreadsheet",
         ".csv": "spreadsheet",
+        ".pptx": "presentation",
+        ".html": "html",
+        ".htm": "html",
+        ".json": "structured_text",
+        ".xml": "structured_text",
+        ".rss": "structured_text",
+        ".zip": "archive",
+        ".epub": "ebook",
+        ".ipynb": "notebook",
+        ".msg": "email",
         ".png": "image",
         ".jpg": "image",
         ".jpeg": "image",
@@ -921,18 +948,39 @@ def load_automation_target_config(config: dict, target_name: str) -> dict:
 
     inherited_strategy = str(automation_config.get("mode", "safe_auto")).strip() or "safe_auto"
     strategy = str(target_config.get("strategy", inherited_strategy)).strip() or inherited_strategy
+    legacy_command = normalize_command_config(target_config.get("command", []))
+    if strategy == "agent_assisted" or legacy_command:
+        raise LLMProjectConfigurationError(
+            legacy_command_migration_message(
+                location=f"automation.{target_name}",
+                command=legacy_command,
+            ),
+            config_path="config/project.yml",
+        )
+    strategy = os.environ.get("MYAGENTWIKI_LLM_MODE", strategy).strip() or strategy
     if strategy not in AUTOMATION_STRATEGIES:
-        strategy = "safe_auto"
+        raise LLMProjectConfigurationError(
+            f"Unsupported strategy `{strategy}` at `automation.{target_name}`.",
+            config_path="config/project.yml",
+        )
+    expected_task_name = AUTOMATION_LLM_TASKS.get(target_name)
+    configured_task_name = str(target_config.get("task_name", "")).strip()
+    if strategy == "llm_assisted" and (
+        expected_task_name is None or configured_task_name != expected_task_name
+    ):
+        raise LLMProjectConfigurationError(
+            f"`automation.{target_name}.task_name` must be `{expected_task_name}` for `llm_assisted`.",
+            config_path="config/project.yml",
+        )
 
-    command = normalize_command_config(target_config.get("command", []))
     timeout_seconds = max(coerce_int(target_config.get("timeout_seconds", 45), 45), 5)
     min_confidence = min(max(coerce_float(target_config.get("min_confidence", 0.8), 0.8), 0.0), 1.0)
     return {
         "strategy": strategy,
-        "command": command,
         "timeout_seconds": timeout_seconds,
         "min_confidence": min_confidence,
-        "enabled": strategy == "agent_assisted" and bool(command),
+        "task_name": configured_task_name or expected_task_name,
+        "enabled": strategy in {"llm_assisted", "deterministic"},
     }
 
 
@@ -964,11 +1012,29 @@ def load_semantic_task_config(config: dict, task_name: str) -> SemanticTaskConfi
     if not isinstance(task_config, dict):
         task_config = {}
 
-    strategy = str(task_config.get("strategy", "agent_assisted")).strip() or "agent_assisted"
+    strategy = str(task_config.get("strategy", "llm_assisted")).strip() or "llm_assisted"
+    legacy_command = normalize_command_config(task_config.get("command", []))
+    if strategy == "agent_assisted" or legacy_command:
+        raise LLMProjectConfigurationError(
+            legacy_command_migration_message(
+                location=f"semantic.{task_name}",
+                command=legacy_command,
+            ),
+            config_path="config/project.yml",
+        )
+    strategy = os.environ.get("MYAGENTWIKI_LLM_MODE", strategy).strip() or strategy
     if strategy not in AUTOMATION_STRATEGIES:
-        strategy = "agent_assisted"
+        raise LLMProjectConfigurationError(
+            f"Unsupported strategy `{strategy}` at `semantic.{task_name}`.",
+            config_path="config/project.yml",
+        )
+    configured_task_name = str(task_config.get("task_name", "")).strip()
+    if strategy == "llm_assisted" and configured_task_name != task_name:
+        raise LLMProjectConfigurationError(
+            f"`semantic.{task_name}.task_name` must be `{task_name}` for `llm_assisted`.",
+            config_path="config/project.yml",
+        )
 
-    command = normalize_command_config(task_config.get("command", []))
     timeout_seconds = max(coerce_int(task_config.get("timeout_seconds", 45), 45), 5)
     min_confidence = min(max(coerce_float(task_config.get("min_confidence", 0.75), 0.75), 0.0), 1.0)
     batch_size = max(
@@ -978,14 +1044,13 @@ def load_semantic_task_config(config: dict, task_name: str) -> SemanticTaskConfi
         ),
         1,
     )
-    model_key = str(task_config.get("model_key", "local-default")).strip() or "local-default"
+    model_key = str(task_config.get("model_key", "llm-router-v1")).strip() or "llm-router-v1"
     prompt_version = str(task_config.get("prompt_version", "v1")).strip() or "v1"
     schema_version = str(task_config.get("schema_version", "v1")).strip() or "v1"
-    enabled = strategy == "agent_assisted" and bool(command)
+    enabled = strategy in {"llm_assisted", "deterministic"}
     return SemanticTaskConfig(
         task_name=task_name,
         strategy=strategy,
-        command=command,
         timeout_seconds=timeout_seconds,
         min_confidence=min_confidence,
         batch_size=batch_size,
@@ -994,75 +1059,6 @@ def load_semantic_task_config(config: dict, task_name: str) -> SemanticTaskConfi
         prompt_version=prompt_version,
         schema_version=schema_version,
     )
-
-
-def run_json_automation_command(
-    target: Path,
-    command: list[str],
-    payload: dict,
-    timeout_seconds: int,
-) -> dict | None:
-    if not command:
-        return None
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=target,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-    if completed.returncode != 0:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def parse_hook_process_result(
-    command: list[str],
-    completed: subprocess.CompletedProcess[str],
-) -> dict | None:
-    if completed.returncode != 0:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(completed.stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return None
-
-    try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        if is_online_hook_command(command):
-            hook_error = parse_online_hook_error(stdout, completed.stderr)
-            if hook_error is not None:
-                raise hook_error
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def semantic_structure_records_by_id(target: Path) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -1365,24 +1361,30 @@ def prepare_page_semantic_context(target: Path, claim_records: list[dict]) -> di
     )
 
 
+def build_document_analysis_item_payload(target: Path, record: dict) -> dict | None:
+    source_id = str(record.get("source_id", "")).strip()
+    normalized_path = str(record.get("normalized_path", "")).strip()
+    if not source_id or not normalized_path:
+        return None
+    content_path = resolve_source_record_path(target, normalized_path)
+    return {
+        "item_id": source_id,
+        "source_id": source_id,
+        "normalized_path": normalized_path,
+        "title": record.get("title", ""),
+        "extraction_quality": record.get("extraction_quality"),
+        "content": content_path.read_text(encoding="utf-8") if content_path.is_file() else "",
+    }
+
+
 def collect_semantic_task_items(target: Path, task_name: str) -> list[dict]:
     if task_name == "document_analysis":
         records = load_jsonl(target / "state" / "normalized.jsonl")
         items = []
         for record in records:
-            source_id = str(record.get("source_id", "")).strip()
-            normalized_path = str(record.get("normalized_path", "")).strip()
-            if not source_id or not normalized_path:
-                continue
-            items.append(
-                {
-                    "item_id": source_id,
-                    "source_id": source_id,
-                    "normalized_path": normalized_path,
-                    "title": record.get("title", ""),
-                    "extraction_quality": record.get("extraction_quality"),
-                }
-            )
+            item = build_document_analysis_item_payload(target, record)
+            if item is not None:
+                items.append(item)
         return items
 
     if task_name == "claim_candidate_quality":
@@ -1479,11 +1481,12 @@ def chunk_semantic_items(items: list[dict], batch_size: int) -> list[list[dict]]
 
 def normalize_semantic_batch_results(
     task_name: str,
-    hook_result: dict,
+    model_result: dict,
     batch_items: list[dict],
     config: SemanticTaskConfig,
+    route_identity: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    decisions = hook_result.get("decisions", [])
+    decisions = model_result.get("decisions", [])
     if not isinstance(decisions, list):
         return [], []
 
@@ -1506,7 +1509,7 @@ def normalize_semantic_batch_results(
                 "risk_flags": ["semantic_decision_low_confidence"],
             })
             continue
-        normalized_decision = normalize_semantic_hook_decision(task_name, decision)
+        normalized_decision = normalize_semantic_model_decision(task_name, decision)
         if normalized_decision["decision_status"] != "accepted":
             skipped.append({
                 "item_id": item_id,
@@ -1524,6 +1527,7 @@ def normalize_semantic_batch_results(
             item_payloads=[item_payload],
             prompt_version=config.prompt_version,
             schema_version=config.schema_version,
+            route_identity=route_identity,
         )
         normalized.append(
             {
@@ -1558,6 +1562,7 @@ def run_semantic_batch_task(
     items = collect_semantic_task_items(target, task_name)
     existing_records = load_semantic_decisions(target)
     existing_by_fingerprint = build_latest_semantic_decisions_by_fingerprint(existing_records)
+    route_identity = build_route_identity(target, task_name, strategy=config.strategy)
 
     cache_hits = 0
     pending_batches: list[tuple[list[dict], list[str]]] = []
@@ -1570,6 +1575,7 @@ def run_semantic_batch_task(
                 item_payloads=[item],
                 prompt_version=config.prompt_version,
                 schema_version=config.schema_version,
+                route_identity=route_identity,
             )
             if input_fingerprint in existing_by_fingerprint:
                 cache_hits += 1
@@ -1591,13 +1597,24 @@ def run_semantic_batch_task(
             "schema_version": config.schema_version,
             "items": batch_items,
         }
-        hook_result = run_json_automation_command(
-            target=target,
-            command=config.command,
-            payload=payload,
-            timeout_seconds=config.timeout_seconds,
-        ) if config.enabled else None
-        normalized_results, skipped_results = normalize_semantic_batch_results(task_name, hook_result or {}, batch_items, config)
+        if config.strategy == "llm_assisted":
+            model_result = request_llm(
+                workspace=target,
+                task_name=task_name,
+                payload=payload,
+                timeout_seconds=config.timeout_seconds,
+            )
+        elif config.strategy == "deterministic":
+            model_result = run_deterministic_processor(payload)
+        else:
+            model_result = {}
+        normalized_results, skipped_results = normalize_semantic_batch_results(
+            task_name,
+            model_result,
+            batch_items,
+            config,
+            route_identity=route_identity,
+        )
 
         batch_report = {
             "task_name": task_name,
@@ -1657,18 +1674,19 @@ def apply_document_analysis_decisions_to_normalized_records(
     changed_records: list[dict] = []
 
     for record in normalized_records:
-        item_payload = {
-            "item_id": record["source_id"],
-            "source_id": record["source_id"],
-            "normalized_path": record.get("normalized_path", ""),
-            "title": record.get("title", ""),
-            "extraction_quality": record.get("extraction_quality"),
-        }
+        item_payload = build_document_analysis_item_payload(target, record)
+        if item_payload is None:
+            continue
         fingerprint = fingerprint_payload(
             task_name="document_analysis",
             item_payloads=[item_payload],
             prompt_version=task_config.prompt_version,
             schema_version=task_config.schema_version,
+            route_identity=build_route_identity(
+                target,
+                "document_analysis",
+                strategy=task_config.strategy,
+            ),
         )
         decision_record = latest_decisions.get(fingerprint)
         if decision_record is None:
@@ -1725,6 +1743,7 @@ def apply_claim_role_decisions_to_claim_records(
             item_payloads=[item_payload],
             prompt_version=task_config.prompt_version,
             schema_version=task_config.schema_version,
+            route_identity=build_route_identity(target, "claim_role", strategy=task_config.strategy),
         )
         decision_record = latest_decisions.get(fingerprint)
         if decision_record is None:
@@ -1801,6 +1820,11 @@ def apply_claim_candidate_quality_decisions_to_claim_records(
             item_payloads=[item_payload],
             prompt_version=task_config.prompt_version,
             schema_version=task_config.schema_version,
+            route_identity=build_route_identity(
+                target,
+                "claim_candidate_quality",
+                strategy=task_config.strategy,
+            ),
         )
         decision_record = latest_decisions.get(fingerprint)
         if decision_record is None:
@@ -2070,6 +2094,7 @@ def apply_page_intent_decisions_to_claim_groups(
             item_payloads=[item_payload],
             prompt_version=task_config.prompt_version,
             schema_version=task_config.schema_version,
+            route_identity=build_route_identity(target, "page_intent", strategy=task_config.strategy),
         )
         decision_record = latest_decisions.get(fingerprint)
         page_intent = ""
@@ -2131,6 +2156,7 @@ def apply_page_intent_decisions_to_claim_groups(
             item_payloads=[route_payload],
             prompt_version=task_config.prompt_version,
             schema_version=task_config.schema_version,
+            route_identity=build_route_identity(target, "page_intent", strategy=task_config.strategy),
         )
         existing_route_decision = latest_decisions.get(route_fingerprint)
         if existing_route_decision is None:
@@ -2274,17 +2300,42 @@ def load_page_render_config(config: dict, render_target: str) -> dict:
     if not isinstance(target_config, dict):
         target_config = {}
 
-    mode = str(target_config.get("mode", "llm_assisted")).strip() or "llm_assisted"
-    if mode not in {"deterministic", "llm_assisted"}:
-        mode = "llm_assisted"
+    default_mode = "disabled" if render_target in {"qa_note", "concept_update"} else "llm_assisted"
+    mode = str(target_config.get("mode", default_mode)).strip() or default_mode
+    legacy_command = normalize_command_config(target_config.get("command", []))
+    if legacy_command:
+        raise LLMProjectConfigurationError(
+            legacy_command_migration_message(
+                location=f"rendering.{render_target}",
+                command=legacy_command,
+            ),
+            config_path="config/project.yml",
+        )
+    mode = os.environ.get("MYAGENTWIKI_LLM_MODE", mode).strip() or mode
+    if mode not in {"deterministic", "llm_assisted", "disabled"}:
+        raise LLMProjectConfigurationError(
+            f"Unsupported mode `{mode}` at `rendering.{render_target}`.",
+            config_path="config/project.yml",
+        )
+    if render_target in {"qa_note", "concept_update"} and mode != "disabled":
+        raise LLMProjectConfigurationError(
+            f"`rendering.{render_target}` cannot be enabled because no LLM task contract is implemented.",
+            config_path="config/project.yml",
+        )
+    expected_task_name = RENDER_LLM_TASKS.get(render_target)
+    configured_task_name = str(target_config.get("task_name", "")).strip()
+    if mode == "llm_assisted" and configured_task_name != expected_task_name:
+        raise LLMProjectConfigurationError(
+            f"`rendering.{render_target}.task_name` must be `{expected_task_name}` for `llm_assisted`.",
+            config_path="config/project.yml",
+        )
 
-    command = normalize_command_config(target_config.get("command", []))
     timeout_seconds = coerce_int(target_config.get("timeout_seconds", 20), 20)
     timeout_seconds = max(timeout_seconds, 5)
     return {
         "render_target": render_target,
         "mode": mode,
-        "command": command,
+        "task_name": configured_task_name or expected_task_name,
         "timeout_seconds": timeout_seconds,
     }
 
@@ -5723,11 +5774,10 @@ def concept_title_quality_details(
 
 
 def load_concept_quality_review_config(config: dict) -> dict:
-    render_config = load_page_render_config(config, "concept_update")
+    automation_config = load_automation_target_config(config, "concept_candidate_review")
     return {
-        "mode": render_config.get("mode"),
-        "command": render_config.get("command", []),
-        "timeout_seconds": render_config.get("timeout_seconds", 20),
+        "mode": automation_config.get("strategy"),
+        "timeout_seconds": automation_config.get("timeout_seconds", 20),
     }
 
 
@@ -5740,9 +5790,6 @@ def run_llm_assisted_concept_title_review(
     preferred_section_label: str = "",
 ) -> dict | None:
     if review_config.get("mode") != "llm_assisted":
-        return None
-    command = review_config.get("command", [])
-    if not command:
         return None
 
     payload = {
@@ -5764,28 +5811,13 @@ def run_llm_assisted_concept_title_review(
             }
             for claim_record in claim_records[:6]
         ],
-        "instructions": (
-            "Judge whether this title is a valid reusable concept title or just a structural heading. "
-            "If invalid, suggest a better concept title when the evidence clearly supports one. "
-            "Return strict JSON only."
-        ),
     }
-
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=target,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=review_config.get("timeout_seconds", 20),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    result = parse_hook_process_result(command, completed)
-    if not isinstance(result, dict):
-        return None
+    result = request_llm(
+        workspace=target,
+        task_name="review_concept_candidate",
+        payload=payload,
+        timeout_seconds=review_config.get("timeout_seconds"),
+    )
 
     suggested_title = clean_concept_title_text(result.get("suggested_title", ""))
     decision = str(result.get("decision", "") or "").strip().lower()
@@ -7036,9 +7068,6 @@ def run_llm_assisted_readable_concept_render(
 ) -> dict | None:
     if render_config.get("mode") != "llm_assisted":
         return None
-    command = render_config.get("command", [])
-    if not command:
-        return None
 
     payload = {
         "task": "render_readable_concept_page",
@@ -7072,27 +7101,13 @@ def run_llm_assisted_readable_concept_render(
             }
             for claim_record in practical_claims
         ],
-        "instructions": (
-            "Only rewrite for readability. Do not add new facts. "
-            "Every rewritten bullet must stay grounded in the referenced claim."
-        ),
     }
-
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=target,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=render_config.get("timeout_seconds", 20),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    raw_result = parse_hook_process_result(command, completed)
-    if not isinstance(raw_result, dict):
-        return None
+    raw_result = request_llm(
+        workspace=target,
+        task_name="render_readable_concept_page",
+        payload=payload,
+        timeout_seconds=render_config.get("timeout_seconds"),
+    )
 
     allowed_claims_by_id = {
         claim_record["claim_id"]: claim_record
@@ -7135,9 +7150,6 @@ def run_llm_assisted_overview_render(
 ) -> dict | None:
     if render_config.get("mode") != "llm_assisted":
         return None
-    command = render_config.get("command", [])
-    if not command:
-        return None
 
     payload = {
         "task": "render_workspace_overview_page",
@@ -7166,27 +7178,13 @@ def run_llm_assisted_overview_render(
             }
             for item in reading_path_rows
         ],
-        "instructions": (
-            "Only rewrite for readability. Do not add new facts. "
-            "Every rewritten theme summary and reading-path bullet must stay grounded in the referenced concept page."
-        ),
     }
-
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=target,
-            input=json.dumps(payload, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=render_config.get("timeout_seconds", 20),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    raw_result = parse_hook_process_result(command, completed)
-    if not isinstance(raw_result, dict):
-        return None
+    raw_result = request_llm(
+        workspace=target,
+        task_name="render_workspace_overview_page",
+        payload=payload,
+        timeout_seconds=render_config.get("timeout_seconds"),
+    )
 
     allowed_pages_by_id = {
         item["page_record"]["page_id"]: item["page_record"]
@@ -7474,7 +7472,7 @@ def build_concept_page(
     )
     assisted_render = run_llm_assisted_readable_concept_render(
         target=target,
-        render_config=render_config or {"mode": "deterministic", "command": [], "timeout_seconds": 20},
+        render_config=render_config or {"mode": "deterministic", "timeout_seconds": 20},
         title=title,
         canonical_claim=canonical_claim,
         stable_claim_records=render_claim_records,
@@ -7584,7 +7582,7 @@ def build_workspace_overview_page(
 
     assisted_render = run_llm_assisted_overview_render(
         target=target,
-        render_config=render_config or {"mode": "deterministic", "command": [], "timeout_seconds": 20},
+        render_config=render_config or {"mode": "deterministic", "timeout_seconds": 20},
         title=title,
         summary_text=summary_text,
         theme_rows=key_theme_rows,
@@ -8464,7 +8462,7 @@ def build_review_cli_deps() -> ReviewCliDeps:
         propose_review_auto_action=propose_review_auto_action,
         is_actionable_review_record=is_actionable_review_record,
         claim_record_is_safe_auto_stable_candidate=claim_record_is_safe_auto_stable_candidate,
-        maybe_get_agent_assisted_stable_promotion=maybe_get_agent_assisted_stable_promotion,
+        maybe_get_llm_assisted_stable_promotion=maybe_get_llm_assisted_stable_promotion,
         utc_now_iso=utc_now_iso,
         build_review_auto_escalation_entry=build_review_auto_escalation_entry,
         build_review_auto_agent_handoff=build_review_auto_agent_handoff,
@@ -8515,15 +8513,15 @@ def build_review_auto_decision_payload(
     )
 
 
-def normalize_review_auto_hook_plan(
-    hook_result: dict,
+def normalize_review_auto_llm_plan(
+    model_result: dict,
     review_record: dict,
     base_plan: dict,
     live_claims_by_id: dict[str, dict],
     min_confidence: float,
 ) -> dict | None:
-    return normalize_review_auto_hook_plan_helper(
-        hook_result,
+    return normalize_review_auto_llm_plan_helper(
+        model_result,
         review_record,
         base_plan,
         live_claims_by_id,
@@ -8533,22 +8531,23 @@ def normalize_review_auto_hook_plan(
     )
 
 
-def maybe_get_agent_assisted_review_plan(
+def maybe_get_llm_assisted_review_plan(
     target: Path,
     review_record: dict,
     live_claims_by_id: dict[str, dict],
     automation_config: dict,
     base_plan: dict,
 ) -> dict | None:
-    return maybe_get_agent_assisted_review_plan_helper(
+    return maybe_get_llm_assisted_review_plan_helper(
         target,
         review_record,
         live_claims_by_id,
         automation_config,
         base_plan,
         build_review_auto_decision_payload=build_review_auto_decision_payload,
-        run_json_automation_command=run_json_automation_command,
-        normalize_review_auto_hook_plan=normalize_review_auto_hook_plan,
+        request_llm=request_llm,
+        run_deterministic_processor=run_deterministic_processor,
+        normalize_review_auto_llm_plan=normalize_review_auto_llm_plan,
     )
 
 
@@ -8577,16 +8576,17 @@ def build_stable_promotion_payload(claim_record: dict) -> dict:
     return build_stable_promotion_payload_helper(claim_record)
 
 
-def maybe_get_agent_assisted_stable_promotion(
+def maybe_get_llm_assisted_stable_promotion(
     target: Path,
     claim_record: dict,
     automation_config: dict,
 ) -> tuple[bool, str | None]:
-    return maybe_get_agent_assisted_stable_promotion_helper(
+    return maybe_get_llm_assisted_stable_promotion_helper(
         target,
         claim_record,
         automation_config,
-        run_json_automation_command=run_json_automation_command,
+        request_llm=request_llm,
+        run_deterministic_processor=run_deterministic_processor,
         build_stable_promotion_payload=build_stable_promotion_payload,
         coerce_float=coerce_float,
     )
@@ -8668,7 +8668,7 @@ def propose_review_auto_action(
         automation_config,
         review_display_id=review_display_id,
         is_actionable_review_record=is_actionable_review_record,
-        maybe_get_agent_assisted_review_plan=maybe_get_agent_assisted_review_plan,
+        maybe_get_llm_assisted_review_plan=maybe_get_llm_assisted_review_plan,
         choose_auto_merge_primary_claim_id=choose_auto_merge_primary_claim_id,
     )
 
@@ -9138,7 +9138,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = args.handler(args)
-    except HookExecutionError as exc:
+    except (LLMProjectConfigurationError, LLMRouteError) as exc:
         result = CommandResult(exit_code=1, payload=exc.payload, message=exc.message)
     return print_result(result, as_json=getattr(args, "json", False))
 

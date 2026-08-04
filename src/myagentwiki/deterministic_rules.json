@@ -1,0 +1,25 @@
+{
+  "text": {
+    "sentence_punctuation": ["。", "；", "：", "，"],
+    "fragment_endings": ["？", "?", "：", ":"],
+    "question_endings": ["？", "?"]
+  },
+  "aliases": {
+    "image_slot_pattern": "^(?:内嵌图片\\s*)?(?:image|img|figure|fig|photo|picture|插图|图片)[-_ ]?[a-z0-9]+$",
+    "noisy_values": ["一句话总结", "注意"]
+  },
+  "concept_titles": {
+    "generic_values": ["example", "summary", "note", "method", "appendix", "why", "how"],
+    "short_allowed_values": ["AI"],
+    "technical_terms": {
+      "bm25": "BM25",
+      "llm-wiki": "LLM-Wiki"
+    }
+  },
+  "document_analysis": {
+    "reference_path_markers": ["faq"],
+    "tutorial_title_markers": ["guide", "tutorial", "how"],
+    "chat_path_markers": ["chat"],
+    "paragraph_path_markers": ["plain", "note"]
+  }
+}

@@ -16,7 +16,7 @@ def run_cli(*args: str, cwd: Path | None = None) -> dict:
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": "deterministic"},
         capture_output=True,
         text=True,
         check=True,
@@ -28,7 +28,7 @@ def run_cli_text(*args: str, cwd: Path | None = None) -> str:
     completed = subprocess.run(
         [sys.executable, "-m", "myagentwiki.cli", *args],
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": "deterministic"},
         capture_output=True,
         text=True,
         check=True,
@@ -176,6 +176,47 @@ def test_e2e_init_ingest_query_review_and_lint(tmp_path: Path) -> None:
     assert not any(item["kind"] == "alias_conflict" and item["status"] == "open" for item in refreshed_reviews["items"])
 
 
+def test_ingest_refreshes_outdated_normalized_record_without_raw_change(tmp_path: Path) -> None:
+    source_dir = tmp_path / "raw"
+    source_dir.mkdir()
+    raw_path = source_dir / "versioned.md"
+    raw_path.write_text("# 当前内容\n\n标准化器升级后应重新处理这份资料。\n", encoding="utf-8")
+
+    workspace_dir = tmp_path / "workspace"
+    run_cli(
+        "init",
+        "--source-dir",
+        str(source_dir),
+        "--project-name",
+        "NormalizerUpgrade",
+        "--target-dir",
+        str(workspace_dir),
+    )
+    run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    normalized_state_path = workspace_dir / "state" / "normalized.jsonl"
+    normalized_records = load_jsonl(normalized_state_path)
+    assert len(normalized_records) == 1
+    outdated_record = dict(normalized_records[0])
+    outdated_record["normalizer_version"] = "normalize_v1"
+    normalized_state_path.write_text(
+        json.dumps(outdated_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    normalized_file_path = workspace_dir / outdated_record["normalized_path"]
+    normalized_file_path.write_text("# 过期结果\n", encoding="utf-8")
+
+    ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
+
+    refreshed_records = load_jsonl(normalized_state_path)
+    assert ingest_result["summary"]["normalized_count"] == 1
+    assert len(refreshed_records) == 1
+    assert refreshed_records[0]["normalizer_version"] == "normalize_v2"
+    refreshed_text = normalized_file_path.read_text(encoding="utf-8")
+    assert "标准化器升级后应重新处理这份资料" in refreshed_text
+    assert "过期结果" not in refreshed_text
+
+
 def test_init_enables_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -225,25 +266,6 @@ def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
         str(workspace_dir),
     )
 
-    config_path = workspace_dir / "config" / "project.yml"
-    config_text = config_path.read_text(encoding="utf-8")
-    config_text = config_text.replace(
-        '  review_auto:\n'
-        '    strategy: "safe_auto"\n'
-        '    command: []\n'
-        '    timeout_seconds: 45\n'
-        '    min_confidence: 0.8\n',
-        '  review_auto:\n'
-        '    strategy: "agent_assisted"\n'
-        '    command:\n'
-        f'      - "{sys.executable}"\n'
-        '      - "-m"\n'
-        '      - "myagentwiki.agent_hook"\n'
-        '    timeout_seconds: 20\n'
-        '    min_confidence: 0.9\n',
-    )
-    config_path.write_text(config_text, encoding="utf-8")
-
     ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
 
     assert "post_ingest_review_auto" in ingest_result
@@ -252,7 +274,7 @@ def test_ingest_runs_post_ingest_review_auto_by_default(tmp_path: Path) -> None:
     assert not any(item["status"] == "open" for item in review_list["items"])
 
 
-def test_init_default_agent_hooks_auto_generate_concept_and_overview_pages(tmp_path: Path) -> None:
+def test_init_default_llm_tasks_generate_pages_in_explicit_test_mode(tmp_path: Path) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
     (source_dir / "claim.md").write_text(
@@ -274,15 +296,18 @@ def test_init_default_agent_hooks_auto_generate_concept_and_overview_pages(tmp_p
         "--source-dir",
         str(source_dir),
         "--project-name",
-        "DefaultAgentHooks",
+        "DefaultLLMRouting",
         "--target-dir",
         str(workspace_dir),
     )
 
     config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
-    assert 'review_auto:\n    strategy: "agent_assisted"' in config_text
-    assert 'stable_promotion:\n    strategy: "agent_assisted"' in config_text
-    assert '- "-m"\n      - "myagentwiki.agent_hook"' in config_text
+    assert 'review_auto:\n    strategy: "llm_assisted"' in config_text
+    assert 'stable_promotion:\n    strategy: "llm_assisted"' in config_text
+    assert 'primary: "online"' in config_text
+    assert 'fallback: "cli"' in config_text
+    assert "command:" not in config_text
+    assert "hook" not in config_text.lower()
 
     ingest_result = run_cli("ingest", "--target-dir", str(workspace_dir))
     assert ingest_result["post_ingest_review_auto"]["summary"]["promoted_claim_count"] >= 2
@@ -293,16 +318,16 @@ def test_init_default_agent_hooks_auto_generate_concept_and_overview_pages(tmp_p
 
     assert len(concept_pages) >= 2
     assert len(overview_pages) == 1
-    assert all(record["render_mode"] == "llm_assisted" for record in concept_pages)
-    assert all(record["render_status"] == "llm_assisted" for record in concept_pages)
-    assert overview_pages[0]["render_mode"] == "llm_assisted"
-    assert overview_pages[0]["render_status"] == "llm_assisted"
+    assert all(record["render_mode"] == "deterministic" for record in concept_pages)
+    assert all(record["render_status"] == "deterministic" for record in concept_pages)
+    assert overview_pages[0]["render_mode"] == "deterministic"
+    assert overview_pages[0]["render_status"] == "deterministic"
 
     concept_text = (workspace_dir / concept_pages[0]["page_path"]).read_text(encoding="utf-8")
     overview_text = (workspace_dir / overview_pages[0]["page_path"]).read_text(encoding="utf-8")
     assert "## 摘要 / Summary" in concept_text
     assert "## 工作区综述 / Workspace Overview" in overview_text
-    assert "## 改写回绑 / Rewrite Traceability" in overview_text
+    assert "## 维护状态 / Maintenance" in overview_text
 
 
 def test_init_creates_empty_sibling_raw_when_missing(tmp_path: Path) -> None:

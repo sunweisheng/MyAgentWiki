@@ -13,11 +13,14 @@ authors = [
   { name = "sunweisheng" }
 ]
 dependencies = [
+  "markitdown[docx,pdf,pptx,xls,xlsx,outlook]>=0.1.6,<0.2.0",
   "python-docx>=1.1.0",
   "openpyxl>=3.1.0",
   "pypdf>=5.0.0",
   "pillow>=10.0.0",
   "openai>=1.0.0",
+  "json-repair>=0.61.7,<1",
+  "jsonschema>=4.23,<5",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +39,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+myagentwiki = ["deterministic_rules.json"]

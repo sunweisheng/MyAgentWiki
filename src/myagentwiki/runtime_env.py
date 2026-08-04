@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT_MARKERS = ("pyproject.toml", ".git")
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
+    "python-pptx": "pptx",
+    "pdfminer-six": "pdfminer",
     "pillow": "PIL",
 }
 

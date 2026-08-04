@@ -42,7 +42,7 @@
 系统的关键能力包括：
 
 - 从用户原始知识目录同级初始化一个新的 Wiki 工程
-- 支持 `Word / Excel / PDF / Markdown / 图片` 五类输入
+- 支持 MarkItDown 覆盖的常见文档，以及 Markdown、纯文本和图片的专用标准化
 - 维护结构优先的 Markdown 中间表示，避免过早按句子或换行丢失上下文
 - 维护独立的知识单元层（Knowledge Unit layer）和声明层（Claim layer）
 - 建立 `page -> claim -> knowledge_unit -> evidence_block -> source` 的可追踪证据链
@@ -242,7 +242,7 @@ flowchart TD
 | Chunk | 可选上下文投影容器 | `state/chunks.jsonl` | CLI | 可由 `normalized` / Evidence Blocks 重新生成 |
 | KnowledgeUnit | 候选知识对象 | `state/knowledge_units.jsonl` 或等价知识单元账本 | CLI；LLM 只能提交候选 | 可重建，但需保留决策链 |
 | Claim | 稳定知识声明层 | `claims/*.json` + `state/claims.jsonl` | CLI，必要时人工编辑后走恢复 | 可重建，但需保留历史态 |
-| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` | CLI 写入；Agent hook / LLM 提交候选 | 可按输入重跑 |
+| SemanticDecision | 语义判断与解释链 | `state/semantic_decisions.jsonl` | CLI 写入；LLM 或确定性处理器提交候选 | 可按输入重跑 |
 | ReviewItem | 风险暂停点与恢复入口 | `reviews/*.json` + `state/reviews.jsonl` | CLI | 不能静默丢失 |
 | WikiPage | 面向人阅读的视图 | `wiki/**/*.md` + `state/pages.jsonl` | CLI 写骨架；LLM 只做受控改写候选 | 可重建，但需遵守生命周期 |
 | Search Index | 排序与快速检索 | `indexes/search_pages.jsonl` | CLI | 可重建 |
@@ -927,22 +927,22 @@ evidence_block_ids: [B]
 ### 总体原则
 
 - `raw -> normalized` 是整套编译链的第一优先级
-- 优先纯 Python 实现
+- 文档格式解析统一优先使用 `microsoft/markitdown`
 - 外部办公软件不是主路径前提
 - LLM 不直接替代标准化器，只在结构灰区上提供受限判断
 
 ### 统一转换架构
 
-标准化层采用“统一抽象 + 多转换器”设计：
+标准化层采用“MarkItDown 统一主路径 + MyAgentWiki 边界控制和专用增强”的设计：
 
-- `BaseConverter`：基础转换器接口，约束所有转换器的共同输入输出行为
-- `MarkdownConverter`：Markdown 转换器，负责处理 Markdown 和纯文本材料
-- `PdfConverter`：PDF 转换器，负责处理 PDF 文档
-- `WordConverter`：Word 转换器，负责处理 `.docx / .doc` 文档
-- `ExcelConverter`：Excel 转换器，负责处理 `.xlsx / .xls / .csv` 表格
-- `ImageConverter`：图片转换器，负责处理图片元数据和 OCR 文本
+- `app_services/document_conversion.py` 封装 `MarkItDown(enable_plugins=False)`，只调用 `convert_local()` 读取已经通过 `raw/` 路径校验的本地文件
+- PDF、DOCX、XLS/XLSX、CSV、PPTX、HTML、JSON/XML、ZIP、EPUB、IPYNB、Outlook MSG 等文档统一先走 MarkItDown
+- Markdown 和纯文本不做二次格式转换，继续使用 MyAgentWiki 的换行整理、远程图片下载和附件回链逻辑
+- 独立图片继续使用 MyAgentWiki 的元数据、`tesseract` 与可选 LLM 图片理解路径
+- MarkItDown 抛错或返回空内容时，已有 PDF、Word、Excel 转换器才作为备用路径；备用结果必须带 `markitdown_conversion_failed:<错误类型>`
+- 不支持或彻底失败的文件生成 `poor / failed` 占位文档，并把错误写入标准化账本和错误记录
 
-所有转换器输出统一 `NormalizedDocument`。
+MarkItDown 插件默认关闭，当前也不安装 Azure、音频转写或 YouTube extras。格式转换本身是本地、确定性的 Python 流程，不会因为引入 MarkItDown 自动产生在线模型请求。
 
 ### Markdown
 
@@ -959,44 +959,21 @@ evidence_block_ids: [B]
 - 下载结果通过 `location_map.images[*]` 回链 `asset_path / asset_hash / content_type / download_mode`
 - 下载失败不会让整份 Markdown 退出主流程，而是保留正文并写入 `warnings`
 
-### PDF
-
-行为：
-
-- 提取页级文本
-- 按页或逻辑段生成 Markdown
-- 记录 `page_range` 和页级 `location_map`
-- 对无法提取的页面写入 `warnings`
-
-设计原因：
-
-PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈得上时间线、引用和证据路径。
-
-### Word
-
-行为：
-
-- 提取标题、段落、列表、表格、图片占位
-- 保持块顺序和章节结构
-- 输出 Markdown 和段落级映射
+### MarkItDown 文档
 
 当前实现：
 
-- `.docx` 已有 `python-docx` 主路径和 `zip+xml` 纯 Python 回退
-- `.doc` 当前采用纯 Python 二进制保守回退
+- DOCX 尽量保留标题、段落、列表、链接和表格
+- XLS/XLSX/CSV 按工作表输出表名与 Markdown 表格
+- PPTX 按幻灯片输出标题、正文、备注和可提取表格
+- HTML、JSON/XML、ZIP、EPUB、IPYNB、Outlook MSG 使用 MarkItDown 内置转换器
+- PDF 使用 MarkItDown 的 PDF 依赖提取文本，扫描件或复杂版面仍可能缺少正文
 
-### Excel
+统一转换记录 `extraction_method=markitdown`，并在 `location_map` 保存原始路径、MarkItDown 版本、文档标题和 normalized 行号范围。MarkItDown 当前不会为所有格式统一返回页码、段落坐标和单元格坐标，因此精确位置仍以原始来源路径、标准化行号和后续 Structure / Evidence Block 行号为主；不能把不存在的页级映射写进账本。
 
-行为：
+每次 `ingest` 会核对 `normalizer_version`；对于 `markitdown` 和 `markitdown_failed+...` 结果，还会核对 `location_map` 中的 MarkItDown 版本。发现旧版本时，即使 `source_hash` 没有变化，也会复用原 `source_id`，清理该来源的旧派生结果并重新生成。`state/normalized.jsonl` 对同一来源只保留一条当前记录。
 
-- 读取 workbook、sheet、表头、数据区域
-- 每个 sheet 转为 Markdown 表格和结构化块
-- 保留 sheet 名、行列坐标、公式存在标记
-
-当前实现：
-
-- `.xlsx` / `.csv` 已有稳定 Python 路径
-- `.xls` 当前采用纯 Python 二进制保守回退
+`.doc` 等老格式仍可能超出 MarkItDown 的稳定能力。此时旧转换器只作为明确标记的备用路径，不再作为默认主转换器。
 
 ### 图片
 
@@ -1009,7 +986,7 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 当前实现：
 
 - 已实现“元数据保底 + `tesseract` 可用时本地 OCR 增强”
-- 当前尚未接入自动的 Agent 视觉理解续跑
+- OCR 不可用、失败或结果较弱时，可按工作区配置调用 LLM 图片理解；没有可靠结果时仍只保留元数据和告警
 
 ### 提取方式与提取质量
 
@@ -1020,6 +997,8 @@ PDF 往往结构噪声更高，所以必须先保住页级回链，后续才谈�
 
 建议的提取方式：
 
+- `markitdown`：MarkItDown 统一文档转换成功
+- `markitdown_failed+python_only`：MarkItDown 失败后使用旧转换器备用路径
 - `python_only`：纯 Python 提取
 - `python_only+tesseract`：Python 提取加本地 OCR 增强
 - `python_plus_agent`：Python 先提取，Agent 再补充理解
@@ -1288,7 +1267,7 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 
 #### Claim 自动提稳的当前判定口径
 
-`review-auto` 中的 stable promotion 不应理解为“LLM 觉得可以就直接提稳”。当前实现先走脚本层 `safe_auto` 规则；只有在规则未放行、且工作区显式配置了 agent-assisted stable promotion hook 时，才读取外部 hook 的 `decision / confidence`。
+`review-auto` 中的 stable promotion 不应理解为“LLM 觉得可以就直接提稳”。当前实现先走脚本层 `safe_auto` 规则；只有在规则未放行、且任务配置为 `llm_assisted` 时，才通过 LLM 调度器请求 `claim_stable_promotion`，并读取函数参数中的 `decision / confidence`。
 
 脚本层 `safe_auto` 自动提稳必须同时满足：
 
@@ -1305,13 +1284,13 @@ Claim 是 Knowledge Unit 的稳定事实子集，而不是所有候选知识对�
 
 “文本不是明显噪声”当前是规则判断，不依赖 LLM。它主要拦截空文本、纯链接、文件路径味过重的文本、`speaker:` / `time:` / `turn_id` 这类对话或日志字段、说话人前缀、单独 ISO 日期、Markdown 表格分隔线，以及自然字符少于 4 个的碎片。
 
-“文本不是依赖前文的残句”当前有检查入口，但实现中的依赖前缀列表暂为空。因此这一项在主脚本中主要是预留钩子，当前并不会系统性拦截“因此 / 所以 / 这个 / 上述”这类前文依赖表达。实际兜底更多来自噪声判断、问句判断、短文本质量判断、review / duplicate / conflict 门槛，以及 hook 的保守判断。
+“文本不是依赖前文的残句”当前有检查入口，但实现中的依赖前缀列表暂为空。因此这一项在主脚本中主要是预留检查点，当前并不会系统性拦截“因此 / 所以 / 这个 / 上述”这类前文依赖表达。实际兜底更多来自噪声判断、问句判断、短文本质量判断、review / duplicate / conflict 门槛，以及确定性处理器或 LLM 合同的受限判断。
 
 短文本灰区的当前定义是：清洗后自然字符少于 10 个，且不属于噪声。自然字符数大于等于 10 个时，不进入短文本灰区，也不要求 `quality_safe_auto_ready=true`；它会继续走普通的独立性、冲突、重复和审核状态检查。
 
-`quality_safe_auto_ready=true` 的含义是：对于短文本灰区，语义质量判断明确认为它虽然短，但可以安全进入自动提稳。当前包内保守 hook 对短 claim 很谨慎：问句、冒号结尾、问号结尾会标为 `fragment`；自然字符小于等于 4 个会标为 `title_shell`；其他短文本通常保留为 `standalone`，但仍要求 review，不默认给 `safe_auto_ready=true`。
+`quality_safe_auto_ready=true` 的含义是：对于短文本灰区，语义质量判断明确认为它虽然短，但可以安全进入自动提稳。显式确定性模式对短 claim 很谨慎：问句、冒号结尾、问号结尾会标为 `fragment`；自然字符小于等于 4 个会标为 `title_shell`；其他短文本通常保留为 `standalone`，但仍要求 review，不默认给 `safe_auto_ready=true`。
 
-`decision=promote` 且 `confidence >= min_confidence` 的白话含义是：外部 hook 明确建议“可以提稳”，并且它给出的把握程度达到配置里的最低置信度门槛。这个 hook 不直接写状态；脚本只在返回值达标后，才把 Claim 的 `status` 改成 `stable`。
+`decision=promote` 且 `confidence >= min_confidence` 的白话含义是：LLM 的函数调用参数明确建议“可以提稳”，并且它给出的把握程度达到配置里的最低置信度门槛。LLM 不直接写状态；脚本只在参数通过合同和业务检查后，才把 Claim 的 `status` 改成 `stable`。
 
 ### Claim 类型与知识角色
 
@@ -1447,7 +1426,7 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 - `content_tag_counts / semantic_feature_counts / semantic_feature_strength_counts`
 - `knowledge_unit_ids / evidence_block_ids / source_refs`
 
-默认保守 hook 会优先读取这些结构证据。例如 Markdown 表格行可以作为强 `reference` 证据，代码示例块可以作为强 `example` 证据；但普通中文冒号句或局部关键词不会直接压过正文语义。
+确定性处理器和 LLM 上下文都会优先读取这些结构证据。例如 Markdown 表格行可以作为强 `reference` 证据，代码示例块可以作为强 `example` 证据；但普通中文冒号句或局部关键词不会直接压过正文语义。
 
 对中文关键词，当前实现采用“默认不决策”的保守策略：
 
@@ -1455,7 +1434,7 @@ LLM 可以帮助判断一个结构块里的“知识对象”是什么，但不�
 - Markdown 表格行、metadata 行等结构证据可以支撑 `reference`
 - 代码示例块等结构证据可以支撑 `example`
 - `guide / timeline` 这类用途默认需要上游语义投影、人工/Agent 决策，或后续更明确的语言无关结构证据
-- 旧的 `ambiguous_*` 中文关键词风险标记已从默认 hook 中移除；Lint 仍会暴露语义层写入的风险标记和 page intent 降级刹车
+- 旧的 `ambiguous_*` 中文关键词风险标记已从确定性处理器中移除；Lint 仍会暴露语义层写入的风险标记和 page intent 降级刹车
 
 这些结果的权威归属是 SemanticDecision。Knowledge Unit / Claim 只能保存投影字段或 `semantic_decision_id`，不能把语义判断伪装成证据字段。
 
@@ -1509,7 +1488,7 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 
 1. 脚本先做初筛
 2. 灰区候选打包送入 LLM
-3. LLM 返回严格 JSON schema，且每个对象必须回链 Evidence Block 或已落账对象
+3. LLM 通过任务专属函数返回参数，且每个对象必须回链 Evidence Block 或已落账对象
 4. 脚本做 schema 校验、grounded 校验、账本写回和缓存收口
 
 ### LLM 输出提交协议
@@ -1517,13 +1496,13 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 所有 LLM 阶段都采用“候选提交，脚本验收”的协议：
 
 1. LLM 只能输出 proposal，不直接写 live 账本
-2. proposal 必须符合当前任务的 JSON schema
+2. proposal 必须来自当前任务强制指定的唯一函数调用，并符合该任务的 JSON Schema
 3. proposal 必须包含 `task_type / target_ids / evidence_block_ids 或 ledger_object_ids / reason_code / confidence / abstain`
 4. 脚本负责校验 schema、对象存在性、来源回链、span 覆盖、字段枚举、状态机约束和 grounded 约束
 5. 校验通过后，脚本写入 KnowledgeUnit、Claim、SemanticDecision、ReviewItem 或 Page projection
 6. 校验失败时，脚本必须记录 rejected proposal 或 lint 诊断，不能静默丢弃
 
-当前语义任务契约已覆盖：
+当前语义账本覆盖：
 
 - `document_analysis`
 - `claim_candidate_quality`
@@ -1531,11 +1510,13 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 - `page_intent`
 - `page_route`
 
-每类任务都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch --task` 只公开 `document_analysis / claim_candidate_quality / claim_role / page_intent`；`page_route` 在页面路由时自动落账。批处理会把缺字段、低置信度、`abstain` 或 malformed 输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
+每类语义决策都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch --task` 只公开 `document_analysis / claim_candidate_quality / claim_role / page_intent`；`page_route` 在页面路由时自动落账，不是独立 LLM 函数。批处理会把缺字段、低置信度、`abstain` 或不合格输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
 
-默认工作区模板使用包内保守 `myagentwiki.agent_hook`。需要增强效果时，优先把具体任务的 command 改为 `python3 -m myagentwiki.agent_cli_hook`，由 Codex CLI 返回 `{"decisions":[...]}`；CLI 失败、超时或输出无法解析时，系统回退到保守路径。
+当前 LLM Function Calling 合同覆盖十个真实任务：四个语义分析任务、`review_auto_decision / claim_stable_promotion / review_concept_candidate`、`render_readable_concept_page / render_workspace_overview_page` 和 `describe_image`。`qa_note / concept_update` 尚未实现合同，因此保持禁用。
 
-只有用户明确提供自己的 `config/llm.local.yml` 时，才使用 `python3 -m myagentwiki.agent_online_hook` 直连远程模型。在线 hook 通过 OpenAI SDK 支持 `responses / chat_completions`，并可配置 `transport.verify_ssl`；配置缺失、鉴权失败、协议不匹配或响应格式错误会明确报错。
+默认工作区为已实现任务配置 `llm_assisted`。LLM 调度器优先使用在线客户端；在线配置缺失、遇到不可重试错误，或三次尝试仍失败时，改用只执行一次的 Codex CLI 客户端。主备都失败时抛出 `LLMRouteError` 并让当前命令失败，不返回空结果，也不调用确定性处理器掩盖失败。完全离线时必须显式选择 `deterministic`。
+
+在线 `responses / chat_completions` 都使用非流式强制 Function Calling，并关闭 SDK 与 HTTP transport 内部重试。函数参数按“调用数量与函数名、`json_repair`、JSON Schema、任务业务规则”的顺序检查；只有全部通过后才交给业务代码。
 
 LLM 必须允许放弃判断：
 
@@ -1601,7 +1582,7 @@ LLM 输出应包含可解释原因，例如：
 `ingest -> review-auto -> stable promotion -> page rebuild -> query-ready artifacts`
 
 也就是说，`ingest` 结束并不总意味着“所有后续收口都已完成”，但默认模板会继续把高把握自动步骤串起来。
-其中 `stable promotion` 是否发生，先取决于脚本层 `safe_auto` 规则是否放行；如果未放行且配置了 agent-assisted hook，则再取决于 hook 是否返回 `decision=promote` 且置信度达标。`page rebuild` 是否进一步产出可读 `concept / overview`，还取决于 stable claim 数量、页型路由结果与页面生成条件。
+其中 `stable promotion` 是否发生，先取决于脚本层 `safe_auto` 规则是否放行；如果未放行且任务配置为 `llm_assisted`，则再取决于 `claim_stable_promotion` 函数结果是否返回 `decision=promote` 且置信度达标。`page rebuild` 是否进一步产出可读 `concept / overview`，还取决于 stable claim 数量、页型路由结果与页面生成条件。
 
 ### 必须进入审核队列的场景
 
@@ -1658,7 +1639,7 @@ LLM 输出应包含可解释原因，例如：
 - 对短 claim，`safe_auto` 不再简单按长度一刀切。当前实现把自然字符少于 10 个且非噪声的文本视为短文本灰区；只有 `quality_safe_auto_ready=true` 时才允许自动提稳
 - 自然字符大于等于 10 个的 Claim 不进入短文本灰区，不要求 `quality_safe_auto_ready=true`，但仍必须通过可追踪性、开放 review、重复、冲突、噪声、问句和质量标签检查
 - 多来源支撑仍然是强正向信号，但不再作为默认提稳门槛
-- 如果脚本层 `safe_auto` 没有放行，只有在 agent-assisted hook 返回 `decision=promote` 且置信度达标时，才提升为 `stable`
+- 如果脚本层 `safe_auto` 没有放行，只有在 LLM 函数结果返回 `decision=promote` 且置信度达标时，才提升为 `stable`
 - 未达标时保持原状，不做“顺手提稳”
 
 ### 恢复机制
@@ -2151,15 +2132,17 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 重点测试面包括：
 
 - 初始化与 Git 基线
-- 五类输入标准化与降级路径
+- MarkItDown 文档、Markdown、纯文本和图片的标准化与降级路径
 - Markdown Structure IR 对标题、列表、表格、引用、代码块、空行和中文标点的解析
 - Evidence Block 对“列表标题 + 正文”“表格行”“字段：值”的组合
 - Knowledge Unit 对结构 metadata、局部标题和正文上下文的保留
 - `page -> claim -> knowledge_unit -> evidence_block -> source` 追踪链
 - query 权重与意图路由
 - 语义批处理与语义账本
-- 真实 LLM CLI hook 的 prompt / schema / 输出解析 / fallback
-- 在线 LLM hook 的本地配置、`responses / chat_completions` 请求、输出解析与错误分流
+- CLI 客户端的任务上下文、`--output-schema`、图片参数、输出解析和单次尝试约束
+- 在线客户端的本地配置、`responses / chat_completions` 强制 Function Calling、非流式请求和错误分流
+- LLM 调度器的在线重试、主备切换、主备失败与脱敏诊断
+- `json_repair`、JSON Schema 和任务业务检查的固定处理顺序
 - 中文多文档类型混合导入时的结构优先页面路由
 - review 六种动作与恢复闭环
 - lint 报告与非可重试错误分流
@@ -2182,8 +2165,12 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `tests/test_review_detection.py`：审核候选检测测试
 - `tests/test_query_alias_and_lint.py`：查询、别名与 lint 测试
 - `tests/test_semantic_batch.py`：语义批处理、缓存、结构上下文与页面路由重算测试
-- `tests/test_agent_cli_hook.py`：Codex CLI hook 的 prompt、schema 与解析测试
-- `tests/test_agent_online_hook.py`：OpenAI SDK 在线 hook 的配置、两种 API 风格、缓存、节流与错误处理测试
+- `tests/test_llm_contracts.py`：十个任务的函数名、上下文、严格 Schema 与业务边界测试
+- `tests/test_llm_online_client.py`：OpenAI SDK 两种 API 风格、强制函数、图片和客户端生命周期测试
+- `tests/test_llm_cli_client.py`：Codex CLI 输出合同、图片参数、超时与错误测试
+- `tests/test_llm_router.py`：在线重试、不可重试错误、CLI 单次尝试、主备失败和诊断测试
+- `tests/test_llm_repair.py`：合法 JSON、常见修复、Schema 与业务检查测试
+- `tests/test_deterministic_processor.py`：显式确定性模式测试
 - `tests/test_page_intent_routing.py`：结构优先页型路由与中文歧义词回归测试
 - `tests/test_claim_role_concept_filter.py`：claim role 对概念候选过滤和结构化参考证据的测试
 - `tests/test_structure_knowledge_pipeline.py`：Structure IR、Evidence Block、Knowledge Unit 与 semantic features 测试
@@ -2205,8 +2192,9 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `semantic/` 目录、`state/semantic_decisions.jsonl`、semantic batch 缓存与任务契约
 - `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑语义批处理阶段，以及会在页面路由时自动落账的 `page_route` 决策
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
-- `agent_cli_hook` 已支持通过 Codex CLI 调用真实 LLM
-- `agent_online_hook` 已支持通过用户自己的 OpenAI 兼容地址调用远程 LLM，并支持 `responses / chat_completions`
+- LLM 调度器已实现在线主线路最多三次、Codex CLI 备用线路一次，以及主备都失败时的命令失败语义
+- 在线客户端已支持用户自己的 OpenAI 兼容地址和 `responses / chat_completions`，CLI 客户端使用同一 Function Calling 合同
+- 十个已实现任务统一经过 `json_repair`、JSON Schema 和业务检查；图片会以真实 MIME data URL 或 CLI `-i` 参数传入
 - `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
 - 覆盖主闭环的端到端和关键回归测试
 

@@ -9,11 +9,22 @@ runtime:
 
 python_packages:
   required:
+    - "markitdown"
+    - "mammoth"
+    - "lxml"
+    - "pandas"
+    - "python-pptx"
+    - "xlrd"
+    - "pdfminer-six"
+    - "pdfplumber"
+    - "olefile"
     - "python-docx"
     - "openpyxl"
     - "pypdf"
     - "pillow"
     - "openai"
+    - "json-repair"
+    - "jsonschema"
   optional:
     ocr: []
     office: []
@@ -26,22 +37,4 @@ system_tools:
       purpose: "Optional OCR enhancement for image-heavy sources."
       check:
         command: ["tesseract", "--version"]
-      fallback: "Use agent-assisted image understanding when unavailable."
-    libreoffice:
-      supported_platforms: ["windows", "macos", "linux"]
-      purpose: "Optional high-fidelity Office document conversion."
-      check:
-        command: ["libreoffice", "--version"]
-      fallback: "Use pure Python document extraction with reduced fidelity."
-    pandoc:
-      supported_platforms: ["windows", "macos", "linux"]
-      purpose: "Optional rich document conversion."
-      check:
-        command: ["pandoc", "--version"]
-      fallback: "Use format-specific Python converters."
-    pdftotext:
-      supported_platforms: ["windows", "macos", "linux"]
-      purpose: "Optional PDF text extraction enhancement."
-      check:
-        command: ["pdftotext", "-v"]
-      fallback: "Use pure Python PDF parsing."
+      fallback: "Use LLM-assisted image understanding when unavailable."

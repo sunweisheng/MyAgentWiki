@@ -6,16 +6,30 @@ import subprocess
 import sys
 from pathlib import Path
 
+from myagentwiki.app_services.review_auto_helpers import (
+    build_stable_promotion_payload,
+    maybe_get_llm_assisted_stable_promotion,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(*args: str, cwd: Path | None = None) -> dict:
+def run_cli(
+    *args: str,
+    cwd: Path | None = None,
+    llm_mode: str | None = "deterministic",
+) -> dict:
     command = [sys.executable, "-m", "myagentwiki.cli", *args, "--json"]
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    if llm_mode is None:
+        env.pop("MYAGENTWIKI_LLM_MODE", None)
+    else:
+        env["MYAGENTWIKI_LLM_MODE"] = llm_mode
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+        env=env,
         capture_output=True,
         text=True,
         check=True,
@@ -74,8 +88,30 @@ def inject_shared_alias_override(workspace_dir: Path, shared_alias: str) -> list
     return page_ids
 
 
-def append_text(path: Path, text: str) -> None:
-    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+def configure_only_review_auto_llm(workspace_dir: Path, base_url: str) -> None:
+    config_path = workspace_dir / "config" / "project.yml"
+    config_text = config_path.read_text(encoding="utf-8")
+    config_text = config_text.replace('strategy: "llm_assisted"', 'strategy: "deterministic"')
+    config_text = config_text.replace('mode: "llm_assisted"', 'mode: "deterministic"')
+    marker = '  review_auto:\n    strategy: "deterministic"\n'
+    if marker not in config_text:
+        raise AssertionError("Missing automation.review_auto configuration")
+    config_path.write_text(
+        config_text.replace(marker, '  review_auto:\n    strategy: "llm_assisted"\n', 1),
+        encoding="utf-8",
+    )
+    (workspace_dir / "config" / "llm.local.yml").write_text(
+        'provider:\n'
+        '  protocol: "openai_compatible"\n'
+        f'  base_url: "{base_url}"\n'
+        '  model: "local-test-model"\n'
+        '  api_key: "local-test-key"\n'
+        '  timeout_seconds: 20\n'
+        'transport:\n'
+        '  api_style: "chat_completions"\n'
+        '  verify_ssl: true\n',
+        encoding="utf-8",
+    )
 
 
 def create_workspace(tmp_path: Path, project_name: str, files: dict[str, str]) -> Path:
@@ -281,10 +317,10 @@ def test_review_auto_applies_safe_merge_and_promotes_winner_to_stable(tmp_path: 
     assert surviving_promoted_ids
 
 
-def test_review_auto_agent_assisted_hook_can_resolve_claim_conflict(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_keeps_distinct_conflict_claims(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
-        "ReviewAutoAgentHook",
+        "ReviewAutoDeterministicProcessor",
         {
             "a.md": "# A\n\nChunking 不是最终知识成品。\n",
             "b.md": "# B\n\nChunking 是最终知识成品。\n",
@@ -299,7 +335,7 @@ def test_review_auto_agent_assisted_hook_can_resolve_claim_conflict(tmp_path: Pa
     second_claim_id = claim_records[1]["claim_id"]
 
     review_record = {
-        "review_id": "rev_agent_hook_conflict",
+        "review_id": "rev_deterministic_conflict",
         "kind": "claim_conflict",
         "status": "open",
         "lifecycle_status": "active",
@@ -313,50 +349,22 @@ def test_review_auto_agent_assisted_hook_can_resolve_claim_conflict(tmp_path: Pa
         "created_at": "2026-06-01T00:00:00+00:00",
         "resolved_at": None,
         "archived_at": None,
-        "review_file_path": "reviews/rev_agent_hook_conflict.json",
+        "review_file_path": "reviews/rev_deterministic_conflict.json",
     }
     write_jsonl(reviews_path, [review_record])
-    write_json(workspace_dir / "reviews" / "rev_agent_hook_conflict.json", review_record)
-
-    hook_script = tmp_path / "review_hook.py"
-    hook_script.write_text(
-        "import json, sys\n"
-        "payload = json.load(sys.stdin)\n"
-        "claim_ids = payload['review']['candidate_claim_ids']\n"
-        "json.dump({\n"
-        "  'decision': 'auto_apply',\n"
-        "  'action': 'archive_one',\n"
-        "  'primary_claim_id': claim_ids[1],\n"
-        "  'confidence': 0.97,\n"
-        "  'reason': 'agent_hook_archives_weaker_conflict_claim'\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{hook_script}"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
+    write_json(workspace_dir / "reviews" / "rev_deterministic_conflict.json", review_record)
 
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
     assert result["summary"]["applied_count"] == 1
-    assert result["applied_actions"][0]["action"] == "archive_one"
-    assert result["applied_actions"][0]["reason"] == "agent_hook_archives_weaker_conflict_claim"
-    assert result["automation"]["review_auto"]["strategy"] == "agent_assisted"
+    assert result["applied_actions"][0]["action"] == "keep_both"
+    assert result["applied_actions"][0]["reason"] == "deterministic_processor_kept_complementary_conflict_claims"
+    assert result["automation"]["review_auto"]["strategy"] == "deterministic"
     refreshed_reviews = {record["review_id"]: record for record in load_jsonl(reviews_path)}
-    assert refreshed_reviews["rev_agent_hook_conflict"]["status"] == "resolved"
+    assert refreshed_reviews["rev_deterministic_conflict"]["status"] == "resolved"
 
 
-def test_review_auto_agent_assisted_hook_archives_contained_conflict_claim(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_keeps_related_conflict_claims(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoContainedConflict",
@@ -389,7 +397,7 @@ def test_review_auto_agent_assisted_hook_archives_contained_conflict_claim(tmp_p
         write_json(workspace_dir / "claims" / f"{claim_record['claim_id']}.json", claim_record)
 
     review_record = {
-        "review_id": "rev_agent_hook_contained_conflict",
+        "review_id": "rev_deterministic_contained_conflict",
         "kind": "claim_conflict",
         "status": "open",
         "lifecycle_status": "active",
@@ -403,35 +411,21 @@ def test_review_auto_agent_assisted_hook_archives_contained_conflict_claim(tmp_p
         "created_at": "2026-06-01T00:00:00+00:00",
         "resolved_at": None,
         "archived_at": None,
-        "review_file_path": "reviews/rev_agent_hook_contained_conflict.json",
+        "review_file_path": "reviews/rev_deterministic_contained_conflict.json",
     }
     write_jsonl(reviews_path, [review_record])
-    write_json(workspace_dir / "reviews" / "rev_agent_hook_contained_conflict.json", review_record)
-
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + '      - "-m"\n'
-        + '      - "myagentwiki.agent_hook"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
+    write_json(workspace_dir / "reviews" / "rev_deterministic_contained_conflict.json", review_record)
 
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
     assert result["summary"]["applied_count"] == 1
     assert result["applied_actions"][0]["action"] == "keep_both"
-    assert result["applied_actions"][0]["reason"] == "agent_hook_kept_complementary_conflict_claims"
+    assert result["applied_actions"][0]["reason"] == "deterministic_processor_kept_complementary_conflict_claims"
     refreshed_reviews = {record["review_id"]: record for record in load_jsonl(reviews_path)}
-    assert refreshed_reviews["rev_agent_hook_contained_conflict"]["status"] == "resolved"
+    assert refreshed_reviews["rev_deterministic_contained_conflict"]["status"] == "resolved"
 
 
-def test_review_auto_agent_assisted_hook_can_keep_both_distinct_question_claims(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_keeps_distinct_topic_claims(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoQuestionConflict",
@@ -457,7 +451,7 @@ def test_review_auto_agent_assisted_hook_can_keep_both_distinct_question_claims(
         write_json(workspace_dir / "claims" / f"{claim_record['claim_id']}.json", claim_record)
 
     review_record = {
-        "review_id": "rev_agent_hook_question_conflict",
+        "review_id": "rev_deterministic_question_conflict",
         "kind": "claim_conflict",
         "status": "open",
         "lifecycle_status": "active",
@@ -471,76 +465,60 @@ def test_review_auto_agent_assisted_hook_can_keep_both_distinct_question_claims(
         "created_at": "2026-06-01T00:00:00+00:00",
         "resolved_at": None,
         "archived_at": None,
-        "review_file_path": "reviews/rev_agent_hook_question_conflict.json",
+        "review_file_path": "reviews/rev_deterministic_question_conflict.json",
     }
     write_jsonl(reviews_path, [review_record])
-    write_json(workspace_dir / "reviews" / "rev_agent_hook_question_conflict.json", review_record)
-
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + '      - "-m"\n'
-        + '      - "myagentwiki.agent_hook"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
+    write_json(workspace_dir / "reviews" / "rev_deterministic_question_conflict.json", review_record)
 
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
     assert result["summary"]["applied_count"] == 1
     assert result["applied_actions"][0]["action"] == "keep_both"
-    assert result["applied_actions"][0]["reason"] == "agent_hook_kept_complementary_conflict_claims"
+    assert result["applied_actions"][0]["reason"] == "deterministic_processor_kept_complementary_conflict_claims"
     refreshed_reviews = {record["review_id"]: record for record in load_jsonl(reviews_path)}
-    assert refreshed_reviews["rev_agent_hook_question_conflict"]["status"] == "resolved"
+    assert refreshed_reviews["rev_deterministic_question_conflict"]["status"] == "resolved"
 
 
-def test_review_auto_agent_assisted_hook_can_promote_claim_to_stable(tmp_path: Path) -> None:
-    workspace_dir = create_workspace(
-        tmp_path,
-        "ReviewAutoStableHook",
-        {
-            "topic.md": "# Topic\n\n为什么知识声明层必须保留可追踪性？\n",
+def test_llm_assisted_stable_promotion_uses_structured_decision(tmp_path: Path) -> None:
+    observed: dict = {}
+
+    def request_llm(**kwargs) -> dict:  # noqa: ANN003
+        observed.update(kwargs)
+        return {
+            "decision": "promote",
+            "confidence": 0.96,
+            "reason": "llm_promoted_single_source_claim",
+        }
+
+    promoted, reason = maybe_get_llm_assisted_stable_promotion(
+        target=tmp_path,
+        claim_record={
+            "claim_id": "claim_1",
+            "text": "知识声明层必须保留可追踪性。",
+            "status": "draft",
+            "claim_type": "fact",
+            "source_ids": ["source_1"],
+            "source_refs": [{"source_id": "source_1"}],
+            "duplicate_candidates": [],
+            "conflict_group": None,
+            "page_ids": [],
         },
+        automation_config={
+            "enabled": True,
+            "strategy": "llm_assisted",
+            "timeout_seconds": 20,
+            "min_confidence": 0.9,
+        },
+        request_llm=request_llm,
+        run_deterministic_processor=lambda payload: {},
+        build_stable_promotion_payload=build_stable_promotion_payload,
+        coerce_float=lambda value, default: float(value) if value is not None else default,
     )
 
-    promotion_script = tmp_path / "stable_hook.py"
-    promotion_script.write_text(
-        "import json, sys\n"
-        "_payload = json.load(sys.stdin)\n"
-        "json.dump({\n"
-        "  'decision': 'promote',\n"
-        "  'confidence': 0.96,\n"
-        "  'reason': 'agent_hook_promoted_single_source_claim'\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
-
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  stable_promotion:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{promotion_script}"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
-
-    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
-
-    assert result["summary"]["promoted_claim_count"] >= 1
-    assert result["automation"]["stable_promotion"]["strategy"] == "agent_assisted"
-    reasons = {item["reason"] for item in result["promoted_claims"]}
-    assert "agent_hook_promoted_single_source_claim" in reasons or "safe_auto_promoted_to_stable" in reasons
-    refreshed_claims = load_jsonl(workspace_dir / "state" / "claims.jsonl")
-    assert any(record.get("status") == "stable" for record in refreshed_claims)
+    assert promoted is True
+    assert reason == "llm_promoted_single_source_claim"
+    assert observed["task_name"] == "claim_stable_promotion"
+    assert observed["payload"]["claim"]["claim_id"] == "claim_1"
 
 
 def test_review_auto_safe_auto_uses_semantic_quality_for_short_claim(tmp_path: Path) -> None:
@@ -687,7 +665,7 @@ def test_review_auto_escalates_ambiguous_alias_conflict(tmp_path: Path) -> None:
     assert alias_reviews[0]["status"] == "open"
 
 
-def test_review_auto_agent_assisted_hook_can_assign_noisy_alias_to_unique_title_owner(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_assigns_noisy_alias_to_unique_title_owner(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoAliasOwner",
@@ -707,31 +685,18 @@ def test_review_auto_agent_assisted_hook_can_assign_noisy_alias_to_unique_title_
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + '      - "-m"\n'
-        + '      - "myagentwiki.agent_hook"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
-
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
-    assert result["summary"]["applied_count"] == 0
+    assert result["summary"]["applied_count"] == 1
+    assert result["applied_actions"][0]["reason"] == "deterministic_processor_assigned_noisy_alias_to_title_owner"
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
-    assert any(
+    assert not any(
         item["kind"] == "alias_conflict" and item["status"] == "open"
         for item in refreshed_reviews["items"]
     )
 
 
-def test_review_auto_agent_assisted_hook_can_assign_non_noisy_alias_to_unique_title_owner(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_assigns_alias_to_unique_title_owner(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoSpecificAliasOwner",
@@ -751,23 +716,10 @@ def test_review_auto_agent_assisted_hook_can_assign_non_noisy_alias_to_unique_ti
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + '      - "-m"\n'
-        + '      - "myagentwiki.agent_hook"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
-
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
-    assert result["summary"]["applied_count"] == 0
+    assert result["summary"]["applied_count"] == 1
+    assert result["applied_actions"][0]["reason"] == "deterministic_processor_assigned_alias_to_unique_title_owner"
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     assert not any(
         item["kind"] == "alias_conflict" and item["status"] == "open"
@@ -775,7 +727,7 @@ def test_review_auto_agent_assisted_hook_can_assign_non_noisy_alias_to_unique_ti
     )
 
 
-def test_review_auto_agent_assisted_hook_can_keep_both_generated_image_aliases(tmp_path: Path) -> None:
+def test_review_auto_deterministic_processor_keeps_generated_image_aliases_distinct(tmp_path: Path) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoImageAliasKeepBoth",
@@ -797,25 +749,11 @@ def test_review_auto_agent_assisted_hook_can_keep_both_generated_image_aliases(t
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + '      - "-m"\n'
-        + '      - "myagentwiki.agent_hook"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
-
     result = run_cli("review-auto", "--target-dir", str(workspace_dir))
 
     assert result["summary"]["applied_count"] >= 1
     applied_reasons = {item["reason"] for item in result["applied_actions"]}
-    assert "agent_hook_kept_generated_image_aliases_distinct" in applied_reasons
+    assert "deterministic_processor_kept_generated_image_aliases_distinct" in applied_reasons
     refreshed_reviews = run_cli("review-list", "--target-dir", str(workspace_dir))
     assert not any(
         item["kind"] == "alias_conflict" and item["status"] == "open"
@@ -823,7 +761,10 @@ def test_review_auto_agent_assisted_hook_can_keep_both_generated_image_aliases(t
     )
 
 
-def test_review_auto_downgrades_invalid_alias_auto_apply_to_escalation(tmp_path: Path) -> None:
+def test_review_auto_downgrades_invalid_llm_alias_action_to_escalation(
+    tmp_path: Path,
+    function_call_server,
+) -> None:
     workspace_dir = create_workspace(
         tmp_path,
         "ReviewAutoAliasValidationFallback",
@@ -861,37 +802,22 @@ def test_review_auto_downgrades_invalid_alias_auto_apply_to_escalation(tmp_path:
 
     run_cli("ingest", "--target-dir", str(workspace_dir))
 
-    hook_script = tmp_path / "alias_hook.py"
-    hook_script.write_text(
-        "import json, sys\n"
-        "payload = json.load(sys.stdin)\n"
-        "review = payload.get('review', {})\n"
-        "page_ids = review.get('candidate_page_ids', [])\n"
-        "json.dump({\n"
-        "  'decision': 'auto_apply',\n"
-        "  'action': 'assign_alias',\n"
-        "  'primary_page_id': page_ids[0] if page_ids else '',\n"
-        "  'alias_value': payload.get('alias_conflict_context', {}).get('alias_value', ''),\n"
-        "  'confidence': 0.99,\n"
-        "  'reason': 'agent_hook_forced_invalid_alias_assignment'\n"
-        "}, sys.stdout, ensure_ascii=False)\n",
-        encoding="utf-8",
-    )
+    def build_result(function_name: str, context: dict) -> dict:
+        assert function_name == "submit_review_decision"
+        page_ids = context["review"]["candidate_page_ids"]
+        return {
+            "decision": "auto_apply",
+            "action": "assign_alias",
+            "primary_claim_id": None,
+            "secondary_claim_id": None,
+            "primary_page_id": page_ids[0],
+            "alias_value": context["alias_conflict_context"]["alias_value"],
+            "confidence": 0.99,
+            "reason": "llm_forced_invalid_alias_assignment",
+        }
 
-    append_text(
-        workspace_dir / "config" / "project.yml",
-        "\n"
-        + "automation:\n"
-        + "  review_auto:\n"
-        + '    strategy: "agent_assisted"\n'
-        + "    command:\n"
-        + '      - "python3"\n'
-        + f'      - "{hook_script}"\n'
-        + "    timeout_seconds: 20\n"
-        + "    min_confidence: 0.9\n",
-    )
-
-    result = run_cli("review-auto", "--target-dir", str(workspace_dir))
+    configure_only_review_auto_llm(workspace_dir, function_call_server(build_result))
+    result = run_cli("review-auto", "--target-dir", str(workspace_dir), llm_mode=None)
 
     assert result["summary"]["applied_count"] == 0
     assert result["summary"]["auto_apply_failure_count"] == 1
