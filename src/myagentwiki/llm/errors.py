@@ -13,6 +13,7 @@ class LLMClientError(Exception):
         retryable: bool,
         http_status: int | None = None,
         repaired: bool = False,
+        debug_details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -21,6 +22,7 @@ class LLMClientError(Exception):
         self.retryable = retryable
         self.http_status = http_status
         self.repaired = repaired
+        self.debug_details = debug_details or {}
 
     def as_record(self) -> dict[str, Any]:
         return {
@@ -44,13 +46,21 @@ class LLMConfigurationError(LLMClientError):
 
 
 class LLMResponseError(LLMClientError):
-    def __init__(self, message: str, *, backend: str, repaired: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend: str,
+        repaired: bool = False,
+        debug_details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(
             message,
             backend=backend,
             kind="invalid_response",
             retryable=backend == "online",
             repaired=repaired,
+            debug_details=debug_details,
         )
 
 

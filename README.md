@@ -215,6 +215,9 @@ New-Item -ItemType Junction `
 - [docs/全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
   - LLM 协同判定专题文档，聚焦语义分析阶段、批处理原则和 grounded 边界
 
+- [docs/调试模式与全链路追踪设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/调试模式与全链路追踪设计.md)
+  - 工作区调试目录、步骤与数据关系格式、完整快照、LLM 请求记录、保留策略和安全边界
+
 ## 快速开始 / Quick Start
 
 ### 1. 准备环境
@@ -575,6 +578,21 @@ MyAgentWiki/
 - `myagentwiki render-page`
 - `myagentwiki semantic-batch`
 - `myagentwiki claim-set-status`
+- `myagentwiki debug-list`
+- `myagentwiki debug-show`
+
+除 `init / doctor / bootstrap` 外，上述工作区业务命令都支持 `--debug`。启用后，本次运行会在命令结果中附带 `debug_run`，并把完整记录写到工作区 `logs/debug/<run_id>/`。其中 `record_complete` 用于区分业务状态与调试记录本身是否完整。
+
+常用查看方式：
+
+```bash
+python3 -m myagentwiki ingest --target-dir /path/to/workspace --debug
+python3 -m myagentwiki debug-list --target-dir /path/to/workspace
+python3 -m myagentwiki debug-show --target-dir /path/to/workspace --run-id latest
+python3 -m myagentwiki debug-show --target-dir /path/to/workspace --run-id latest --source-id <source_id> --json
+```
+
+调试目录默认保留 7 天，由工作区 `config/project.yml` 的 `debug.retention_days` 控制。记录含完整文本和结构化中间数据，属于敏感资料；模板已将 `logs/debug/` 加入 Git 忽略。API Key、认证头和已知凭据值会被排除或替换，原始二进制文件只记录路径、大小、类型和哈希，不复制内容。
 
 当前实现状态：
 
@@ -800,11 +818,12 @@ python scripts/validate_workflow.py --keep-workspace
 1. `README.md`
 2. `RELEASING.md`
 3. `docs/MyAgentWiki系统详细设计.md`
-4. `docs/全链路规则与LLM协同判定设计.md`
-5. `docs/全链路重构实现计划.md`
-6. `docs/runtime-deps.md`
-7. `docs/project-materials/` 中的学习与工程记录
-8. `docs/troubleshooting.md`
+4. `docs/调试模式与全链路追踪设计.md`
+5. `docs/全链路规则与LLM协同判定设计.md`
+6. `docs/全链路重构实现计划.md`
+7. `docs/runtime-deps.md`
+8. `docs/project-materials/` 中的学习与工程记录
+9. `docs/troubleshooting.md`
 
 ## 开发说明
 

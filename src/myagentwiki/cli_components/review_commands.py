@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..debug_trace import current_debug_tracer, entity_reference, trace_lineage, trace_step
 from ..app_services.review_apply_service import ReviewApplyRequest, run_review_apply_service
 from ..app_services.review_auto_service import ReviewAutoRequest, run_review_auto_service
 from ..app_services.review_service import run_review_list_service
@@ -63,7 +64,13 @@ def build_review_list_payload(deps: ReviewCliDeps, target: Path, status_filter: 
 def command_review_list(deps: ReviewCliDeps, args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     deps.ensure_workspace_schema_supported(target)
-    payload = build_review_list_payload(deps, target, status_filter=args.status)
+    with trace_step(
+        "review.list",
+        kind="review_stage",
+        input_data={"target": target, "status": args.status},
+    ) as review_step:
+        payload = build_review_list_payload(deps, target, status_filter=args.status)
+        review_step.set_output(payload)
     if args.json:
         return CommandResult(
             payload=payload,
@@ -119,36 +126,69 @@ def command_review_auto(deps: ReviewCliDeps, args: argparse.Namespace) -> Comman
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     deps.ensure_workspace_schema_supported(target)
     handoff_format = str(getattr(args, "format", "summary") or "summary").strip().lower()
-    payload = run_review_auto_service(
-        ReviewAutoRequest(
-            target=target,
-            dry_run=bool(args.dry_run),
-            handoff_format=handoff_format,
-        ),
-        load_workspace_config=deps.load_workspace_config,
-        load_automation_target_config=deps.load_automation_target_config,
-        load_claim_state_maps=deps.load_claim_state_maps,
-        load_review_state_maps=deps.load_review_state_maps,
-        refresh_alias_conflict_reviews=deps.refresh_alias_conflict_reviews,
-        persist_ordered_review_state=deps.persist_ordered_review_state,
-        persist_ordered_claim_state=deps.persist_ordered_claim_state,
-        cleanup_review_related_record_files=deps.cleanup_review_related_record_files,
-        propose_review_auto_action=deps.propose_review_auto_action,
-        review_display_id=deps.review_display_id,
-        is_actionable_review_record=deps.is_actionable_review_record,
-        apply_review_action=deps.apply_review_action,
-        claim_record_is_safe_auto_stable_candidate=deps.claim_record_is_safe_auto_stable_candidate,
-        maybe_get_llm_assisted_stable_promotion=deps.maybe_get_llm_assisted_stable_promotion,
-        utc_now_iso=deps.utc_now_iso,
-        rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
-        build_review_auto_escalation_entry=deps.build_review_auto_escalation_entry,
-        build_review_auto_agent_handoff=deps.build_review_auto_agent_handoff,
-        build_workspace_summary=lambda path: deps.build_workspace_summary(path),
-        review_auto_handoff_contract_version=deps.review_auto_handoff_contract_version,
-        render_review_auto_prompt=deps.render_review_auto_prompt,
-        build_review_auto_messages=deps.build_review_auto_messages,
-        render_review_auto_chatml=deps.render_review_auto_chatml,
+    debug_enabled = current_debug_tracer() is not None
+    before_payload = (
+        build_review_list_payload(deps, target, status_filter=None)
+        if debug_enabled
+        else {}
     )
+    request = ReviewAutoRequest(
+        target=target,
+        dry_run=bool(args.dry_run),
+        handoff_format=handoff_format,
+    )
+    with trace_step(
+        "review.auto",
+        kind="review_stage",
+        input_data={"request": request, "reviews_before": before_payload},
+    ) as review_step:
+        payload = run_review_auto_service(
+            request,
+            load_workspace_config=deps.load_workspace_config,
+            load_automation_target_config=deps.load_automation_target_config,
+            load_claim_state_maps=deps.load_claim_state_maps,
+            load_review_state_maps=deps.load_review_state_maps,
+            refresh_alias_conflict_reviews=deps.refresh_alias_conflict_reviews,
+            persist_ordered_review_state=deps.persist_ordered_review_state,
+            persist_ordered_claim_state=deps.persist_ordered_claim_state,
+            cleanup_review_related_record_files=deps.cleanup_review_related_record_files,
+            propose_review_auto_action=deps.propose_review_auto_action,
+            review_display_id=deps.review_display_id,
+            is_actionable_review_record=deps.is_actionable_review_record,
+            apply_review_action=deps.apply_review_action,
+            claim_record_is_safe_auto_stable_candidate=deps.claim_record_is_safe_auto_stable_candidate,
+            maybe_get_llm_assisted_stable_promotion=deps.maybe_get_llm_assisted_stable_promotion,
+            utc_now_iso=deps.utc_now_iso,
+            rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
+            build_review_auto_escalation_entry=deps.build_review_auto_escalation_entry,
+            build_review_auto_agent_handoff=deps.build_review_auto_agent_handoff,
+            build_workspace_summary=lambda path: deps.build_workspace_summary(path),
+            review_auto_handoff_contract_version=deps.review_auto_handoff_contract_version,
+            render_review_auto_prompt=deps.render_review_auto_prompt,
+            build_review_auto_messages=deps.build_review_auto_messages,
+            render_review_auto_chatml=deps.render_review_auto_chatml,
+        )
+        review_step.set_output(payload)
+        after_payload = (
+            build_review_list_payload(deps, target, status_filter=None)
+            if debug_enabled and not args.dry_run
+            else before_payload
+        )
+        trace_lineage(
+            operation="generated" if args.dry_run else "replaced",
+            reason="review_auto_planned" if args.dry_run else "review_auto_applied_or_escalated",
+            inputs=lambda: [
+                entity_reference("review", str(item.get("review_id")), value=item)
+                for item in before_payload.get("items", [])
+            ],
+            outputs=lambda: [entity_reference(
+                "review_auto_result",
+                "current",
+                value={"result": payload, "reviews_after": after_payload},
+            )],
+            details=payload.get("summary", {}),
+            snapshot_name="review_auto_before_after",
+        )
 
     if args.json:
         return CommandResult(
@@ -238,27 +278,56 @@ def run_post_ingest_review_auto(deps: ReviewCliDeps, target: Path) -> dict:
 def command_review_apply(deps: ReviewCliDeps, args: argparse.Namespace) -> CommandResult:
     target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
     deps.ensure_workspace_schema_supported(target)
-    payload = run_review_apply_service(
-        ReviewApplyRequest(
-            target=target,
-            review_id=args.review_id,
-            action=args.action,
-            primary_claim_id=args.primary_claim_id,
-            secondary_claim_id=args.secondary_claim_id,
-            primary_page_id=args.primary_page_id,
-            alias_value=args.alias_value,
-        ),
-        load_claim_state_maps=deps.load_claim_state_maps,
-        load_review_state_maps=deps.load_review_state_maps,
-        refresh_alias_conflict_reviews=deps.refresh_alias_conflict_reviews,
-        persist_ordered_review_state=deps.persist_ordered_review_state,
-        persist_ordered_claim_state=deps.persist_ordered_claim_state,
-        cleanup_review_related_record_files=deps.cleanup_review_related_record_files,
-        review_display_id=deps.review_display_id,
-        apply_review_action=deps.apply_review_action,
-        rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
-        build_workspace_summary=lambda path: deps.build_workspace_summary(path),
+    debug_enabled = current_debug_tracer() is not None
+    before_payload = (
+        build_review_list_payload(deps, target, status_filter=None)
+        if debug_enabled
+        else {}
     )
+    request = ReviewApplyRequest(
+        target=target,
+        review_id=args.review_id,
+        action=args.action,
+        primary_claim_id=args.primary_claim_id,
+        secondary_claim_id=args.secondary_claim_id,
+        primary_page_id=args.primary_page_id,
+        alias_value=args.alias_value,
+    )
+    with trace_step(
+        "review.apply",
+        kind="review_stage",
+        input_data={"request": request, "reviews_before": before_payload},
+    ) as review_step:
+        payload = run_review_apply_service(
+            request,
+            load_claim_state_maps=deps.load_claim_state_maps,
+            load_review_state_maps=deps.load_review_state_maps,
+            refresh_alias_conflict_reviews=deps.refresh_alias_conflict_reviews,
+            persist_ordered_review_state=deps.persist_ordered_review_state,
+            persist_ordered_claim_state=deps.persist_ordered_claim_state,
+            cleanup_review_related_record_files=deps.cleanup_review_related_record_files,
+            review_display_id=deps.review_display_id,
+            apply_review_action=deps.apply_review_action,
+            rebuild_review_affected_pages=deps.rebuild_review_affected_pages,
+            build_workspace_summary=lambda path: deps.build_workspace_summary(path),
+        )
+        review_step.set_output(payload)
+        after_payload = (
+            build_review_list_payload(deps, target, status_filter=None)
+            if debug_enabled
+            else {}
+        )
+        trace_lineage(
+            operation="replaced",
+            reason=f"review_action_{args.action}",
+            inputs=lambda: [entity_reference("review", args.review_id, value=before_payload)],
+            outputs=lambda: [entity_reference(
+                "review_action_result",
+                args.review_id,
+                value={"result": payload, "reviews_after": after_payload},
+            )],
+            snapshot_name=f"review_{args.review_id}_{args.action}",
+        )
     return CommandResult(
         payload=payload,
         message=deps.render_workspace_summary_message(

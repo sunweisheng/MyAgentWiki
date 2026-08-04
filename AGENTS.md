@@ -9,6 +9,7 @@
 ## Codex 适配层 / Codex Adapter
 
 - 优先使用 `python3 -m myagentwiki ...` 或 `myagentwiki ...` 执行固定流程
+- 用户明确说“用调试模式运行……”时，为对应工作区业务命令添加 `--debug`，并用 `debug-list / debug-show` 查看记录；`init / doctor / bootstrap` 不使用该参数
 - 在 review / state 恢复场景里，先读当前工作区的 `state/*.jsonl` 与 `reviews/*.json`
 - 不直接跳过 CLI 去批量改写账本文件
 - 用户通常只需要表达目标，不需要主动描述 `reading_pack`、`state/*.jsonl`、`review-apply` 这类内部结构

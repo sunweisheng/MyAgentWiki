@@ -5,6 +5,14 @@ import argparse
 from .cli_components.doctor_bootstrap import register_doctor_bootstrap_subparsers
 
 
+def _add_debug_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Record full step, data-lineage, snapshot, performance, and LLM diagnostics for this run.",
+    )
+
+
 def build_parser(
     *,
     command_init,
@@ -18,6 +26,8 @@ def build_parser(
     command_review_list,
     command_review_auto,
     command_review_apply,
+    command_debug_list,
+    command_debug_show,
     query_reading_depth_limits: dict,
     query_link_expansion_choices: tuple[str, ...],
     semantic_task_names: tuple[str, ...],
@@ -47,6 +57,7 @@ def build_parser(
         help="Disable the automatic one-time insecure retry for certificate verification failures when downloading remote Markdown images.",
     )
     ingest_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(ingest_parser)
     ingest_parser.set_defaults(handler=command_ingest)
 
     register_doctor_bootstrap_subparsers(subparsers)
@@ -54,6 +65,7 @@ def build_parser(
     lint_parser = subparsers.add_parser("lint")
     lint_parser.add_argument("--target-dir", help="Optional workspace directory to lint.")
     lint_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(lint_parser)
     lint_parser.set_defaults(handler=command_lint)
 
     query_parser = subparsers.add_parser("query", help="Search generated wiki pages with weighted BM25 ranking.")
@@ -87,6 +99,7 @@ def build_parser(
         help="Control whether query reading_pack expands to linked pages.",
     )
     query_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(query_parser)
     query_parser.set_defaults(handler=command_query)
 
     answer_query_parser = subparsers.add_parser(
@@ -118,6 +131,7 @@ def build_parser(
         help="Control whether query reading_pack expands to linked pages.",
     )
     answer_query_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(answer_query_parser)
     answer_query_parser.set_defaults(handler=command_answer_query)
 
     render_page_parser = subparsers.add_parser(
@@ -136,6 +150,7 @@ def build_parser(
     render_page_selector_group.add_argument("--canonical-id", help="Specific canonical_id to render.")
     render_page_selector_group.add_argument("--claim-id", help="Render the page that references this claim.")
     render_page_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(render_page_parser)
     render_page_parser.set_defaults(handler=command_render_page)
 
     semantic_batch_parser = subparsers.add_parser(
@@ -151,6 +166,7 @@ def build_parser(
     )
     semantic_batch_parser.add_argument("--dry-run", action="store_true", help="Plan batches without writing semantic decisions.")
     semantic_batch_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(semantic_batch_parser)
     semantic_batch_parser.set_defaults(handler=command_semantic_batch)
 
     claim_status_parser = subparsers.add_parser("claim-set-status", help="Update one claim status and rebuild dependent pages.")
@@ -158,12 +174,14 @@ def build_parser(
     claim_status_parser.add_argument("status", choices=("draft", "stable", "disputed", "needs_review"), help="New claim status.")
     claim_status_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
     claim_status_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(claim_status_parser)
     claim_status_parser.set_defaults(handler=command_claim_set_status)
 
     review_list_parser = subparsers.add_parser("review-list", help="List review items and candidate claims.")
     review_list_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
     review_list_parser.add_argument("--status", choices=("open", "resolved"), help="Optional review status filter.")
     review_list_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(review_list_parser)
     review_list_parser.set_defaults(handler=command_review_list)
 
     review_auto_parser = subparsers.add_parser(
@@ -179,6 +197,7 @@ def build_parser(
         help="Choose summary view or direct Agent handoff format.",
     )
     review_auto_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(review_auto_parser)
     review_auto_parser.set_defaults(handler=command_review_auto)
 
     review_apply_parser = subparsers.add_parser("review-apply", help="Apply an action to a review item.")
@@ -194,6 +213,22 @@ def build_parser(
     review_apply_parser.add_argument("--alias-value", help="Alias value to assign during alias-conflict handling.")
     review_apply_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
     review_apply_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    _add_debug_argument(review_apply_parser)
     review_apply_parser.set_defaults(handler=command_review_apply)
+
+    debug_list_parser = subparsers.add_parser("debug-list", help="List retained debug runs for a workspace.")
+    debug_list_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    debug_list_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    debug_list_parser.set_defaults(handler=command_debug_list)
+
+    debug_show_parser = subparsers.add_parser("debug-show", help="Inspect one retained debug run.")
+    debug_show_parser.add_argument("--target-dir", help="Workspace directory. Defaults to current directory.")
+    debug_show_parser.add_argument("--run-id", default="latest", help="Debug run ID or `latest`.")
+    debug_selector_group = debug_show_parser.add_mutually_exclusive_group()
+    debug_selector_group.add_argument("--source-id", help="Show lineage for one source ID.")
+    debug_selector_group.add_argument("--step-id", help="Show one step and all descendant steps.")
+    debug_selector_group.add_argument("--request-id", help="Show one complete LLM request record.")
+    debug_show_parser.add_argument("--json", action="store_true", help="Output JSON.")
+    debug_show_parser.set_defaults(handler=command_debug_show)
 
     return parser

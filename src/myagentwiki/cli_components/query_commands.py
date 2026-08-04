@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..debug_trace import entity_reference, trace_lineage, trace_step
 from ..app_services.query_service import (
     QueryRequest,
     QueryServiceDeps,
@@ -183,7 +184,30 @@ def command_query(deps: QueryCliDeps, args: argparse.Namespace) -> CommandResult
     deps.ensure_workspace_schema_supported(target)
     service_deps = build_query_service_deps(deps)
     request = build_query_request(args, target)
-    payload = run_query_service(request, service_deps)
+    with trace_step("query.search", kind="query_stage", input_data=request) as query_step:
+        payload = run_query_service(request, service_deps)
+        query_step.set_output(payload)
+        trace_lineage(
+            operation="generated",
+            reason="query_ranked_workspace_pages",
+            inputs=lambda: [entity_reference("query", payload["normalized_query"], value={
+                "query": payload["query"],
+                "normalized_query": payload["normalized_query"],
+                "expanded_query": payload["expanded_query"],
+                "intent": payload["intent"],
+            })],
+            outputs=lambda: [
+                entity_reference(
+                    "query_result_page",
+                    str(result.get("page_id")),
+                    value=result,
+                    path=str(result.get("page_path", "")),
+                )
+                for result in payload["results"]
+            ],
+            details=payload.get("summary", {}),
+            snapshot_name="query_ranked_results",
+        )
 
     if getattr(args, "answer_ready", False):
         _, answer_ready_payload, answer_ready_format = run_answer_ready_query_service(request, service_deps)
@@ -317,7 +341,28 @@ def command_answer_query(deps: QueryCliDeps, args: argparse.Namespace) -> Comman
     deps.ensure_workspace_schema_supported(target)
     service_deps = build_query_service_deps(deps)
     request = build_query_request(args, target)
-    query_payload, answer_ready_payload, answer_ready_format = run_answer_ready_query_service(request, service_deps)
+    with trace_step("query.answer_ready", kind="query_stage", input_data=request) as query_step:
+        query_payload, answer_ready_payload, answer_ready_format = run_answer_ready_query_service(request, service_deps)
+        query_step.set_output({
+            "query_payload": query_payload,
+            "answer_ready_payload": answer_ready_payload,
+            "answer_ready_format": answer_ready_format,
+        })
+        trace_lineage(
+            operation="generated",
+            reason="query_reading_pack_prepared_for_answer",
+            inputs=lambda: [
+                entity_reference(
+                    "query_result_page",
+                    str(result.get("page_id")),
+                    value=result,
+                    path=str(result.get("page_path", "")),
+                )
+                for result in query_payload["results"]
+            ],
+            outputs=lambda: [entity_reference("answer_ready_payload", query_payload["normalized_query"], value=answer_ready_payload)],
+            snapshot_name="query_answer_ready_payload",
+        )
     return render_answer_ready_result(
         deps,
         target=target,

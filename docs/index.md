@@ -24,6 +24,9 @@
 - [LLM主备线路与Function Calling设计.md](</Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/LLM主备线路与Function Calling设计.md>)
   - 当前 LLM 调度器、在线主线路、CLI 备用线路、十个函数合同、JSON 修复、错误分类和迁移边界的专项设计。
 
+- [调试模式与全链路追踪设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/调试模式与全链路追踪设计.md)
+  - 工作区业务命令的调试运行目录、步骤记录、数据关系、完整快照、LLM 请求记录、报告、保留策略和安全边界。
+
 - [全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
   - 当前保留为专题设计稿，聚焦 LLM 在全链路中的职责边界、语义分析阶段划分、批处理原则和 grounded 约束。
   - 不再承担主设计文档职责；若与主文档表述重复或冲突，以主文档为准。
@@ -73,13 +76,14 @@
 1. [RELEASING.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/RELEASING.md)
 2. [MyAgentWiki系统详细设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/MyAgentWiki系统详细设计.md)
 3. [LLM主备线路与Function Calling设计.md](</Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/LLM主备线路与Function Calling设计.md>)
-4. [全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
-5. [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
-6. [CLI模块化设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/CLI模块化设计.md)
-7. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
-8. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
-9. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
-10. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
+4. [调试模式与全链路追踪设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/调试模式与全链路追踪设计.md)
+5. [全链路规则与LLM协同判定设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路规则与LLM协同判定设计.md)
+6. [全链路重构实现计划.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/全链路重构实现计划.md)
+7. [CLI模块化设计.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/CLI模块化设计.md)
+8. [runtime-deps.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/runtime-deps.md)
+9. [troubleshooting.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/troubleshooting.md)
+10. [project-materials/LLM-Wiki知识库搭建学习总结20260524.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/LLM-Wiki知识库搭建学习总结20260524.md)
+11. [project-materials/工程落地补充清单.md](/Users/sunweisheng/Documents/GitHub/MyAgentWiki/docs/project-materials/工程落地补充清单.md)
 
 ## 边界说明
 

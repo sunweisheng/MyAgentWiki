@@ -147,12 +147,20 @@ from .cli_components import ingest as ingest_cli_component
 from .cli_components import misc_commands as misc_cli_component
 from .cli_components import query_commands as query_cli_component
 from .cli_components import review_commands as review_cli_component
+from .cli_components.debug_commands import command_debug_list, command_debug_show
 from .cli_components.init_command import InitCliDeps, build_init_cli_deps as build_init_cli_component_deps
 from .cli_components.ingest import IngestCliDeps
 from .cli_components.misc_commands import MiscCliDeps, build_misc_cli_deps as build_misc_cli_component_deps
 from .cli_components.query_commands import QueryCliDeps
 from .cli_components.review_commands import ReviewCliDeps
 from .cli_components.result import CommandResult, print_result
+from .debug_trace import (
+    DebugTraceError,
+    DebugTracer,
+    entity_reference,
+    trace_lineage,
+    trace_step,
+)
 from .llm.errors import (
     LLMProjectConfigurationError,
     LLMRouteError,
@@ -1580,6 +1588,23 @@ def run_semantic_batch_task(
             if input_fingerprint in existing_by_fingerprint:
                 cache_hits += 1
                 cached_ids.append(str(item.get("item_id")))
+                cached_decision = existing_by_fingerprint[input_fingerprint]
+                trace_lineage(
+                    operation="reused",
+                    reason="semantic_input_fingerprint_matched",
+                    inputs=lambda: [entity_reference(
+                        item_type_for_task(task_name),
+                        str(item.get("item_id")),
+                        value=item,
+                    )],
+                    outputs=lambda: [entity_reference(
+                        "semantic_decision",
+                        str(cached_decision.get("decision_id")),
+                        value=cached_decision,
+                    )],
+                    details={"task_name": task_name, "input_fingerprint": input_fingerprint},
+                    snapshot_name=f"semantic_{task_name}_{item.get('item_id')}_cache_hit",
+                )
             else:
                 pending_items.append(item)
         if pending_items:
@@ -1590,48 +1615,79 @@ def run_semantic_batch_task(
     ensure_directory(semantic_batches_dir(target))
 
     for batch_index, (batch_items, cached_ids) in enumerate(pending_batches, start=1):
-        payload = {
-            "task": f"review_{task_name}_batch",
-            "task_name": task_name,
-            "prompt_version": config.prompt_version,
-            "schema_version": config.schema_version,
-            "items": batch_items,
-        }
-        if config.strategy == "llm_assisted":
-            model_result = request_llm(
-                workspace=target,
-                task_name=task_name,
-                payload=payload,
-                timeout_seconds=config.timeout_seconds,
+        with trace_step(
+            f"semantic_batch.{task_name}.{batch_index}",
+            kind="semantic_batch",
+            input_data={"items": batch_items, "cached_item_ids": cached_ids},
+            details={"task_name": task_name, "batch_index": batch_index},
+        ) as batch_step:
+            payload = {
+                "task": f"review_{task_name}_batch",
+                "task_name": task_name,
+                "prompt_version": config.prompt_version,
+                "schema_version": config.schema_version,
+                "items": batch_items,
+            }
+            if config.strategy == "llm_assisted":
+                model_result = request_llm(
+                    workspace=target,
+                    task_name=task_name,
+                    payload=payload,
+                    timeout_seconds=config.timeout_seconds,
+                )
+            elif config.strategy == "deterministic":
+                model_result = run_deterministic_processor(payload)
+            else:
+                model_result = {}
+            normalized_results, skipped_results = normalize_semantic_batch_results(
+                task_name,
+                model_result,
+                batch_items,
+                config,
+                route_identity=route_identity,
             )
-        elif config.strategy == "deterministic":
-            model_result = run_deterministic_processor(payload)
-        else:
-            model_result = {}
-        normalized_results, skipped_results = normalize_semantic_batch_results(
-            task_name,
-            model_result,
-            batch_items,
-            config,
-            route_identity=route_identity,
-        )
 
-        batch_report = {
-            "task_name": task_name,
-            "batch_index": batch_index,
-            "item_ids": [str(item.get("item_id")) for item in batch_items],
-            "cached_item_ids": cached_ids,
-            "decision_count": len(normalized_results),
-            "skipped_decision_count": len(skipped_results),
-            "skipped_decisions": skipped_results,
-            "created_at": utc_now_iso(),
-        }
-        write_json(
-            semantic_batches_dir(target) / f"{task_name}_batch_{batch_index:04d}.json",
-            batch_report,
-        )
-        batch_reports.append(batch_report)
-        written_decisions.extend(normalized_results)
+            batch_report = {
+                "task_name": task_name,
+                "batch_index": batch_index,
+                "item_ids": [str(item.get("item_id")) for item in batch_items],
+                "cached_item_ids": cached_ids,
+                "decision_count": len(normalized_results),
+                "skipped_decision_count": len(skipped_results),
+                "skipped_decisions": skipped_results,
+                "created_at": utc_now_iso(),
+            }
+            write_json(
+                semantic_batches_dir(target) / f"{task_name}_batch_{batch_index:04d}.json",
+                batch_report,
+            )
+            batch_step.set_output({
+                "model_result": model_result,
+                "normalized_results": normalized_results,
+                "skipped_results": skipped_results,
+                "batch_report": batch_report,
+            })
+            batch_reports.append(batch_report)
+            written_decisions.extend(normalized_results)
+            items_by_id = {str(item.get("item_id")): item for item in batch_items}
+            for decision in normalized_results:
+                item_id = str((decision.get("item_ids") or [""])[0])
+                trace_lineage(
+                    operation="created",
+                    reason="semantic_batch_result_accepted",
+                    inputs=lambda: [entity_reference(
+                        item_type_for_task(task_name),
+                        item_id,
+                        value=items_by_id.get(item_id),
+                    )],
+                    outputs=lambda: [entity_reference(
+                        "semantic_decision",
+                        str(decision.get("decision_id")),
+                        value=decision,
+                    )],
+                    details={"task_name": task_name, "batch_index": batch_index},
+                    snapshot_name=f"semantic_{task_name}_{item_id}_decision",
+                )
 
     if written_decisions and not dry_run:
         repo_append_semantic_decision_records(
@@ -1761,6 +1817,8 @@ def apply_claim_role_decisions_to_claim_records(
         )
         append_unique(updated.setdefault("semantic_decision_ids", []), decision_record["decision_id"])
         updated = sync_claim_semantic_projection(updated)
+        if updated == claims_by_id[record["claim_id"]]:
+            continue
         updated["updated_at"] = utc_now_iso()
         claims_by_id[record["claim_id"]] = updated
         changed = True
@@ -5151,7 +5209,10 @@ def collect_missing_concept_bucket_keys(
 ) -> set[str]:
     # 概念页的 page_id 可以由 bucket 稳定推导，因此可以快速补齐缺页。
     missing_bucket_keys: set[str] = set()
-    for bucket_key, grouped_claims in claims_by_similarity_bucket.items():
+    concept_claim_groups = regroup_concept_claims_by_canonical_topic(
+        claims_by_similarity_bucket
+    )
+    for bucket_key, grouped_claims in concept_claim_groups.items():
         if not should_generate_concept_page(grouped_claims):
             continue
         if build_concept_page_id(bucket_key) not in page_records_by_id:
@@ -5162,9 +5223,12 @@ def collect_missing_concept_bucket_keys(
 def expected_workspace_overview_concept_page_ids(
     claims_by_similarity_bucket: dict[str, list[dict]],
 ) -> set[str]:
+    concept_claim_groups = regroup_concept_claims_by_canonical_topic(
+        claims_by_similarity_bucket
+    )
     return {
         build_concept_page_id(bucket_key)
-        for bucket_key, grouped_claims in claims_by_similarity_bucket.items()
+        for bucket_key, grouped_claims in concept_claim_groups.items()
         if should_generate_concept_page(grouped_claims)
     }
 
@@ -9125,6 +9189,8 @@ def build_parser() -> argparse.ArgumentParser:
         command_review_list=command_review_list,
         command_review_auto=command_review_auto,
         command_review_apply=command_review_apply,
+        command_debug_list=command_debug_list,
+        command_debug_show=command_debug_show,
         query_reading_depth_limits=QUERY_READING_DEPTH_LIMITS,
         query_link_expansion_choices=QUERY_LINK_EXPANSION_CHOICES,
         semantic_task_names=SEMANTIC_TASK_NAMES,
@@ -9136,10 +9202,65 @@ def main() -> int:
     # main 保持很薄，只负责“解析参数 -> 调用命令 -> 输出结果”这条主线。
     parser = build_parser()
     args = parser.parse_args()
+    if not getattr(args, "debug", False):
+        try:
+            result = args.handler(args)
+        except (LLMProjectConfigurationError, LLMRouteError) as exc:
+            result = CommandResult(exit_code=1, payload=exc.payload, message=exc.message)
+        return print_result(result, as_json=getattr(args, "json", False))
+
+    target = Path(args.target_dir).expanduser().resolve() if args.target_dir else Path.cwd()
+    arguments = {
+        key: value
+        for key, value in vars(args).items()
+        if key != "handler"
+    }
     try:
-        result = args.handler(args)
-    except (LLMProjectConfigurationError, LLMRouteError) as exc:
-        result = CommandResult(exit_code=1, payload=exc.payload, message=exc.message)
+        tracer = DebugTracer(target, str(args.command), arguments).start()
+    except DebugTraceError as exc:
+        result = CommandResult(
+            exit_code=1,
+            payload={"error": "debug_trace_unavailable", "message": str(exc)},
+            message=str(exc),
+        )
+        return print_result(result, as_json=getattr(args, "json", False))
+
+    final_status = "failed"
+    final_error: BaseException | None = None
+    try:
+        with trace_step(
+            f"command.{args.command}",
+            kind="command",
+            input_data=arguments,
+        ) as command_step:
+            try:
+                result = args.handler(args)
+            except (LLMProjectConfigurationError, LLMRouteError) as exc:
+                result = CommandResult(exit_code=1, payload=exc.payload, message=exc.message)
+            command_step.set_output(result.payload or {})
+            if result.exit_code != 0:
+                command_step.set_status("failed")
+            final_status = "success" if result.exit_code == 0 else "failed"
+    except KeyboardInterrupt as exc:
+        final_status = "interrupted"
+        final_error = exc
+        raise
+    except BaseException as exc:
+        final_status = "failed"
+        final_error = exc
+        raise
+    finally:
+        try:
+            debug_summary = tracer.finalize(status=final_status, error=final_error)
+        finally:
+            tracer.close_context()
+
+    result.payload = {**(result.payload or {}), "debug_run": debug_summary}
+    debug_message = (
+        f"Debug run: {debug_summary['run_id']}\n"
+        f"Debug report: {debug_summary['report_path']}"
+    )
+    result.message = f"{result.message}\n{debug_message}" if result.message else debug_message
     return print_result(result, as_json=getattr(args, "json", False))
 
 

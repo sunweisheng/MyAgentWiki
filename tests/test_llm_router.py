@@ -183,4 +183,5 @@ def test_both_routes_failed_raises_and_writes_sanitized_log(tmp_path: Path) -> N
     assert FakeCLI.calls == 1
     log_records = [json.loads(line) for line in (tmp_path / "logs" / "llm_requests.jsonl").read_text(encoding="utf-8").splitlines()]
     assert log_records[-1]["status"] == "failed"
+    assert "run_id" not in log_records[-1]
     assert "api_key" not in json.dumps(log_records[-1])

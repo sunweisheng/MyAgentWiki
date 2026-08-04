@@ -7,6 +7,14 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+from ..debug_trace import (
+    current_debug_tracer,
+    entity_reference,
+    file_snapshot,
+    trace_lineage,
+    trace_step,
+)
+
 
 @dataclass(frozen=True)
 class IngestRequest:
@@ -117,6 +125,7 @@ class IngestRegistrationDeps:
     build_source_id: Callable[[Path, Path, str], str]
     build_source_version_group: Callable[[Path, Path], str]
     append_jsonl: Callable[[Path, dict], None]
+    load_jsonl: Callable[[Path], list[dict]]
     load_source_records: Callable[[Path], list[dict]]
     load_normalized_records: Callable[[Path], list[dict]]
     normalize_source_record: Callable[..., dict | None]
@@ -251,6 +260,14 @@ class IngestHelperDeps:
     append_wiki_log: Callable[[Path, str, list[dict]], None]
 
 
+def normalized_trace_value(target: Path, record: dict[str, Any]) -> dict[str, Any]:
+    normalized_path = record.get("normalized_path")
+    return {
+        "record": record,
+        "document": file_snapshot(target / normalized_path) if normalized_path else None,
+    }
+
+
 def replace_source_record_and_ingest_state(
     *,
     source_id: str,
@@ -371,10 +388,60 @@ def run_ingest_service(
     *,
     deps: IngestServiceDeps,
 ) -> object:
-    context = deps.build_context(request)
-    deps.run_registration_and_normalization_stage(context, request)
-    deps.run_structure_chunk_claim_stage(context, request)
-    return deps.run_page_finalize_stage(context, request)
+    with trace_step("ingest.build_context", kind="ingest_stage", input_data=request) as context_step:
+        context = deps.build_context(request)
+        context_step.set_output({
+            "target": context.target,
+            "raw_dir": context.raw_dir,
+            "task_id": context.task_id,
+            "existing_source_count": len(context.existing_sources),
+            "existing_claim_count": len(context.claims_by_id),
+            "existing_review_count": len(context.existing_reviews),
+        })
+    with trace_step(
+        "ingest.registration_and_normalization",
+        kind="ingest_stage",
+        input_data=lambda: {
+            "task_id": context.task_id,
+            "raw_dir": context.raw_dir,
+            "existing_sources": context.existing_sources,
+        },
+    ) as registration_step:
+        deps.run_registration_and_normalization_stage(context, request)
+        registration_step.set_output(lambda: {
+            "created_sources": context.created_sources,
+            "skipped_sources": context.skipped_sources,
+            "normalized_sources": context.normalized_sources,
+            "normalized_records": context.normalized_records,
+        })
+    with trace_step(
+        "ingest.structure_chunk_claim",
+        kind="ingest_stage",
+        input_data=lambda: {"normalized_records": context.normalized_records},
+    ) as structure_step:
+        deps.run_structure_chunk_claim_stage(context, request)
+        structure_step.set_output(lambda: {
+            "structured_sources": context.structured_sources,
+            "chunked_sources": context.chunked_sources,
+            "claimed_sources": context.claimed_sources,
+            "claims": list(context.claims_by_id.values()),
+            "reviews": list(context.existing_reviews.values()),
+        })
+    with trace_step(
+        "ingest.page_finalize",
+        kind="ingest_stage",
+        input_data=lambda: {
+            "sources": list(context.sources_by_id.values()),
+            "claims": list(context.claims_by_id.values()),
+            "reviews": list(context.existing_reviews.values()),
+        },
+    ) as page_step:
+        result = deps.run_page_finalize_stage(context, request)
+        page_step.set_output(lambda: {
+            "result": result,
+            "generated_pages": context.generated_pages,
+        })
+        return result
 
 
 def build_ingest_context(
@@ -529,6 +596,7 @@ def run_ingest_registration_and_normalization_stage(
     purged_claim_ids = context.purged_claim_ids
     purged_review_ids = context.purged_review_ids
     existing_sources = context.existing_sources
+    debug_enabled = current_debug_tracer() is not None
 
     for file_path in deps.collect_files(raw_dir):
         source_hash = deps.file_sha256(file_path)
@@ -544,12 +612,34 @@ def run_ingest_registration_and_normalization_stage(
             and not deps.normalized_record_is_current(previous_normalized_record)
         )
         if source_hash in existing_by_hash and not needs_normalizer_refresh:
-            skipped_sources.append({
+            existing_source = existing_by_hash[source_hash]
+            skipped_record = {
                 "path": str(file_path),
                 "source_hash": source_hash,
                 "reason": "duplicate_hash",
-                "source_id": existing_by_hash[source_hash]["source_id"],
-            })
+                "source_id": existing_source["source_id"],
+            }
+            skipped_sources.append(skipped_record)
+            trace_lineage(
+                operation="skipped",
+                reason="duplicate_hash",
+                inputs=lambda: [entity_reference(
+                    "source_file",
+                    source_hash,
+                    value=file_snapshot(file_path),
+                    path=file_path,
+                    source_id=str(existing_source["source_id"]),
+                )],
+                outputs=lambda: [entity_reference(
+                    "source",
+                    str(existing_source["source_id"]),
+                    value=existing_source,
+                    path=str(existing_source.get("source_path", "")),
+                    source_id=str(existing_source["source_id"]),
+                )],
+                details=skipped_record,
+                snapshot_name=f"source_{existing_source['source_id']}_reused",
+            )
             continue
 
         if previous_path_record is not None:
@@ -559,6 +649,47 @@ def run_ingest_registration_and_normalization_stage(
                 or deps.build_source_version_group_from_source_path(relative_path)
             )
             previous_normalized_path = previous_path_record.get("normalized_path")
+            chunk_file_path = target / "chunks" / f"{source_id}.jsonl"
+            previous_structure_records = []
+            previous_evidence_records = []
+            previous_knowledge_records = []
+            previous_chunk_records = []
+            previous_claim_records = []
+            previous_normalized_snapshot_value = previous_normalized_record
+            if debug_enabled:
+                previous_structure_records = [
+                    record for record in deps.load_jsonl(structure_blocks_path)
+                    if record.get("source_id") == source_id
+                ]
+                previous_evidence_records = [
+                    record for record in deps.load_jsonl(evidence_blocks_path)
+                    if record.get("source_id") == source_id
+                ]
+                previous_knowledge_records = [
+                    record for record in deps.load_jsonl(knowledge_units_path)
+                    if record.get("source_id") == source_id
+                ]
+                previous_chunk_records = deps.load_jsonl(chunk_file_path)
+                previous_claim_records = [
+                    dict(record)
+                    for record in claims_by_id.values()
+                    if source_id in record.get("source_ids", [])
+                ]
+                if previous_normalized_record is not None:
+                    previous_normalized_snapshot_value = normalized_trace_value(
+                        target,
+                        previous_normalized_record,
+                    )
+                previous_claim_ids = {
+                    str(record.get("claim_id")) for record in previous_claim_records
+                }
+                previous_review_records = [
+                    dict(record)
+                    for record in existing_reviews.values()
+                    if previous_claim_ids.intersection(record.get("candidate_claim_ids", []))
+                ]
+            else:
+                previous_review_records = []
 
             existing_normalized.pop(source_id, None)
             existing_structured_source_ids.discard(source_id)
@@ -569,7 +700,6 @@ def run_ingest_registration_and_normalization_stage(
                 if normalized_file_path.exists():
                     normalized_file_path.unlink()
 
-            chunk_file_path = target / "chunks" / f"{source_id}.jsonl"
             if chunk_file_path.exists():
                 chunk_file_path.unlink()
 
@@ -577,7 +707,7 @@ def run_ingest_registration_and_normalization_stage(
             deps.replace_source_scoped_jsonl_records(evidence_blocks_path, source_id, [])
             deps.replace_source_scoped_jsonl_records(knowledge_units_path, source_id, [])
 
-            _, deleted_claim_ids = deps.purge_source_from_claims(
+            dirty_claim_ids, deleted_claim_ids = deps.purge_source_from_claims(
                 target=target,
                 claims_by_id=claims_by_id,
                 historical_claims_by_id=historical_claims_by_id,
@@ -585,12 +715,129 @@ def run_ingest_registration_and_normalization_stage(
             )
             purged_claim_ids.update(deleted_claim_ids)
 
-            _, deleted_review_ids = deps.purge_deleted_claims_from_reviews(
+            dirty_review_ids, deleted_review_ids = deps.purge_deleted_claims_from_reviews(
                 reviews_by_id=existing_reviews,
                 historical_reviews_by_id=historical_reviews_by_id,
                 deleted_claim_ids=deleted_claim_ids,
             )
             purged_review_ids.update(deleted_review_ids)
+
+            removed_artifacts = [
+                *(
+                    [entity_reference(
+                        "normalized",
+                        str(previous_normalized_record.get("normalized_id") or source_id),
+                        value=previous_normalized_snapshot_value,
+                        path=str(previous_normalized_record.get("normalized_path", "")),
+                        source_id=source_id,
+                    )]
+                    if previous_normalized_record is not None
+                    else []
+                ),
+                *[
+                    entity_reference(
+                        "structure_block",
+                        str(record.get("structure_block_id")),
+                        value=record,
+                        source_id=source_id,
+                    )
+                    for record in previous_structure_records
+                ],
+                *[
+                    entity_reference(
+                        "evidence_block",
+                        str(record.get("evidence_block_id")),
+                        value=record,
+                        source_id=source_id,
+                    )
+                    for record in previous_evidence_records
+                ],
+                *[
+                    entity_reference(
+                        "knowledge_unit",
+                        str(record.get("knowledge_unit_id")),
+                        value=record,
+                        source_id=source_id,
+                    )
+                    for record in previous_knowledge_records
+                ],
+                *[
+                    entity_reference(
+                        "chunk",
+                        str(record.get("chunk_id")),
+                        value=record,
+                        path=chunk_file_path,
+                        source_id=source_id,
+                    )
+                    for record in previous_chunk_records
+                ],
+            ] if debug_enabled else []
+            if removed_artifacts:
+                trace_lineage(
+                    operation="removed",
+                    reason="source_changed_old_derived_artifacts_removed_before_rebuild",
+                    inputs=removed_artifacts,
+                    outputs=lambda: [],
+                    details={"source_id": source_id},
+                    snapshot_name=f"source_{source_id}_old_derived_artifacts",
+                )
+
+            if dirty_claim_ids:
+                trace_lineage(
+                    operation="replaced",
+                    reason="changed_source_removed_from_multi_source_claim",
+                    inputs=lambda: [
+                        entity_reference("claim", str(record.get("claim_id")), value=record)
+                        for record in previous_claim_records
+                        if record.get("claim_id") in dirty_claim_ids
+                    ],
+                    outputs=lambda: [
+                        entity_reference("claim", claim_id, value=claims_by_id[claim_id])
+                        for claim_id in sorted(dirty_claim_ids)
+                        if claim_id in claims_by_id
+                    ],
+                    snapshot_name=f"source_{source_id}_claims_updated",
+                )
+            if deleted_claim_ids:
+                trace_lineage(
+                    operation="archived",
+                    reason="changed_source_was_last_active_source_for_claim",
+                    inputs=lambda: [
+                        entity_reference("claim", str(record.get("claim_id")), value=record)
+                        for record in previous_claim_records
+                        if record.get("claim_id") in deleted_claim_ids
+                    ],
+                    outputs=lambda: [
+                        entity_reference("historical_claim", str(record.get("claim_id")), value=record)
+                        for record in historical_claims_by_id.values()
+                        if record.get("original_claim_id") in deleted_claim_ids
+                    ],
+                    snapshot_name=f"source_{source_id}_claims_archived",
+                )
+            if dirty_review_ids or deleted_review_ids:
+                changed_review_ids = dirty_review_ids | deleted_review_ids
+                trace_lineage(
+                    operation="archived" if deleted_review_ids and not dirty_review_ids else "replaced",
+                    reason="claim_rebuild_updated_dependent_reviews",
+                    inputs=lambda: [
+                        entity_reference("review", str(record.get("review_id")), value=record)
+                        for record in previous_review_records
+                        if record.get("review_id") in changed_review_ids
+                    ],
+                    outputs=lambda: [
+                        *[
+                            entity_reference("review", review_id, value=existing_reviews[review_id])
+                            for review_id in sorted(dirty_review_ids)
+                            if review_id in existing_reviews
+                        ],
+                        *[
+                            entity_reference("historical_review", str(record.get("review_id")), value=record)
+                            for record in historical_reviews_by_id.values()
+                            if record.get("original_review_id") in deleted_review_ids
+                        ],
+                    ],
+                    snapshot_name=f"source_{source_id}_reviews_updated",
+                )
 
             claims_by_normalized_text.clear()
             claims_by_normalized_text.update({
@@ -629,6 +876,32 @@ def run_ingest_registration_and_normalization_stage(
             existing_by_hash[source_hash] = updated_record
             created_sources.append(updated_record)
             reingested_source_ids.add(source_id)
+            trace_lineage(
+                operation="replaced",
+                reason="source_content_or_normalizer_changed",
+                inputs=lambda: [entity_reference(
+                    "source",
+                    source_id,
+                    value=previous_path_record,
+                    path=relative_path,
+                    source_id=source_id,
+                )],
+                outputs=lambda: [entity_reference(
+                    "source",
+                    source_id,
+                    value=updated_record,
+                    path=relative_path,
+                    source_id=source_id,
+                )],
+                details={
+                    "previous_source_hash": previous_path_record.get("source_hash"),
+                    "new_source_hash": source_hash,
+                    "normalizer_refresh": needs_normalizer_refresh,
+                    "removed_claim_ids": sorted(deleted_claim_ids),
+                    "removed_review_ids": sorted(deleted_review_ids),
+                },
+                snapshot_name=f"source_{source_id}_replacement",
+            )
             continue
 
         source_id = deps.build_source_id(raw_dir, file_path, source_hash)
@@ -658,9 +931,47 @@ def run_ingest_registration_and_normalization_stage(
         existing_sources.append(record)
         sources_by_id[source_id] = record
         latest_source_by_path[relative_path] = record
+        trace_lineage(
+            operation="created",
+            reason="new_source_path_and_hash",
+            inputs=lambda: [entity_reference(
+                "source_file",
+                source_hash,
+                value=file_snapshot(file_path),
+                path=file_path,
+                source_id=source_id,
+            )],
+            outputs=lambda: [entity_reference(
+                "source",
+                source_id,
+                value=record,
+                path=relative_path,
+                source_id=source_id,
+            )],
+            snapshot_name=f"source_{source_id}_created",
+        )
 
     for source_record in deps.load_source_records(sources_path):
         if source_record["source_id"] in existing_normalized:
+            existing_record = existing_normalized[source_record["source_id"]]
+            trace_lineage(
+                operation="reused",
+                reason="normalized_record_is_current",
+                inputs=lambda: [entity_reference(
+                    "source",
+                    str(source_record["source_id"]),
+                    value=source_record,
+                    source_id=str(source_record["source_id"]),
+                )],
+                outputs=lambda: [entity_reference(
+                    "normalized",
+                    str(existing_record.get("normalized_id") or source_record["source_id"]),
+                    value=normalized_trace_value(target, existing_record),
+                    path=str(existing_record.get("normalized_path", "")),
+                    source_id=str(source_record["source_id"]),
+                )],
+                snapshot_name=f"source_{source_record['source_id']}_normalized_reused",
+            )
             continue
         normalized_record = deps.normalize_source_record(
             target,
@@ -676,6 +987,26 @@ def run_ingest_registration_and_normalization_stage(
             [normalized_record],
         )
         normalized_sources.append(normalized_record)
+        trace_lineage(
+            operation="generated",
+            reason="source_requires_normalization",
+            inputs=lambda: [entity_reference(
+                "source",
+                str(source_record["source_id"]),
+                value=source_record,
+                path=str(source_record.get("source_path", "")),
+                source_id=str(source_record["source_id"]),
+            )],
+            outputs=lambda: [entity_reference(
+                "normalized",
+                str(normalized_record.get("normalized_id") or normalized_record["source_id"]),
+                value=normalized_trace_value(target, normalized_record),
+                path=str(normalized_record.get("normalized_path", "")),
+                source_id=str(normalized_record["source_id"]),
+            )],
+            details={"extraction_quality": normalized_record.get("extraction_quality")},
+            snapshot_name=f"source_{source_record['source_id']}_normalized",
+        )
 
         if normalized_record["extraction_quality"] in {"failed", "poor", "partial"}:
             level = "error" if normalized_record["extraction_quality"] == "failed" else "warning"
@@ -769,10 +1100,27 @@ def run_ingest_structure_chunk_claim_stage(
     reingested_source_ids = context.reingested_source_ids
     purged_claim_ids = context.purged_claim_ids
     purged_review_ids = context.purged_review_ids
+    debug_enabled = current_debug_tracer() is not None
 
     for normalized_record in normalized_records:
         source_id = normalized_record["source_id"]
         if source_id in existing_structured_source_ids:
+            trace_lineage(
+                operation="reused",
+                reason="structured_records_already_current",
+                inputs=lambda: [entity_reference(
+                    "normalized",
+                    str(normalized_record.get("normalized_id") or source_id),
+                    value=normalized_trace_value(target, normalized_record),
+                    source_id=source_id,
+                )],
+                outputs=lambda: [
+                    entity_reference("structure_block_set", source_id, path=context.structure_blocks_path, source_id=source_id),
+                    entity_reference("evidence_block_set", source_id, path=context.evidence_blocks_path, source_id=source_id),
+                    entity_reference("knowledge_unit_set", source_id, path=context.knowledge_units_path, source_id=source_id),
+                ],
+                snapshot_name=f"source_{source_id}_structured_reused",
+            )
             continue
         if normalized_record["extraction_quality"] not in {"good", "partial"}:
             continue
@@ -805,9 +1153,75 @@ def run_ingest_structure_chunk_claim_stage(
             "updated_at": compiled_records["updated_at"],
         })
         existing_structured_source_ids.add(source_id)
+        structured_outputs = lambda: [
+            *[
+                entity_reference(
+                    "structure_block",
+                    str(record.get("structure_block_id")),
+                    value=record,
+                    source_id=source_id,
+                )
+                for record in compiled_records["structure_blocks"]
+            ],
+            *[
+                entity_reference(
+                    "evidence_block",
+                    str(record.get("evidence_block_id")),
+                    value=record,
+                    source_id=source_id,
+                )
+                for record in compiled_records["evidence_blocks"]
+            ],
+            *[
+                entity_reference(
+                    "knowledge_unit",
+                    str(record.get("knowledge_unit_id")),
+                    value=record,
+                    source_id=source_id,
+                )
+                for record in compiled_records["knowledge_units"]
+            ],
+        ]
+        trace_lineage(
+            operation="generated",
+            reason="normalized_source_requires_structure_compilation",
+            inputs=lambda: [entity_reference(
+                "normalized",
+                str(normalized_record.get("normalized_id") or source_id),
+                value={"record": normalized_record, "text": normalized_text},
+                path=normalized_record.get("normalized_path"),
+                source_id=source_id,
+            )],
+            outputs=structured_outputs,
+            details={
+                "structure_block_count": len(compiled_records["structure_blocks"]),
+                "evidence_block_count": len(compiled_records["evidence_blocks"]),
+                "knowledge_unit_count": len(compiled_records["knowledge_units"]),
+            },
+            snapshot_name=f"source_{source_id}_structured",
+        )
 
     for normalized_record in normalized_records:
         if normalized_record["source_id"] in existing_chunked:
+            existing_chunk_record = existing_chunked[normalized_record["source_id"]]
+            trace_lineage(
+                operation="reused",
+                reason="chunk_records_already_current",
+                inputs=lambda: [entity_reference(
+                    "normalized",
+                    str(normalized_record.get("normalized_id") or normalized_record["source_id"]),
+                    value=normalized_trace_value(target, normalized_record),
+                    source_id=str(normalized_record["source_id"]),
+                )],
+                outputs=lambda: [entity_reference(
+                    "chunk_set",
+                    str(normalized_record["source_id"]),
+                    value=existing_chunk_record,
+                    path=f"chunks/{normalized_record['source_id']}.jsonl",
+                    source_id=str(normalized_record["source_id"]),
+                )],
+                snapshot_name=f"source_{normalized_record['source_id']}_chunks_reused",
+            )
             continue
 
         chunk_result = deps.chunk_normalized_record(target, normalized_record)
@@ -829,6 +1243,28 @@ def run_ingest_structure_chunk_claim_stage(
             "source_id": chunk_result["source_id"],
             "chunk_count": chunk_result["chunk_count"],
         }
+        trace_lineage(
+            operation="generated",
+            reason="normalized_source_requires_chunking",
+            inputs=lambda: [entity_reference(
+                "normalized",
+                str(normalized_record.get("normalized_id") or normalized_record["source_id"]),
+                value=normalized_trace_value(target, normalized_record),
+                source_id=str(normalized_record["source_id"]),
+            )],
+            outputs=lambda: [
+                entity_reference(
+                    "chunk",
+                    str(record.get("chunk_id")),
+                    value=record,
+                    path=chunk_result["chunk_file_path"],
+                    source_id=str(chunk_result["source_id"]),
+                )
+                for record in chunk_result["chunks"]
+            ],
+            details={"chunk_count": chunk_result["chunk_count"]},
+            snapshot_name=f"source_{chunk_result['source_id']}_chunks",
+        )
 
         source_record = sources_by_id.get(normalized_record["source_id"])
         if source_record is not None:
@@ -863,20 +1299,76 @@ def run_ingest_structure_chunk_claim_stage(
     claim_candidate_source_ids = sorted(set(chunks_by_source_id_for_claims) | set(knowledge_units_by_source_id))
     for source_id in claim_candidate_source_ids:
         if source_id in completed_claim_source_ids:
+            trace_lineage(
+                operation="reused",
+                reason="source_claim_stage_already_completed",
+                inputs=lambda: [
+                    *[
+                        entity_reference("knowledge_unit", str(record.get("knowledge_unit_id")), value=record, source_id=source_id)
+                        for record in knowledge_units_by_source_id.get(source_id, [])
+                    ],
+                    *[
+                        entity_reference("chunk", str(record.get("chunk_id")), value=record, source_id=source_id)
+                        for record in chunks_by_source_id_for_claims.get(source_id, [])
+                    ],
+                ],
+                outputs=lambda: [
+                    entity_reference("claim", str(record.get("claim_id")), value=record, source_id=source_id)
+                    for record in claims_by_id.values()
+                    if source_id in record.get("source_ids", [])
+                ],
+                snapshot_name=f"source_{source_id}_claims_reused",
+            )
             continue
         source_claim_candidates = deps.build_claim_candidates_for_source(
             source_id=source_id,
             knowledge_units_by_source_id=knowledge_units_by_source_id,
             chunks_by_source_id=chunks_by_source_id_for_claims,
         )
+        trace_lineage(
+            operation="generated",
+            reason="claim_candidates_built_from_knowledge_units_and_chunks",
+            inputs=lambda: [
+                *[
+                    entity_reference("knowledge_unit", str(record.get("knowledge_unit_id")), value=record, source_id=source_id)
+                    for record in knowledge_units_by_source_id.get(source_id, [])
+                ],
+                *[
+                    entity_reference("chunk", str(record.get("chunk_id")), value=record, source_id=source_id)
+                    for record in chunks_by_source_id_for_claims.get(source_id, [])
+                ],
+            ],
+            outputs=lambda: [
+                entity_reference("claim_candidate", str(record.get("claim_id")), value=record, source_id=source_id)
+                for record in source_claim_candidates
+            ],
+            details={"candidate_count": len(source_claim_candidates)},
+            snapshot_name=f"source_{source_id}_claim_candidates",
+        )
         for claim_record in source_claim_candidates:
             existing_claim = claims_by_normalized_text.get(claim_record["normalized_text"])
             if existing_claim is not None:
+                existing_claim_before = dict(existing_claim) if debug_enabled else existing_claim
                 merged_claim = deps.merge_claim_records(existing_claim, claim_record)
                 deps.write_claim_file(target, merged_claim)
                 deps.replace_jsonl_record(claims_path, "claim_id", merged_claim["claim_id"], merged_claim)
                 claims_by_id[merged_claim["claim_id"]] = merged_claim
                 claims_by_normalized_text[merged_claim["normalized_text"]] = merged_claim
+                trace_lineage(
+                    operation="replaced",
+                    reason="claim_candidate_matches_existing_normalized_text",
+                    inputs=lambda: [
+                        entity_reference("claim", str(existing_claim_before["claim_id"]), value=existing_claim_before, source_id=source_id),
+                        entity_reference("claim_candidate", str(claim_record["claim_id"]), value=claim_record, source_id=source_id),
+                    ],
+                    outputs=lambda: [entity_reference(
+                        "claim",
+                        str(merged_claim["claim_id"]),
+                        value=merged_claim,
+                        source_id=source_id,
+                    )],
+                    snapshot_name=f"claim_{merged_claim['claim_id']}_merged",
+                )
                 continue
 
             similarity_bucket = deps.build_similarity_bucket(claim_record["text"])
@@ -1011,6 +1503,25 @@ def run_ingest_structure_chunk_claim_stage(
             deps.index_claim_similarity_tokens(context.claim_similarity_index, claim_record)
             source_id = claim_record["source_ids"][0]
             claims_created_by_source[source_id] = claims_created_by_source.get(source_id, 0) + 1
+            trace_lineage(
+                operation="created",
+                reason="new_claim_candidate",
+                inputs=lambda: [entity_reference(
+                    "claim_candidate",
+                    str(claim_record["claim_id"]),
+                    value=claim_record,
+                    source_id=source_id,
+                )],
+                outputs=lambda: [entity_reference(
+                    "claim",
+                    str(claim_record["claim_id"]),
+                    value=claim_record,
+                    path=claim_file_rel_path,
+                    source_id=source_id,
+                )],
+                details={"status": claim_record.get("status"), "review_reason": claim_record.get("review_reason")},
+                snapshot_name=f"claim_{claim_record['claim_id']}_created",
+            )
 
     for source_id, claim_count in sorted(claims_created_by_source.items()):
         source_claims = [
@@ -1209,6 +1720,30 @@ def run_ingest_page_finalize_stage(
             page_record=page_record,
             page_text=page_text,
         )
+        trace_lineage(
+            operation="generated" if page_changed else "reused",
+            reason="source_summary_inputs_changed" if page_changed else "source_summary_content_unchanged",
+            inputs=lambda: [
+                entity_reference("source", source_id, value=source_record_for_page, source_id=source_id),
+                *[
+                    entity_reference("claim", str(record.get("claim_id")), value=record, source_id=source_id)
+                    for record in source_claims
+                ],
+                *[
+                    entity_reference("chunk", str(record.get("chunk_id")), value=record, source_id=source_id)
+                    for record in source_chunks
+                ],
+            ],
+            outputs=lambda: [entity_reference(
+                "page",
+                str(stored_page_record["page_id"]),
+                value={"record": stored_page_record, "text": page_text},
+                path=page_rel_path,
+                source_id=source_id,
+            )],
+            details={"page_type": stored_page_record.get("type")},
+            snapshot_name=f"page_{stored_page_record['page_id']}_source_summary",
+        )
         if page_changed:
             generated_pages.append(stored_page_record)
             dirty_claim_ids.update(
@@ -1326,6 +1861,22 @@ def run_ingest_page_finalize_stage(
                 page_record=page_record,
                 page_text=page_text,
             )
+            trace_lineage(
+                operation="generated" if page_changed else "reused",
+                reason="concept_page_inputs_changed" if page_changed else "concept_page_content_unchanged",
+                inputs=lambda: [
+                    entity_reference("claim", str(record.get("claim_id")), value=record)
+                    for record in grouped_claims
+                ],
+                outputs=lambda: [entity_reference(
+                    "page",
+                    str(stored_page_record["page_id"]),
+                    value={"record": stored_page_record, "text": page_text, "route": page_route},
+                    path=page_rel_path,
+                )],
+                details={"bucket_key": bucket_key, "page_intent": page_intent},
+                snapshot_name=f"page_{stored_page_record['page_id']}_concept",
+            )
             if page_changed:
                 generated_pages.append(stored_page_record)
                 dirty_claim_ids.update(
@@ -1367,6 +1918,22 @@ def run_ingest_page_finalize_stage(
                 page_record=page_record,
                 page_text=page_text,
             )
+            trace_lineage(
+                operation="generated" if page_changed else "reused",
+                reason="intent_page_inputs_changed" if page_changed else "intent_page_content_unchanged",
+                inputs=lambda: [
+                    entity_reference("claim", str(record.get("claim_id")), value=record)
+                    for record in grouped_claims
+                ],
+                outputs=lambda: [entity_reference(
+                    "page",
+                    str(stored_page_record["page_id"]),
+                    value={"record": stored_page_record, "text": page_text, "route": page_route},
+                    path=page_rel_path,
+                )],
+                details={"bucket_key": bucket_key, "page_intent": page_intent},
+                snapshot_name=f"page_{stored_page_record['page_id']}_{page_intent}",
+            )
             if page_changed:
                 generated_pages.append(stored_page_record)
                 dirty_claim_ids.update(
@@ -1406,6 +1973,22 @@ def run_ingest_page_finalize_stage(
             page_records_by_id=page_records_by_id,
             page_record=overview_page_record,
             page_text=overview_page_text,
+        )
+        trace_lineage(
+            operation="generated" if overview_page_changed else "reused",
+            reason="overview_inputs_changed" if overview_page_changed else "overview_content_unchanged",
+            inputs=lambda: [
+                entity_reference("page", str(record.get("page_id")), value=record)
+                for record in overview_concept_pages
+            ],
+            outputs=lambda: [entity_reference(
+                "page",
+                str(stored_overview_page["page_id"]),
+                value={"record": stored_overview_page, "text": overview_page_text},
+                path=overview_page_rel_path,
+            )],
+            details={"page_type": "overview"},
+            snapshot_name=f"page_{stored_overview_page['page_id']}_overview",
         )
         dirty_claim_ids.update(
             deps.link_claims_to_page_in_memory(
@@ -1465,6 +2048,19 @@ def run_ingest_page_finalize_stage(
     )
     if removed_pages:
         generated_pages.extend(removed_pages)
+        for removed_page in removed_pages:
+            trace_lineage(
+                operation="removed",
+                reason="page_no_longer_matches_current_route_or_source_state",
+                inputs=lambda: [entity_reference(
+                    "page",
+                    str(removed_page.get("page_id")),
+                    value=removed_page,
+                    path=str(removed_page.get("page_path", "")),
+                )],
+                outputs=lambda: [],
+                snapshot_name=f"page_{removed_page.get('page_id')}_removed",
+            )
     dirty_claim_ids.update(pruned_claim_ids)
     dirty_review_ids.update(pruned_review_ids)
 
@@ -1514,6 +2110,21 @@ def run_ingest_page_finalize_stage(
         page_records=page_records_for_index,
         claim_records_by_id=claim_records_by_id,
         previous_records=previous_search_index_records,
+    )
+    trace_lineage(
+        operation="generated" if search_index.get("rebuilt_count", 0) else "reused",
+        reason="page_search_documents_refreshed",
+        inputs=lambda: [
+            entity_reference("page", str(record.get("page_id")), value=record)
+            for record in page_records_for_index
+        ],
+        outputs=lambda: [entity_reference(
+            "search_index",
+            str(search_index.get("index_version", "current")),
+            value=search_index,
+            path=str(search_index.get("index_path", "indexes/search_pages.jsonl")),
+        )],
+        snapshot_name="search_index_refresh",
     )
 
     alias_index = deps.write_alias_index(target, page_records_for_index)
@@ -1601,7 +2212,17 @@ def run_post_ingest_review_auto_if_enabled(
 ) -> dict | None:
     if not context.post_ingest_config.get("review_auto"):
         return None
-    return deps.run_post_ingest_review_auto(context.target)
+    with trace_step(
+        "ingest.post_review_auto",
+        kind="review_stage",
+        input_data={
+            "claims": list(context.claims_by_id.values()),
+            "reviews": list(context.existing_reviews.values()),
+        },
+    ) as step:
+        result = deps.run_post_ingest_review_auto(context.target)
+        step.set_output(result)
+        return result
 
 
 def build_ingest_command_result(
@@ -1720,6 +2341,29 @@ def maybe_build_skipped_page_regeneration_result(
         "index_version": deps.search_pages_index_version,
         "updated_at": deps.utc_now_iso(),
     }
+    trace_lineage(
+        operation="skipped",
+        reason="no_upstream_changes_and_no_missing_pages",
+        inputs=lambda: [
+            *[
+                entity_reference("source", str(record.get("source_id")), value=record, source_id=str(record.get("source_id")))
+                for record in context.sources_by_id.values()
+            ],
+            *[
+                entity_reference("claim", str(record.get("claim_id")), value=record)
+                for record in context.claims_by_id.values()
+            ],
+        ],
+        outputs=lambda: [
+            entity_reference("page", str(record.get("page_id")), value=record, path=str(record.get("page_path", "")))
+            for record in existing_pages
+        ],
+        details={
+            "existing_page_count": len(live_existing_pages),
+            "search_index_reused_count": len(previous_search_index_records),
+        },
+        snapshot_name="page_regeneration_skipped",
+    )
     deps.append_wiki_log(context.target, context.task_id, context.generated_pages)
     return build_result(
         context,

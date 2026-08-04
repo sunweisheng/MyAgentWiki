@@ -250,3 +250,23 @@ python3 scripts/debug_llm_routing.py live --workspace /path/to/workspace --task 
 ## 13. `llm_configuration_migration_required`
 
 这表示旧工作区仍在任务下配置 Python `command`。当前版本不执行任务级命令，也不会猜测自定义集成的意图。按错误中的一一对应建议删除旧字段，选择 `llm_assisted` 或 `deterministic`，再重跑原命令。
+
+## 14. 如何查看一次命令的完整运行过程
+
+在需要排查的工作区业务命令上添加 `--debug`：
+
+```bash
+python3 -m myagentwiki ingest --target-dir /path/to/workspace --debug
+python3 -m myagentwiki query "问题" --target-dir /path/to/workspace --debug
+```
+
+命令结果里的 `debug_run.report_path` 指向本次报告。也可以继续查看：
+
+```bash
+python3 -m myagentwiki debug-list --target-dir /path/to/workspace
+python3 -m myagentwiki debug-show --target-dir /path/to/workspace --run-id latest
+python3 -m myagentwiki debug-show --target-dir /path/to/workspace --run-id latest --step-id <step_id> --json
+python3 -m myagentwiki debug-show --target-dir /path/to/workspace --run-id latest --request-id <request_id> --json
+```
+
+`logs/debug/<run_id>/` 会保存步骤、数据关系、完整文本与 JSON 快照、每次 LLM 尝试和脚本统计报告。它可能包含原始资料内容，不应提交或直接对外发送。默认保留 7 天；下次调试运行或查看命令启动时会清理已到期记录。

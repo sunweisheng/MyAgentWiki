@@ -13,6 +13,8 @@
 
 - 优先调用 MyAgentWiki CLI，而不是手工改写 `state/*.jsonl`
 - 固定流程优先使用脚本：`init / ingest / query / lint / review-list / review-auto / review-apply`
+- 用户明确说“用调试模式运行……”时，在对应工作区业务命令上添加 `--debug`；调试记录统一放在 `logs/debug/<run_id>/`，不要提交到 Git
+- 调试模式适用于 `ingest / semantic-batch / review-* / render-page / query / answer-query / lint / claim-set-status`，不适用于 `init / doctor / bootstrap`
 - 若工作区启用了 `automation.post_ingest.review_auto`，Agent 默认应把 `ingest` 视为“ingest 完后继续自动跑一次 review-auto”的复合流程，而不是在 ingest 完成后就停下
 - 项目定位是让 Codex 与脚本协作完成大部分工作；除非确实需要人工判断，否则应优先尝试合适的自动化收口
 - 必须依赖语义理解、冲突裁决、stable 提升、页面重写的步骤，再交给 Agent
@@ -32,6 +34,8 @@
 3. `python3 -m myagentwiki ingest`
 4. `python3 -m myagentwiki lint`
 5. `python3 -m myagentwiki query "你的问题"`
+
+需要排查过程时，在上述工作区业务命令末尾添加 `--debug`，再用 `debug-list` 或 `debug-show` 查看记录。
 
 ## review / state 恢复约定
 

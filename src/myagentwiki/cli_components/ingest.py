@@ -515,6 +515,7 @@ def build_ingest_registration_deps(deps: IngestCliDeps) -> IngestRegistrationDep
         build_source_id=deps.build_source_id,
         build_source_version_group=deps.build_source_version_group,
         append_jsonl=deps.append_jsonl,
+        load_jsonl=deps.load_jsonl,
         load_source_records=deps.load_source_records,
         load_normalized_records=deps.load_normalized_records,
         normalize_source_record=deps.normalize_source_record,

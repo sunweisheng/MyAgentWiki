@@ -24,6 +24,7 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 额外要求：
 
 - 固定流程优先走 CLI，不直接批量改写 `state/*.jsonl`
+- 用户明确说“用调试模式运行……”时，为对应工作区业务命令添加 `--debug`，并用 `debug-list / debug-show` 查看步骤、数据流、快照和 LLM 请求；不要给 `init / doctor / bootstrap` 添加该参数
 - `raw/` 视为原始资料区，不自动改写
 - 已实现的 LLM 任务默认由调度器先请求在线客户端，在线配置缺失或请求失败时自动改用 Codex CLI 客户端
 - 两条线路都失败时当前命令应失败，不返回空结果，也不调用确定性处理器掩盖错误；已完成阶段按现有状态恢复机制保留
@@ -65,3 +66,4 @@ description: Use this skill when working inside a MyAgentWiki workspace, or when
 - [MyAgentWiki系统详细设计.md](docs/MyAgentWiki系统详细设计.md)：详细设计与当前实现边界
 - [docs/runtime-deps.md](docs/runtime-deps.md)：依赖与跨平台说明
 - [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障排查
+- [docs/调试模式与全链路追踪设计.md](docs/调试模式与全链路追踪设计.md)：调试目录、记录格式、查看命令与安全边界

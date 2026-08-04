@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from ..debug_trace import current_debug_tracer, file_metadata, trace_step
 from ..runtime_env import load_simple_yaml
 from .cli_client import CLILLMClient
 from .contracts import build_task_context, get_function_spec
@@ -166,7 +167,39 @@ class LLMRouter:
         image_paths: list[Path] | None = None,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
+        debug_input = None
+        if current_debug_tracer() is not None:
+            debug_input = {
+                "task_name": task_name,
+                "payload": payload,
+                "images": [file_metadata(Path(path)) for path in (image_paths or [])],
+                "timeout_seconds": timeout_seconds,
+            }
+        with trace_step(
+            f"llm.{task_name}",
+            kind="llm_request",
+            input_data=debug_input,
+        ) as step:
+            result = self._request_routes(
+                task_name=task_name,
+                payload=payload,
+                image_paths=image_paths,
+                timeout_seconds=timeout_seconds,
+            )
+            step.set_output(result)
+            return result
+
+    def _request_routes(
+        self,
+        *,
+        task_name: str,
+        payload: dict[str, Any],
+        image_paths: list[Path] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        logical_started = time.monotonic()
         request_id = f"llm_{uuid.uuid4().hex}"
+        debug_enabled = current_debug_tracer() is not None
         spec = get_function_spec(task_name)
         images = [Path(path).resolve() for path in (image_paths or [])]
         if images and not spec.supports_images:
@@ -177,8 +210,29 @@ class LLMRouter:
             document_max_chars=self.settings.document_max_chars,
         )
         attempts: list[dict[str, Any]] = []
+        debug_attempts: list[dict[str, Any]] = []
+        debug_request = {}
+        if debug_enabled:
+            debug_request = {
+                "task_name": task_name,
+                "payload": payload,
+                "processed_context": context,
+                "function": {
+                    "name": spec.function_name,
+                    "description": spec.description,
+                    "instructions": spec.instructions,
+                    "parameters_schema": spec.parameters_schema,
+                    "schema_version": spec.schema_version,
+                    "prompt_version": spec.prompt_version,
+                },
+                "images": [file_metadata(path) for path in images],
+                "routing_version": self.settings.routing_version,
+                "contract_version": self.settings.contract_version,
+            }
         max_online_attempts = self.settings.primary_max_retries + 1
 
+        online_setup_started_at = datetime.now(timezone.utc).isoformat()
+        online_setup_started = time.monotonic()
         try:
             with self.online_client_factory(
                 self.workspace,
@@ -189,7 +243,9 @@ class LLMRouter:
                 retryable_http_status_min=self.settings.retryable_http_status_min,
             ) as online:
                 for attempt_number in range(1, max_online_attempts + 1):
+                    started_at = datetime.now(timezone.utc).isoformat()
                     started = time.monotonic()
+                    raw_call = None
                     try:
                         raw_call = online.request(spec=spec, context=context, image_paths=images)
                         validated = repair_and_validate(
@@ -202,21 +258,59 @@ class LLMRouter:
                             backend="online",
                             attempt_number=attempt_number,
                             started=started,
+                            started_at=started_at,
                             repaired=validated.repaired,
                         )
                         attempts.append(attempt)
-                        self._write_final_record(request_id, spec, attempts, status="success", backend="online")
+                        if debug_enabled:
+                            debug_attempts.append(self._debug_success_attempt(
+                                attempt,
+                                raw_call=raw_call,
+                                validated_arguments=validated.arguments,
+                                validation=validated.validation,
+                            ))
+                        self._write_final_record(
+                            request_id,
+                            spec,
+                            attempts,
+                            debug_attempts=debug_attempts,
+                            debug_request=debug_request,
+                            logical_started=logical_started,
+                            status="success",
+                            backend="online",
+                        )
                         return validated.arguments
                     except LLMClientError as exc:
-                        attempts.append(self._failed_attempt(exc, attempt_number, started))
+                        attempt = self._failed_attempt(
+                            exc,
+                            attempt_number,
+                            started,
+                            started_at=started_at,
+                        )
+                        attempts.append(attempt)
+                        if debug_enabled:
+                            debug_attempts.append(
+                                self._debug_failed_attempt(attempt, exc, raw_call=raw_call)
+                            )
                         if not exc.retryable or attempt_number >= max_online_attempts:
                             break
                         backoff_index = min(attempt_number - 1, len(self.settings.retry_backoff_seconds) - 1)
                         delay = self.settings.retry_backoff_seconds[backoff_index]
                         delay += self.random_uniform(0.0, self.settings.retry_jitter_max_seconds)
+                        attempts[-1]["backoff_ms"] = round(delay * 1000)
+                        if debug_enabled:
+                            debug_attempts[-1]["backoff_ms"] = round(delay * 1000)
                         self.sleep(delay)
         except LLMClientError as exc:
-            attempts.append(self._failed_attempt(exc, 1, time.monotonic()))
+            attempt = self._failed_attempt(
+                exc,
+                1,
+                online_setup_started,
+                started_at=online_setup_started_at,
+            )
+            attempts.append(attempt)
+            if debug_enabled:
+                debug_attempts.append(self._debug_failed_attempt(attempt, exc))
 
         cli = self.cli_client_factory(
             self.workspace,
@@ -224,7 +318,9 @@ class LLMRouter:
             model=self.settings.cli_model,
             executable=self.settings.cli_executable,
         )
+        started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
+        raw_call = None
         try:
             raw_call = cli.request(spec=spec, context=context, image_paths=images)
             validated = repair_and_validate(
@@ -233,19 +329,51 @@ class LLMRouter:
                 payload=payload,
                 backend="cli",
             )
-            attempts.append(self._success_attempt(
+            attempt = self._success_attempt(
                 backend="cli",
                 attempt_number=1,
                 started=started,
+                started_at=started_at,
                 repaired=validated.repaired,
-            ))
-            self._write_final_record(request_id, spec, attempts, status="success", backend="cli")
+            )
+            attempts.append(attempt)
+            if debug_enabled:
+                debug_attempts.append(self._debug_success_attempt(
+                    attempt,
+                    raw_call=raw_call,
+                    validated_arguments=validated.arguments,
+                    validation=validated.validation,
+                ))
+            self._write_final_record(
+                request_id,
+                spec,
+                attempts,
+                debug_attempts=debug_attempts,
+                debug_request=debug_request,
+                logical_started=logical_started,
+                status="success",
+                backend="cli",
+            )
             return validated.arguments
         except LLMClientError as exc:
-            attempts.append(self._failed_attempt(exc, 1, started))
+            attempt = self._failed_attempt(exc, 1, started, started_at=started_at)
+            attempts.append(attempt)
+            if debug_enabled:
+                debug_attempts.append(
+                    self._debug_failed_attempt(attempt, exc, raw_call=raw_call)
+                )
 
         message = f"LLM request `{task_name}` failed on both online and CLI routes. Request ID: {request_id}."
-        self._write_final_record(request_id, spec, attempts, status="failed", backend=None)
+        self._write_final_record(
+            request_id,
+            spec,
+            attempts,
+            debug_attempts=debug_attempts,
+            debug_request=debug_request,
+            logical_started=logical_started,
+            status="failed",
+            backend=None,
+        )
         raise LLMRouteError(
             message,
             request_id=request_id,
@@ -259,12 +387,15 @@ class LLMRouter:
         backend: str,
         attempt_number: int,
         started: float,
+        started_at: str,
         repaired: bool,
     ) -> dict[str, Any]:
         return {
             "backend": backend,
             "attempt": attempt_number,
             "status": "success",
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
             "duration_ms": round((time.monotonic() - started) * 1000),
             "repaired": repaired,
         }
@@ -274,13 +405,69 @@ class LLMRouter:
         error: LLMClientError,
         attempt_number: int,
         started: float,
+        started_at: str | None = None,
     ) -> dict[str, Any]:
         return {
             **error.as_record(),
             "attempt": attempt_number,
             "status": "failed",
+            "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
             "duration_ms": round((time.monotonic() - started) * 1000),
         }
+
+    def _debug_success_attempt(
+        self,
+        attempt: dict[str, Any],
+        *,
+        raw_call,
+        validated_arguments: dict[str, Any],
+        validation: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            **attempt,
+            **raw_call.debug,
+            "raw_function_call": {
+                "function_name": raw_call.function_name,
+                "arguments_json": raw_call.arguments_json,
+            },
+            "validated_arguments": validated_arguments,
+            "validation": {
+                "status": "success",
+                "repaired": attempt.get("repaired", False),
+                **validation,
+            },
+            "usage": raw_call.debug.get("usage", {"available": False}),
+        }
+
+    def _debug_failed_attempt(
+        self,
+        attempt: dict[str, Any],
+        error: LLMClientError,
+        *,
+        raw_call=None,
+    ) -> dict[str, Any]:
+        record = {
+            **attempt,
+            "debug_details": error.debug_details,
+            "validation": error.debug_details.get("validation", {
+                "status": "failed",
+                "error": error.message,
+                "repaired": error.repaired,
+            }),
+            "usage": error.debug_details.get("usage", {"available": False}),
+        }
+        if raw_call is not None:
+            record.update(raw_call.debug)
+            record["raw_function_call"] = {
+                "function_name": raw_call.function_name,
+                "arguments_json": raw_call.arguments_json,
+            }
+            record["usage"] = raw_call.debug.get("usage", {"available": False})
+        record["validation"].setdefault("status", "failed")
+        record["validation"].setdefault("error", error.message)
+        record["validation"].setdefault("repaired", error.repaired)
+        return record
 
     def _write_final_record(
         self,
@@ -288,10 +475,16 @@ class LLMRouter:
         spec,
         attempts: list[dict[str, Any]],
         *,
+        debug_attempts: list[dict[str, Any]],
+        debug_request: dict[str, Any],
+        logical_started: float,
         status: str,
         backend: str | None,
     ) -> None:
-        append_request_record(self.workspace, {
+        tracer = current_debug_tracer()
+        total_duration_ms = round((time.monotonic() - logical_started) * 1000)
+        retry_wait_ms = sum(int(attempt.get("backoff_ms", 0) or 0) for attempt in attempts)
+        summary_record = {
             "request_id": request_id,
             "task_name": spec.task_name,
             "function_name": spec.function_name,
@@ -304,9 +497,19 @@ class LLMRouter:
                 route: sum(1 for attempt in attempts if attempt.get("backend") == route)
                 for route in ("online", "cli")
             },
-            "total_duration_ms": sum(int(attempt.get("duration_ms", 0)) for attempt in attempts),
+            "total_duration_ms": total_duration_ms,
+            "retry_wait_ms": retry_wait_ms,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if tracer is not None:
+            summary_record["run_id"] = tracer.run_id
+        append_request_record(self.workspace, summary_record)
+        if tracer is not None:
+            tracer.write_llm_record(request_id, {
+                **summary_record,
+                "request": debug_request,
+                "attempts": debug_attempts,
+            })
 
 
 def request(

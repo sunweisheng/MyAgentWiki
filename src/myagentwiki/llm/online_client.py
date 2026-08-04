@@ -11,6 +11,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, OpenAI
 from PIL import Image
 
+from ..debug_trace import current_debug_tracer, file_metadata, make_json_safe
 from ..runtime_env import load_simple_env
 from .contracts import (
     LLMFunctionSpec,
@@ -101,6 +102,51 @@ def _status_is_retryable(
     return status in configured_statuses or bool(status and status >= retryable_status_min)
 
 
+def _provider_request_id(response: Any) -> str | None:
+    value = getattr(response, "_request_id", None) or getattr(response, "id", None)
+    return str(value) if value else None
+
+
+def _usage_number(usage: Any, *names: str) -> int:
+    for name in names:
+        value = getattr(usage, name, None)
+        if value is None and isinstance(usage, dict):
+            value = usage.get(name)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _online_usage_payload(response: Any) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {"available": False}
+    input_tokens = _usage_number(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _usage_number(usage, "output_tokens", "completion_tokens")
+    total_tokens = _usage_number(usage, "total_tokens") or input_tokens + output_tokens
+    return {
+        "available": True,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _response_debug_payload(response: Any) -> Any:
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except TypeError:
+            return model_dump()
+    if isinstance(response, dict):
+        return response
+    return make_json_safe(getattr(response, "__dict__", str(response)))
+
+
 def _image_data_url(path: Path, *, max_bytes: int, allowed_mime_types: set[str]) -> str:
     resolved = path.resolve()
     if not resolved.is_file():
@@ -188,13 +234,42 @@ class OnlineLLMClient:
     ) -> RawFunctionCall:
         if self._client is None:
             raise RuntimeError("OnlineLLMClient must be used as a context manager.")
+        debug_request = None
+        if current_debug_tracer() is not None:
+            debug_request = {
+                "model": self.model,
+                "api_style": self.api_style,
+                "instructions": spec.instructions,
+                "description": spec.description,
+                "function": {
+                    "name": spec.function_name,
+                    "parameters_schema": spec.parameters_schema,
+                },
+                "context": context,
+                "images": [file_metadata(path) for path in image_paths],
+            }
         try:
             if self.api_style == RESPONSES_API_STYLE:
                 response = self._request_responses(spec=spec, context=context, image_paths=image_paths)
-                return self._extract_responses_call(response, spec)
-            response = self._request_chat_completions(spec=spec, context=context, image_paths=image_paths)
-            return self._extract_chat_call(response, spec)
-        except LLMClientError:
+                call = self._extract_responses_call(response, spec)
+            else:
+                response = self._request_chat_completions(spec=spec, context=context, image_paths=image_paths)
+                call = self._extract_chat_call(response, spec)
+            if debug_request is None:
+                return call
+            return RawFunctionCall(
+                function_name=call.function_name,
+                arguments_json=call.arguments_json,
+                debug={
+                    "request": debug_request,
+                    "raw_response": _response_debug_payload(response),
+                    "provider_request_id": _provider_request_id(response),
+                    "usage": _online_usage_payload(response),
+                },
+            )
+        except LLMClientError as exc:
+            if debug_request is not None and not exc.debug_details:
+                exc.debug_details = {"request": debug_request}
             raise
         except APIStatusError as exc:
             status = getattr(exc, "status_code", None)
@@ -208,6 +283,11 @@ class OnlineLLMClient:
                     self.retryable_http_status_min,
                 ),
                 http_status=status,
+                debug_details={
+                    "request": debug_request,
+                    "provider_request_id": getattr(exc, "request_id", None),
+                    "response_body": getattr(getattr(exc, "response", None), "text", None),
+                } if debug_request is not None else None,
             ) from exc
         except APITimeoutError as exc:
             raise LLMClientError(
@@ -215,6 +295,7 @@ class OnlineLLMClient:
                 backend=self.backend,
                 kind="timeout",
                 retryable=True,
+                debug_details={"request": debug_request} if debug_request is not None else None,
             ) from exc
         except APIConnectionError as exc:
             if _has_ssl_error(exc):
@@ -223,12 +304,14 @@ class OnlineLLMClient:
                     backend=self.backend,
                     kind="tls_error",
                     retryable=False,
+                    debug_details={"request": debug_request} if debug_request is not None else None,
                 ) from exc
             raise LLMClientError(
                 "Online model connection failed.",
                 backend=self.backend,
                 kind="connection_error",
                 retryable=True,
+                debug_details={"request": debug_request} if debug_request is not None else None,
             ) from exc
         except Exception as exc:
             raise LLMClientError(
@@ -236,6 +319,10 @@ class OnlineLLMClient:
                 backend=self.backend,
                 kind="request_error",
                 retryable=True,
+                debug_details={
+                    "request": debug_request,
+                    "exception_type": type(exc).__name__,
+                } if debug_request is not None else None,
             ) from exc
 
     def _responses_input(self, context: dict[str, Any], image_paths: list[Path]) -> Any:
