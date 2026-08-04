@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ PACKAGE_IMPORT_ALIASES = {
     "pdfminer-six": "pdfminer",
     "pillow": "PIL",
 }
+ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def find_project_root(start: Path | None = None) -> Path:
@@ -91,6 +93,37 @@ def load_simple_yaml(path: Path) -> dict:
             parent[key] = parse_yaml_scalar(rest)
 
     return root
+
+
+def load_simple_env(path: Path) -> dict[str, str]:
+    # 只读取项目所需的 KEY=VALUE 配置，不修改当前进程环境，调用方可以自行决定优先级。
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        key, separator, raw_value = stripped.partition("=")
+        key = key.strip()
+        if not separator or not ENVIRONMENT_VARIABLE_PATTERN.fullmatch(key):
+            raise ValueError(f"Invalid environment setting in {path}: {raw_line}")
+
+        value = raw_value.strip()
+        if value.startswith(("\"", "'")):
+            try:
+                parsed_value = ast.literal_eval(value)
+            except (SyntaxError, ValueError) as exc:
+                raise ValueError(f"Invalid quoted value for `{key}` in {path}") from exc
+            if not isinstance(parsed_value, str):
+                raise ValueError(f"Invalid quoted value for `{key}` in {path}")
+            values[key] = parsed_value
+        else:
+            values[key] = value.split(" #", 1)[0].rstrip()
+    return values
 
 
 def load_runtime_manifest(root: Path) -> dict:

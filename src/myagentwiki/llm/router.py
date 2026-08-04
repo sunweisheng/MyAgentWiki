@@ -14,7 +14,7 @@ from .cli_client import CLILLMClient
 from .contracts import build_task_context, get_function_spec
 from .diagnostics import append_request_record
 from .errors import LLMClientError, LLMProjectConfigurationError, LLMRouteError
-from .online_client import OnlineLLMClient
+from .online_client import ONLINE_ENV_REL_PATH, OnlineLLMClient, load_online_config
 from .repair import repair_and_validate
 
 
@@ -124,16 +124,16 @@ def build_route_identity(workspace: Path, task_name: str, *, strategy: str) -> d
     if strategy != "llm_assisted":
         return identity
 
-    online_path = workspace / "config" / "llm.local.yml"
-    online_identity: dict[str, Any] = {"configured": online_path.exists(), "model": "", "api_style": ""}
-    if online_path.exists():
-        try:
-            online_config = load_simple_yaml(online_path)
-            provider = online_config.get("provider", {}) if isinstance(online_config.get("provider"), dict) else {}
-            transport = online_config.get("transport", {}) if isinstance(online_config.get("transport"), dict) else {}
-            online_identity["model"] = str(provider.get("model", "")).strip()
-            online_identity["api_style"] = str(transport.get("api_style", "responses")).strip() or "responses"
-        except Exception:
+    online_identity: dict[str, Any] = {"configured": False, "model": "", "api_style": ""}
+    try:
+        online_config = load_online_config(workspace)
+        online_identity.update(
+            configured=True,
+            model=str(online_config["model"]),
+            api_style=str(online_config["api_style"]),
+        )
+    except Exception:
+        if (workspace / ONLINE_ENV_REL_PATH).exists():
             online_identity["configured"] = "invalid"
     identity["online"] = online_identity
     identity["cli"] = {"model": settings.cli_model}

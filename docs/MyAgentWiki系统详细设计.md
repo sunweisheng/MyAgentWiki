@@ -288,10 +288,10 @@ flowchart TD
 
 - 母仓库升级时，不应直接覆盖用户工作区里的 `state/`、`claims/`、`reviews/`、`wiki/`
 - 用户工作区内容更新时，也不应反向改写母仓库文档和模板
-- 当前不提供旧工作区迁移层；模板和账本结构演进以“直接更新实现 + 重新生成测试工作区 + 必要时重跑 ingest”处理
+- 当前不提供旧页型或账本 schema 的自动迁移层；模板和账本结构演进以“直接更新实现 + 重新生成测试工作区 + 必要时重跑 ingest”处理
 - Agent 不应跳过 CLI 直接批量手改账本来模拟生成流程
 
-当前不提供旧工作区兼容层或显式迁移命令；`schema_version` 只作为当前格式和协议的可追踪标记，而不是旧版本迁移框架。
+当前不提供旧页型、旧账本格式的兼容层或显式迁移命令；`schema_version` 只作为当前格式和协议的可追踪标记，而不是旧版本迁移框架。唯一的配置侧迁移辅助是：加载器发现旧 LLM 任务级 `command` 时返回 `llm_configuration_migration_required` 和人工修改建议，但不会继续执行旧命令，也不会自动改写配置。
 
 ## 目录设计（Directory Design）
 
@@ -929,7 +929,7 @@ evidence_block_ids: [B]
 - `raw -> normalized` 是整套编译链的第一优先级
 - 文档格式解析统一优先使用 `microsoft/markitdown`
 - 外部办公软件不是主路径前提
-- LLM 不直接替代标准化器，只在结构灰区上提供受限判断
+- LLM 不替代常见文档的格式转换；Markdown 内嵌图片在 OCR 不可用或结果不足时可按配置进入受限图片理解，后续结构灰区再由语义任务处理
 
 ### 统一转换架构
 
@@ -938,7 +938,7 @@ evidence_block_ids: [B]
 - `app_services/document_conversion.py` 封装 `MarkItDown(enable_plugins=False)`，只调用 `convert_local()` 读取已经通过 `raw/` 路径校验的本地文件
 - PDF、DOCX、XLS/XLSX、CSV、PPTX、HTML、JSON/XML、ZIP、EPUB、IPYNB、Outlook MSG 等文档统一先走 MarkItDown
 - Markdown 和纯文本不做二次格式转换，继续使用 MyAgentWiki 的换行整理、远程图片下载和附件回链逻辑
-- 独立图片继续使用 MyAgentWiki 的元数据、`tesseract` 与可选 LLM 图片理解路径
+- 独立 `raw/` 图片使用 MyAgentWiki 的元数据与 `tesseract` 路径；Markdown 内嵌图片在 OCR 不足时可按工作区配置调用 LLM 图片理解
 - MarkItDown 抛错或返回空内容时，已有 PDF、Word、Excel 转换器才作为备用路径；备用结果必须带 `markitdown_conversion_failed:<错误类型>`
 - 不支持或彻底失败的文件生成 `poor / failed` 占位文档，并把错误写入标准化账本和错误记录
 
@@ -981,12 +981,14 @@ MarkItDown 插件默认关闭，当前也不安装 Azure、音频转写或 YouTu
 
 - 先提取元数据、EXIF、尺寸、文件名语义
 - 若本地 OCR 可用则提取 OCR 文本
-- 若 OCR 不可用或结果不足，则保留降级说明和待补充标记
+- 独立 `raw/` 图片在 OCR 不可用或结果不足时保留降级说明和待补充标记
+- Markdown 内嵌图片在 OCR 不足时按工作区配置尝试图片理解；仍无可靠文本时保留该图片的占位和告警，不中断 Markdown 正文
 
 当前实现：
 
-- 已实现“元数据保底 + `tesseract` 可用时本地 OCR 增强”
-- OCR 不可用、失败或结果较弱时，可按工作区配置调用 LLM 图片理解；没有可靠结果时仍只保留元数据和告警
+- 独立 `raw/` 图片已实现“元数据保底 + `tesseract` 可用时本地 OCR 增强”，当前尚未把工作区上下文传入图片理解任务
+- Markdown 内嵌图片会把工作区和图片上下文传给同一图片转换辅助函数；OCR 不可用、失败或结果较弱时，可按配置调用 LLM 图片理解
+- 内嵌图片下载、OCR 或 LLM 处理失败时按单图片记录 `markdown_image_conversion_failed:<序号>:<错误类型>`，保留原 Markdown 正文并继续处理
 
 ### 提取方式与提取质量
 
@@ -1001,8 +1003,8 @@ MarkItDown 插件默认关闭，当前也不安装 Azure、音频转写或 YouTu
 - `markitdown_failed+python_only`：MarkItDown 失败后使用旧转换器备用路径
 - `python_only`：纯 Python 提取
 - `python_only+tesseract`：Python 提取加本地 OCR 增强
-- `python_plus_agent`：Python 先提取，Agent 再补充理解
-- `agent_only_fallback`：仅在极端兜底场景下使用 Agent
+- `python_only+llm_assisted`：图片转换辅助函数收到工作区上下文、没有可用 OCR 文本时，Python 元数据提取加已启用的图片理解
+- `python_only+tesseract+llm_assisted`：图片转换辅助函数收到工作区上下文、本地 OCR 已执行但结果不足时，再补充已启用的图片理解
 
 建议的质量等级：
 
@@ -1488,19 +1490,20 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 
 1. 脚本先做初筛
 2. 灰区候选打包送入 LLM
-3. LLM 通过任务专属函数返回参数，且每个对象必须回链 Evidence Block 或已落账对象
-4. 脚本做 schema 校验、grounded 校验、账本写回和缓存收口
+3. LLM 通过任务专属函数返回参数；批量语义对象和页面改写条目必须使用输入中已有的 ID，单对象任务则由程序保留请求上下文中的目标 ID，不要求模型重复生成
+4. 脚本做 Schema、业务规则和适用场景下的 grounded 校验，再处理账本写回与缓存
 
 ### LLM 输出提交协议
 
-所有 LLM 阶段都采用“候选提交，脚本验收”的协议：
+所有 LLM 阶段都采用“函数参数提交，脚本验收”的协议：
 
-1. LLM 只能输出 proposal，不直接写 live 账本
-2. proposal 必须来自当前任务强制指定的唯一函数调用，并符合该任务的 JSON Schema
-3. proposal 必须包含 `task_type / target_ids / evidence_block_ids 或 ledger_object_ids / reason_code / confidence / abstain`
-4. 脚本负责校验 schema、对象存在性、来源回链、span 覆盖、字段枚举、状态机约束和 grounded 约束
-5. 校验通过后，脚本写入 KnowledgeUnit、Claim、SemanticDecision、ReviewItem 或 Page projection
-6. 校验失败时，脚本必须记录 rejected proposal 或 lint 诊断，不能静默丢弃
+1. LLM 只能提交当前任务指定函数的参数，不直接写 live 账本
+2. 在线响应必须只包含一个名称正确的函数调用；CLI 必须返回符合输出 Schema 的 `function_name / arguments_json` 结果包
+3. 十个任务使用各自的参数结构，不存在所有任务都必须重复返回的统一 `task_type / target_ids / abstain` 字段
+4. 四个语义批处理任务按 item 返回 `item_id / decision / decision_status / confidence / reason_code / risk_flags / supporting_ids / abstain_reason`；其余任务只返回各自业务需要的动作、ID、文本或置信度字段
+5. 脚本依次执行 JSON 修复、任务 Schema、输入 ID、允许动作、证据关系和其他业务检查；页面函数通过合同后还要经过页面级 grounding 检查
+6. 合同或业务检查失败时，在线线路按可重试错误处理，CLI 结果失败则让主备请求失败并写入 `logs/llm_requests.jsonl`；语义结果已经通过合同但处于低置信度、`abstained` 或 `rejected` 状态时，才作为 skipped 结果保留在批次报告中
+7. 只有全部检查通过后，业务代码才更新 SemanticDecision、ReviewItem、Claim 或 Page 等现有对象
 
 当前语义账本覆盖：
 
@@ -1510,19 +1513,20 @@ grounded 改写不得新增未被 Claims、Knowledge Units、Evidence Blocks 或
 - `page_intent`
 - `page_route`
 
-每类语义决策都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch --task` 只公开 `document_analysis / claim_candidate_quality / claim_role / page_intent`；`page_route` 在页面路由时自动落账，不是独立 LLM 函数。批处理会把缺字段、低置信度、`abstain` 或不合格输出作为 skipped / rejected proposal 处理，而不是直接污染 live 账本。
+每类语义决策都有必填 decision fields、可选字段、`prompt_version / schema_version / model_key`、输入指纹和缓存命中规则。`semantic-batch --task` 只公开 `document_analysis / claim_candidate_quality / claim_role / page_intent`；`page_route` 在页面路由时自动落账，不是独立 LLM 函数。缺少合同必填字段或业务必填值会先触发在线重试或主备失败；已经通过合同但低于任务置信度，或明确返回 `decision_status=abstained / rejected` 的语义结果，才进入 skipped 批次报告，不写入 live 语义账本。
 
 当前 LLM Function Calling 合同覆盖十个真实任务：四个语义分析任务、`review_auto_decision / claim_stable_promotion / review_concept_candidate`、`render_readable_concept_page / render_workspace_overview_page` 和 `describe_image`。`qa_note / concept_update` 尚未实现合同，因此保持禁用。
 
-默认工作区为已实现任务配置 `llm_assisted`。LLM 调度器优先使用在线客户端；在线配置缺失、遇到不可重试错误，或三次尝试仍失败时，改用只执行一次的 Codex CLI 客户端。主备都失败时抛出 `LLMRouteError` 并让当前命令失败，不返回空结果，也不调用确定性处理器掩盖失败。完全离线时必须显式选择 `deterministic`。
+默认工作区为已实现任务配置 `llm_assisted`。LLM 调度器优先使用在线客户端；在线配置缺失、遇到不可重试错误，或三次尝试仍失败时，改用只执行一次的 Codex CLI 客户端。主备都失败时抛出 `LLMRouteError`，不返回空结果，也不调用确定性处理器掩盖失败；语义批处理、审核和页面生成等直接调用点让当前命令失败，Markdown 内嵌图片调用点按单附件边界保留占位和告警。完全离线时必须显式选择 `deterministic`。
 
 在线 `responses / chat_completions` 都使用非流式强制 Function Calling，并关闭 SDK 与 HTTP transport 内部重试。函数参数按“调用数量与函数名、`json_repair`、JSON Schema、任务业务规则”的顺序检查；只有全部通过后才交给业务代码。
 
-LLM 必须允许放弃判断：
+任务用各自的受限结果表达“不要自动写入”：
 
-- `abstain=true`：证据不足、结构不清、类型不确定或需要人工判断
-- `needs_review=true`：可形成候选，但自动落账风险较高
-- `reject_reason`：拒绝生成的原因，例如 `insufficient_evidence / ambiguous_heading / conflicting_context / unsupported_inference`
+- 四个语义批处理任务使用 `decision_status=abstained / rejected`，并填写 `abstain_reason`、`reason_code` 和风险标记
+- `claim_candidate_quality` 还可用 `review_required` 标记短 claim 需要审核
+- `review_auto_decision` 使用 `escalate / skip`，`claim_stable_promotion` 使用 `skip`，`review_concept_candidate` 使用 `reject`
+- 页面改写和图片理解没有通用放弃字段；它们必须返回各自完整参数并通过业务检查，否则按线路错误处理
 
 这条协议的目标，是让 LLM 参与理解，但不掌握最终写入权。
 
@@ -1533,16 +1537,7 @@ LLM 必须允许放弃判断：
 - 对“短但可能有意义”的候选，应进入独立的质量灰区批处理，由 LLM 返回 `standalone / fragment / title_shell / noise` 这类受限标签
 - 只有在质量判定明确放行时，短 claim 才应继续进入 `safe_auto`
 
-LLM 输出应包含可解释原因，例如：
-
-- `local_heading_attached_to_body`
-- `metadata_extracted_owner`
-- `metadata_fact_generated_for_search`
-- `content_tag_case_but_page_type_topic`
-- `claim_rejected_structural_label`
-- `table_row_compiled_as_metadata_fact`
-
-没有 reason 和回链的输出不得进入 live 账本。
+语义与自动处理任务使用合同中的 `reason_code` 或 `reason` 保存可解释原因。页面改写任务没有通用 reason 字段，而是依靠每条结果携带的 `claim_id / page_id` 和后续 Rewrite Traceability 保留回链。缺少合同要求的原因字段，或返回了输入集合之外的 ID，都会在进入 live 对象前被拒绝。
 
 ### 批处理与缓存
 
@@ -2192,7 +2187,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - `semantic/` 目录、`state/semantic_decisions.jsonl`、semantic batch 缓存与任务契约
 - `document_analysis / claim_candidate_quality / claim_role / page_intent` 四类可单跑语义批处理阶段，以及会在页面路由时自动落账的 `page_route` 决策
 - `structure_context / group_context / semantic_features` 已进入语义批处理 payload
-- LLM 调度器已实现在线主线路最多三次、Codex CLI 备用线路一次，以及主备都失败时的命令失败语义
+- LLM 调度器已实现在线主线路最多三次、Codex CLI 备用线路一次；主备都失败时调度器抛错，直接依赖结果的调用点让命令失败
 - 在线客户端已支持用户自己的 OpenAI 兼容地址和 `responses / chat_completions`，CLI 客户端使用同一 Function Calling 合同
 - 十个已实现任务统一经过 `json_repair`、JSON Schema 和业务检查；图片会以真实 MIME data URL 或 CLI `-i` 参数传入
 - `concept / guide / duty / example / topic / reference / timeline / overview / source-summary` 已进入正式页型链路
@@ -2213,7 +2208,7 @@ Lint 不只是质量检查，更像编译验证阶段（compiler verification pa
 - 过于细碎的版本阶段命名
 - 尚未进入实现计划的成本优化、批量调度和部署形态讨论
 
-当前不维护旧工作区兼容专题；当格式变化影响现有样例工作区时，优先通过重跑固定流程、lint 和测试处理。
+当前不维护旧页型和账本 schema 的兼容专题；当格式变化影响现有样例工作区时，优先通过重跑固定流程、lint 和测试处理。旧 LLM `command` 配置的识别与人工迁移提示属于配置校验，不是工作区数据迁移层。
 
 ## 阅读与维护约定（Reading And Maintenance Convention）
 

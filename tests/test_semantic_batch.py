@@ -204,7 +204,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
         if line.strip()
     }
     assert "state/semantic_decisions.jsonl" in tracked_files
-    assert "config/llm.local.example.yml" in tracked_files
+    assert ".env.example" in tracked_files
 
 
 def test_semantic_batch_help_does_not_expose_internal_page_route_task() -> None:
@@ -510,16 +510,12 @@ def test_semantic_batch_can_use_online_function_calling(tmp_path: Path) -> None:
 
     server, thread = start_test_server(_SemanticFunctionHandler)
     try:
-        (workspace_dir / "config" / "llm.local.yml").write_text(
-            'provider:\n'
-            '  protocol: "openai_compatible"\n'
-            f'  base_url: "http://127.0.0.1:{server.server_port}"\n'
-            '  model: "test-model"\n'
-            '  api_key: "test-key"\n'
-            '  timeout_seconds: 30\n'
-            'transport:\n'
-            '  api_style: "chat_completions"\n'
-            '  verify_ssl: true\n',
+        (workspace_dir / ".env").write_text(
+            f'MYAGENTWIKI_LLM_BASE_URL="http://127.0.0.1:{server.server_port}"\n'
+            'MYAGENTWIKI_LLM_MODEL="test-model"\n'
+            'MYAGENTWIKI_LLM_API_KEY="test-key"\n'
+            'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="30"\n'
+            'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
             encoding="utf-8",
         )
         result = run_cli(

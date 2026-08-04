@@ -116,16 +116,12 @@ def configure_only_llm_task(
         1,
     )
     config_path.write_text(config_text, encoding="utf-8")
-    (workspace_dir / "config" / "llm.local.yml").write_text(
-        'provider:\n'
-        '  protocol: "openai_compatible"\n'
-        f'  base_url: "{base_url}"\n'
-        '  model: "local-test-model"\n'
-        '  api_key: "local-test-key"\n'
-        '  timeout_seconds: 20\n'
-        'transport:\n'
-        '  api_style: "chat_completions"\n'
-        '  verify_ssl: true\n',
+    (workspace_dir / ".env").write_text(
+        f'MYAGENTWIKI_LLM_BASE_URL="{base_url}"\n'
+        'MYAGENTWIKI_LLM_MODEL="local-test-model"\n'
+        'MYAGENTWIKI_LLM_API_KEY="local-test-key"\n'
+        'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="20"\n'
+        'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
         encoding="utf-8",
     )
 
@@ -303,7 +299,7 @@ def test_legacy_online_module_config_returns_migration_guidance(tmp_path: Path) 
     result = run_cli_expect_exit("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir), expected_exit_code=1)
     assert result["error"] == "llm_configuration_migration_required"
     assert "online is now the primary route" in result["message"]
-    assert "config/llm.local.yml" in result["message"]
+    assert "local `.env`" in result["message"]
 
 
 def test_legacy_cli_module_config_returns_migration_guidance(tmp_path: Path) -> None:

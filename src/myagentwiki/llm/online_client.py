@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import ssl
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, OpenAI
 from PIL import Image
 
-from ..runtime_env import load_simple_yaml
+from ..runtime_env import load_simple_env
 from .contracts import (
     LLMFunctionSpec,
     chat_completions_function_tool,
@@ -20,48 +21,65 @@ from .errors import LLMClientError, LLMConfigurationError, LLMResponseError
 from .repair import RawFunctionCall
 
 
-ONLINE_CONFIG_REL_PATH = Path("config") / "llm.local.yml"
+ONLINE_ENV_REL_PATH = Path(".env")
 RESPONSES_API_STYLE = "responses"
 CHAT_COMPLETIONS_API_STYLE = "chat_completions"
 SUPPORTED_API_STYLES = {RESPONSES_API_STYLE, CHAT_COMPLETIONS_API_STYLE}
 
+ONLINE_ENVIRONMENT_KEYS = {
+    "protocol": "MYAGENTWIKI_LLM_PROTOCOL",
+    "base_url": "MYAGENTWIKI_LLM_BASE_URL",
+    "model": "MYAGENTWIKI_LLM_MODEL",
+    "api_key": "MYAGENTWIKI_LLM_API_KEY",
+    "timeout_seconds": "MYAGENTWIKI_LLM_TIMEOUT_SECONDS",
+    "api_style": "MYAGENTWIKI_LLM_API_STYLE",
+    "verify_ssl": "MYAGENTWIKI_LLM_VERIFY_SSL",
+}
+
+
+def _online_environment_value(local_values: dict[str, str], name: str, default: str = "") -> str:
+    # 系统环境变量适合 CI 和临时覆盖，本地 .env 适合保存当前用户的固定配置。
+    return os.environ.get(name, local_values.get(name, default)).strip()
+
 
 def load_online_config(workspace: Path) -> dict[str, Any]:
-    path = workspace / ONLINE_CONFIG_REL_PATH
-    if not path.exists():
-        raise LLMConfigurationError(
-            f"Online configuration `{ONLINE_CONFIG_REL_PATH.as_posix()}` is missing."
-        )
+    path = workspace / ONLINE_ENV_REL_PATH
     try:
-        config = load_simple_yaml(path)
+        local_values = load_simple_env(path)
     except Exception as exc:
-        raise LLMConfigurationError(f"Online configuration could not be parsed: {exc}") from exc
-    provider = config.get("provider", {})
-    transport = config.get("transport", {})
-    if not isinstance(provider, dict) or not isinstance(transport, dict):
-        raise LLMConfigurationError("`provider` and `transport` must be mappings.")
+        raise LLMConfigurationError(f"Online configuration `.env` could not be parsed: {exc}") from exc
     values = {
-        "protocol": str(provider.get("protocol", "")).strip(),
-        "base_url": str(provider.get("base_url", "")).strip().rstrip("/"),
-        "model": str(provider.get("model", "")).strip(),
-        "api_key": str(provider.get("api_key", "")).strip(),
-        "api_style": str(transport.get("api_style", RESPONSES_API_STYLE)).strip() or RESPONSES_API_STYLE,
+        "protocol": _online_environment_value(
+            local_values,
+            ONLINE_ENVIRONMENT_KEYS["protocol"],
+            "openai_compatible",
+        ),
+        "base_url": _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["base_url"]).rstrip("/"),
+        "model": _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["model"]),
+        "api_key": _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["api_key"]),
+        "api_style": _online_environment_value(
+            local_values,
+            ONLINE_ENVIRONMENT_KEYS["api_style"],
+            RESPONSES_API_STYLE,
+        ) or RESPONSES_API_STYLE,
     }
     missing = [key for key in ("protocol", "base_url", "model", "api_key") if not values[key]]
     if missing:
-        raise LLMConfigurationError(f"Online configuration is missing: {', '.join(missing)}.")
+        raise LLMConfigurationError(f"Online configuration in `.env` is missing: {', '.join(missing)}.")
     if values["protocol"] != "openai_compatible":
         raise LLMConfigurationError("Only `openai_compatible` online providers are supported.")
     if values["api_style"] not in SUPPORTED_API_STYLES:
         raise LLMConfigurationError(f"Unsupported API style `{values['api_style']}`.")
-    if transport.get("stream") is True:
-        raise LLMConfigurationError("Streaming LLM requests are not supported; set `transport.stream` to false.")
     try:
-        values["timeout_seconds"] = max(int(provider.get("timeout_seconds", 120)), 5)
+        values["timeout_seconds"] = max(int(_online_environment_value(
+            local_values,
+            ONLINE_ENVIRONMENT_KEYS["timeout_seconds"],
+            "120",
+        )), 5)
     except (TypeError, ValueError) as exc:
-        raise LLMConfigurationError("`provider.timeout_seconds` must be an integer >= 5.") from exc
-    verify_ssl = transport.get("verify_ssl", True)
-    values["verify_ssl"] = verify_ssl if isinstance(verify_ssl, bool) else str(verify_ssl).lower() not in {"0", "false", "no", "off"}
+        raise LLMConfigurationError("`MYAGENTWIKI_LLM_TIMEOUT_SECONDS` must be an integer >= 5.") from exc
+    verify_ssl = _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["verify_ssl"], "true")
+    values["verify_ssl"] = verify_ssl.lower() not in {"0", "false", "no", "off"}
     return values
 
 

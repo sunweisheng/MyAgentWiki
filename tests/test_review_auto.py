@@ -100,16 +100,12 @@ def configure_only_review_auto_llm(workspace_dir: Path, base_url: str) -> None:
         config_text.replace(marker, '  review_auto:\n    strategy: "llm_assisted"\n', 1),
         encoding="utf-8",
     )
-    (workspace_dir / "config" / "llm.local.yml").write_text(
-        'provider:\n'
-        '  protocol: "openai_compatible"\n'
-        f'  base_url: "{base_url}"\n'
-        '  model: "local-test-model"\n'
-        '  api_key: "local-test-key"\n'
-        '  timeout_seconds: 20\n'
-        'transport:\n'
-        '  api_style: "chat_completions"\n'
-        '  verify_ssl: true\n',
+    (workspace_dir / ".env").write_text(
+        f'MYAGENTWIKI_LLM_BASE_URL="{base_url}"\n'
+        'MYAGENTWIKI_LLM_MODEL="local-test-model"\n'
+        'MYAGENTWIKI_LLM_API_KEY="local-test-key"\n'
+        'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="20"\n'
+        'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
         encoding="utf-8",
     )
 

@@ -93,7 +93,7 @@ def legacy_command_migration_message(*, location: str, command: list[str]) -> st
     if "myagentwiki.agent_online_hook" in command_text:
         suggestion = (
             "Remove `command`, set the task to `llm_assisted`, and keep the user's online "
-            "provider settings in `config/llm.local.yml`; online is now the primary route."
+            "provider settings in the local `.env`; online is now the primary route."
         )
     elif "myagentwiki.agent_cli_hook" in command_text:
         suggestion = (

@@ -2,9 +2,9 @@
 
 MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge compiler）与 Skill 仓库。它的目标不是做一次性 RAG 问答，而是让 Agent 在原始资料之上持续维护一个可追踪、可审计、可演化的个人知识 Wiki。
 
-新工作区默认启用统一 LLM 调度器：先请求在线客户端；在线配置缺失、不可用或重试仍失败时，自动改用 Codex CLI 客户端。只有两条线路都失败，当前命令才以非零状态结束。
+新工作区默认启用统一 LLM 调度器：先请求在线客户端；在线配置缺失、不可用或重试仍失败时，自动改用 Codex CLI 客户端。语义批处理、审核和页面生成等直接调用线路的流程会在两条线路都失败时以非零状态结束；Markdown 内嵌图片属于单附件降级边界，图片理解失败时会保留正文、图片占位和告警。
 
-在线客户端读取当前用户单独填写的 `config/llm.local.yml`。这份文件不应提交到 Git，仓库只提供 `config/llm.local.example.yml`。没有在线配置时无需中断配置流程，调度器会直接尝试 CLI 客户端。完全不使用 LLM 时，必须把相关任务显式设为 `deterministic`。
+在线客户端读取当前用户单独填写的 `.env`。这份文件不应提交到 Git，仓库只提供 `.env.example`。没有在线配置时无需中断配置流程，调度器会直接尝试 CLI 客户端。完全不使用 LLM 时，必须把相关任务显式设为 `deterministic`。
 
 当前仓库既是：
 
@@ -34,8 +34,8 @@ MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge 
 当前项目的总原则是“确定性证据优先，按需使用语义判断（deterministic evidence first, semantic where needed）”：
 
 - 事实层、证据层、状态层优先由脚本和显式数据结构生成
-- LLM 主要参与文档结构判定、Claim 角色判定、页面意图判定和 grounded 改写
-- 一切 LLM 输出都必须经过 Function Calling 合同、JSON 修复、Schema 和业务检查；主备结果都无效时命令失败
+- LLM 主要参与文档结构判定、Claim 质量与角色判定、页面意图、自动审核、Claim 提稳、概念标题复核、grounded 改写和图片理解
+- 一切 LLM 输出都必须经过 Function Calling 合同、JSON 修复、Schema 和业务检查；直接依赖该结果的流程在主备结果都无效时失败，Markdown 内嵌图片按单附件降级规则继续处理正文
 
 如果只看主链路，可以先把系统理解成：
 
@@ -132,15 +132,15 @@ MyAgentWiki 不是“每次提问都从原文临时拼答案”，而是把知�
 
 这层扩展不是替代 `alias / canonical / hierarchy / source_refs`，而是在这些已有证据链之上补充“页面之间还应该继续读什么”。
 
-当前文档转换不要求安装 LibreOffice、Pandoc 或 pdftotext。PDF、Word、Excel、PowerPoint、HTML、JSON/XML、ZIP、EPUB、Outlook 等格式统一通过 [microsoft/markitdown](https://github.com/microsoft/markitdown) 及其 Python 依赖处理。
+当前文档转换不要求安装 LibreOffice、Pandoc 或 pdftotext。PDF、Word、Excel、PowerPoint、HTML、JSON/XML、ZIP、EPUB、Outlook 等常见文档格式默认先通过 [microsoft/markitdown](https://github.com/microsoft/markitdown) 及其 Python 依赖处理，失败后再进入已有备用转换器。
 
-`tesseract` 只作为图片 OCR 的可选增强工具；缺失时由 `doctor` 明确提示，并采用图片元数据或 LLM 图片理解路径。
+`tesseract` 只作为图片 OCR 的可选增强工具；缺失时由 `doctor` 明确提示。独立 `raw/` 图片当前保留元数据占位，Markdown 内嵌图片则可按配置尝试 LLM 图片理解。
 
 需要说明的是：
 
 - 主详细设计文档已经不再按 `V1 / V1.1 / Phase` 方式组织章节
 - README 也不再把版本叙事作为首页主线
-- 当前仓库以 `3.1.0` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。旧版本迁移和旧兼容动作暂不作为当前正式流程的一部分
+- 当前仓库以 `3.1.0` 作为当前正式发布版本；`2.0.0` 是首个正式发布版本。当前不提供旧页型或账本 schema 的自动迁移流程；旧 LLM 任务级 `command` 配置只会被识别并返回人工迁移提示，不会被继续执行或自动改写
 
 ## Skill 安装与接入 / Skill Installation
 
@@ -199,7 +199,7 @@ New-Item -ItemType Junction `
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
 
-如果 Codex 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `config/llm.local.yml`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
+如果 Codex 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `.env`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
 
 ## 文档导航
 
@@ -369,19 +369,16 @@ export MYAGENTWIKI_CODEX_BIN="codex"
 export MYAGENTWIKI_CODEX_TIMEOUT_SECONDS="120"
 ```
 
-OpenAI 兼容示例：
+OpenAI 兼容 `.env` 示例：
 
-```yaml
-provider:
-  protocol: "openai_compatible"
-  base_url: "https://example.com/v1"
-  model: "your-model-name"
-  api_key: "your-api-key"
-  timeout_seconds: 120
-transport:
-  api_style: "responses"
-  verify_ssl: true
-  stream: false
+```dotenv
+MYAGENTWIKI_LLM_PROTOCOL="openai_compatible"
+MYAGENTWIKI_LLM_BASE_URL="https://example.com/v1"
+MYAGENTWIKI_LLM_MODEL="your-model-name"
+MYAGENTWIKI_LLM_API_KEY="your-api-key"
+MYAGENTWIKI_LLM_TIMEOUT_SECONDS="120"
+MYAGENTWIKI_LLM_API_STYLE="responses"
+MYAGENTWIKI_LLM_VERIFY_SSL="true"
 ```
 
 `transport.api_style` 支持 `responses` 和 `chat_completions`，默认 `responses`。两者都强制唯一函数调用、关闭并行调用并使用非流式请求。CLI 客户端使用同一参数 Schema，通过 `codex exec --output-schema` 返回 `function_name + arguments_json`；图片用 `-i` 传入绝对路径。
@@ -549,7 +546,7 @@ MyAgentWiki/
 
 - Python `3.12+`
 - `git`
-- `microsoft/markitdown >=0.1.6,<0.2.0` 及项目声明的文档格式依赖
+- `markitdown[docx,pdf,pptx,xls,xlsx,outlook]>=0.1.6,<0.2.0`，以及 `pyproject.toml` 声明的转换、图片、LLM、JSON 修复和 Schema 校验依赖
 
 目标平台：
 
@@ -621,7 +618,7 @@ MyAgentWiki/
   - 当前 concept 聚合已改为与 claim review 更接近的归一化分组思路，减少同主题页面分裂
   - 当前已支持自动生成人类可读 `concept` 页；工作区级 `overview` 页会在满足生成条件时自动产出，两个页面族默认都会先尝试 `llm_assisted` 渲染
   - 当前新初始化工作区默认已经接上统一 LLM 调度器，目标是让 `ingest -> review-auto -> stable -> concept/overview` 作为一条连续自动化链默认运行；完全离线时需要显式选择确定性模式
-  - `concept` 与 `overview` 的 LLM 改写都要求 grounded；不合格时会自动回退到 deterministic fallback
+  - `concept` 与 `overview` 的 LLM 改写都要求 grounded；函数结果已经通过合同、但页面级 grounding 不合格时会使用确定性页面模板，主备请求本身都失败时命令直接失败
   - `overview` 页当前支持 grounded overview rewrite，并在 `llm_assisted` 成功时显示折叠式 `Rewrite Traceability`
 - `myagentwiki lint`
   - 已实现仓库骨架 / 工作区结构检查，以及 `chunk_id` / `claim_id` / `page_id` 唯一性、Claim 溯源、页面记录完整性、`reviews.jsonl` / `error_log.jsonl` / `pages.jsonl` 存在性检查
@@ -699,7 +696,7 @@ MyAgentWiki/
 - `bootstrap` 直接复用当前 Python 解释器
 - `raw/` 扫描支持子目录递归
 - `raw/` 扫描会跳过所有 `.` 开头的文件和目录
-- 核心标准化主路径优先采用纯 Python
+- 常见文档的标准化主路径使用 MarkItDown Python 包；Markdown、纯文本和图片使用 MyAgentWiki 专用路径，MarkItDown 失败后再使用已有 Python 转换器或占位文档
 
 当前真实边界也要说明白：
 
@@ -794,7 +791,7 @@ python scripts/validate_workflow.py --keep-workspace
 - `deep` 查询模式当前还能返回按来源收束的 `source_trail`，帮助 Agent 用更大的上下文窗口继续追证据，但仍保持 deterministic first
 - query 已接入持久化页面检索索引，索引存在时优先读取 `indexes/search_pages.jsonl`
 - query 已接入 alias registry，alias 命中时会回传 canonical 目标
-- 可读 `concept` 页与 `overview` 页默认允许 `llm_assisted` 改写，但所有改写都要通过 grounded 校验，否则自动回退
+- 可读 `concept` 页与 `overview` 页默认允许 `llm_assisted` 改写；函数结果通过合同但页面级 grounded 校验不合格时使用确定性页面模板，主备请求失败时命令失败
 
 ## 文档说明
 

@@ -9,9 +9,11 @@ from PIL import Image
 from myagentwiki.llm.contracts import get_function_spec, registered_task_names
 from myagentwiki.llm.online_client import (
     CHAT_COMPLETIONS_API_STYLE,
+    ONLINE_ENVIRONMENT_KEYS,
     RESPONSES_API_STYLE,
     OnlineLLMClient,
     _status_is_retryable,
+    load_online_config,
 )
 
 
@@ -23,6 +25,27 @@ def client_with_fake_api(api_style: str, api) -> OnlineLLMClient:  # noqa: ANN00
     client.image_mime_types = {"image/png"}
     client._client = api
     return client
+
+
+def test_online_config_reads_local_env_and_allows_process_overrides(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    for name in ONLINE_ENVIRONMENT_KEYS.values():
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        'MYAGENTWIKI_LLM_BASE_URL="https://example.com/v1"\n'
+        'MYAGENTWIKI_LLM_MODEL="env-model"\n'
+        'MYAGENTWIKI_LLM_API_KEY="env-key"\n'
+        'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MYAGENTWIKI_LLM_MODEL", "process-model")
+
+    config = load_online_config(tmp_path)
+
+    assert config["protocol"] == "openai_compatible"
+    assert config["base_url"] == "https://example.com/v1"
+    assert config["model"] == "process-model"
+    assert config["api_style"] == CHAT_COMPLETIONS_API_STYLE
+    assert config["api_key"] == "env-key"
 
 
 def test_responses_uses_forced_non_streaming_function_call() -> None:

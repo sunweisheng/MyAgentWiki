@@ -25,7 +25,8 @@
 - `src/myagentwiki/cli_components/`：承接命令适配、参数转 request、结果转 `CommandResult`
 - `src/myagentwiki/app_services/`：承接 init、ingest、query、review、lint、render、semantic batch、运行时转换等服务
 - `src/myagentwiki/repositories/`：承接 query / ingest / review / semantic 等账本读取和持久化
-- `src/myagentwiki/app_services/runtime_services.py`：承接文档转换、OCR、远程图片下载和 LLM/确定性任务接入等运行时能力
+- `src/myagentwiki/app_services/document_conversion.py`：封装 MarkItDown 本地文档转换主路径
+- `src/myagentwiki/app_services/runtime_services.py`：承接 Markdown/图片专用标准化、旧转换器备用路径、OCR、远程图片下载和 LLM/确定性任务接入等运行时能力
 - `src/myagentwiki/cli.py`：仍负责依赖装配，并保留较多语义规则、Structure / Evidence / Knowledge / Claim 编译、页面生成和索引逻辑，尚未成为真正的薄入口
 
 内部流程已经改为复用 `run_*_service`，不再通过调用 `command_*` 复用业务逻辑。本文后面的 `cli/ / app/ / domain/ / infra/` 目录树是长期目标，不是当前文件系统快照；继续拆分时应优先沿用现有模块，再按职责逐步调整命名和边界。

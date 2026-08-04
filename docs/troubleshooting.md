@@ -64,16 +64,20 @@
 
 - 当前环境未安装 `tesseract`
 - 图片本身质量较低
+- 独立 `raw/` 图片当前没有接入 LLM 图片理解
+- 对 Markdown 内嵌图片，`automation.image_to_text` 被设为 `disabled`，图片理解主备线路失败，或结果为空、低置信度、没有通过业务检查
 
 处理：
 
 - 安装 `tesseract`
+- 独立图片需要 LLM 识别时，先把图片作为 Markdown 内嵌图片纳入来源，或等待独立图片链路接入该任务
+- 对 Markdown 内嵌图片，检查 `config/project.yml` 中的 `automation.image_to_text`；需要使用 LLM 时再检查 `logs/llm_requests.jsonl` 和主备线路配置
 - 重新运行 `ingest`
 
 说明：
 
-- 没有 OCR 时系统仍会保留图片占位 normalized 文档
-- 后续可由 Agent 补充视觉理解
+- 独立 `raw/` 图片在 OCR 不可用或结果不足时保留元数据级 normalized 文档
+- Markdown 内嵌图片会先按配置尝试图片理解；仍没有可靠文本时保留原 Markdown 正文、图片占位和告警
 
 ## 5. `.doc` 或 `.xls` 转换效果一般
 
@@ -228,7 +232,7 @@ py -3.12 -m venv .venv
 优先检查：
 
 1. 查看 `logs/llm_requests.jsonl` 中对应 `request_id` 的线路、尝试次数、错误类型和 HTTP 状态。该日志不包含 API Key、完整正文、图片内容或完整原始输出。
-2. 如在线线路报配置错误，检查工作区私有的 `config/llm.local.yml`；不要输出或提交其中的 API Key。
+2. 如在线线路报配置错误，检查工作区私有的 `.env`；不要输出或提交其中的 API Key。
 3. 如在线线路报 403、404 等不可重试错误，它只会请求一次并立即切到 CLI，这属于预期行为。
 4. 如在线线路报 429、5xx、超时或结果合同错误，它最多执行三次，然后切到 CLI。
 5. 检查 `codex` 是否可执行、是否已登录；必要时核对 `MYAGENTWIKI_CODEX_BIN`、`MYAGENTWIKI_CODEX_MODEL`、`MYAGENTWIKI_CODEX_TIMEOUT_SECONDS`。
@@ -238,7 +242,7 @@ py -3.12 -m venv .venv
 ```bash
 python3 scripts/debug_llm_routing.py contract --task claim_role
 python3 scripts/debug_llm_routing.py simulate --scenario http_404_to_cli
-python3 scripts/debug_llm_routing.py live --workspace /path/to/workspace --task claim_role --payload /path/to/payload.json
+python3 scripts/debug_llm_routing.py live --workspace /path/to/workspace --task claim_role --payload-file /path/to/payload.json
 ```
 
 需要完全离线运行时，应在对应任务配置中显式使用 `deterministic`。不要把它当成线路失败后的自动降级。
