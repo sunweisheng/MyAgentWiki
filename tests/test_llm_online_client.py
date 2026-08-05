@@ -61,6 +61,47 @@ def test_online_config_reads_local_env_and_allows_process_overrides(tmp_path: Pa
     assert config["api_key"] == "env-key"
 
 
+def test_online_config_reads_provider_extra_body(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    for name in ONLINE_ENVIRONMENT_KEYS.values():
+        monkeypatch.delenv(name, raising=False)
+    skill_root = tmp_path / "skill-root"
+    skill_root.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (skill_root / ".env").write_text(
+        'MYAGENTWIKI_LLM_BASE_URL="https://example.com/v1"\n'
+        'MYAGENTWIKI_LLM_MODEL="env-model"\n'
+        'MYAGENTWIKI_LLM_API_KEY="env-key"\n'
+        "MYAGENTWIKI_LLM_EXTRA_BODY_JSON='{\"provider_option\": false}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SKILL_ROOT_ENVIRONMENT_VARIABLE, str(skill_root))
+
+    config = load_online_config(workspace)
+
+    assert config["extra_body"] == {"provider_option": False}
+
+
+def test_online_config_rejects_non_object_extra_body(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    for name in ONLINE_ENVIRONMENT_KEYS.values():
+        monkeypatch.delenv(name, raising=False)
+    skill_root = tmp_path / "skill-root"
+    skill_root.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (skill_root / ".env").write_text(
+        'MYAGENTWIKI_LLM_BASE_URL="https://example.com/v1"\n'
+        'MYAGENTWIKI_LLM_MODEL="env-model"\n'
+        'MYAGENTWIKI_LLM_API_KEY="env-key"\n'
+        'MYAGENTWIKI_LLM_EXTRA_BODY_JSON="[]"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SKILL_ROOT_ENVIRONMENT_VARIABLE, str(skill_root))
+
+    with pytest.raises(LLMConfigurationError, match="EXTRA_BODY_JSON"):
+        load_online_config(workspace)
+
+
 def test_online_config_missing_env_explains_required_settings(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     for name in ONLINE_ENVIRONMENT_KEYS.values():
         monkeypatch.delenv(name, raising=False)
@@ -124,6 +165,29 @@ def test_responses_uses_forced_non_streaming_function_call() -> None:
     assert "text" not in recorded
 
 
+def test_responses_passes_provider_extra_body() -> None:
+    recorded = {}
+
+    class Responses:
+        def create(self, **kwargs):  # noqa: ANN003
+            recorded.update(kwargs)
+            return SimpleNamespace(output=[SimpleNamespace(
+                type="function_call",
+                name="submit_claim_promotion_decision",
+                arguments='{"decision":"skip","confidence":0.8,"reason":"ok"}',
+            )])
+
+    client = client_with_fake_api(RESPONSES_API_STYLE, SimpleNamespace(responses=Responses()))
+    client.config["extra_body"] = {"provider_option": False}
+    client.request(
+        spec=get_function_spec("claim_stable_promotion"),
+        context={"claim": {"claim_id": "c1"}},
+        image_paths=[],
+    )
+
+    assert recorded["extra_body"] == {"provider_option": False}
+
+
 def test_chat_completions_uses_forced_non_streaming_function_call() -> None:
     recorded = {}
 
@@ -150,6 +214,34 @@ def test_chat_completions_uses_forced_non_streaming_function_call() -> None:
     assert recorded["parallel_tool_calls"] is False
     assert recorded["tool_choice"]["function"]["name"] == raw.function_name
     assert "response_format" not in recorded
+
+
+def test_chat_completions_passes_provider_extra_body() -> None:
+    recorded = {}
+
+    class Completions:
+        def create(self, **kwargs):  # noqa: ANN003
+            recorded.update(kwargs)
+            function = SimpleNamespace(
+                name="submit_claim_promotion_decision",
+                arguments='{"decision":"skip","confidence":0.8,"reason":"ok"}',
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(tool_calls=[SimpleNamespace(function=function)])
+            )])
+
+    client = client_with_fake_api(
+        CHAT_COMPLETIONS_API_STYLE,
+        SimpleNamespace(chat=SimpleNamespace(completions=Completions())),
+    )
+    client.config["extra_body"] = {"provider_option": False}
+    client.request(
+        spec=get_function_spec("claim_stable_promotion"),
+        context={"claim": {"claim_id": "c1"}},
+        image_paths=[],
+    )
+
+    assert recorded["extra_body"] == {"provider_option": False}
 
 
 def test_http_retry_classification() -> None:

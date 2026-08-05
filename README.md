@@ -382,9 +382,12 @@ MYAGENTWIKI_LLM_API_KEY="your-api-key"
 MYAGENTWIKI_LLM_TIMEOUT_SECONDS="120"
 MYAGENTWIKI_LLM_API_STYLE="responses"
 MYAGENTWIKI_LLM_VERIFY_SSL="true"
+MYAGENTWIKI_LLM_EXTRA_BODY_JSON='{"enable_thinking": false}'
 ```
 
 `transport.api_style` 支持 `responses` 和 `chat_completions`，默认 `responses`。两者都强制唯一函数调用、关闭并行调用并使用非流式请求。CLI 客户端使用同一参数 Schema，通过 `codex exec --output-schema` 返回 `function_name + arguments_json`；图片用 `-i` 传入绝对路径。
+
+`MYAGENTWIKI_LLM_EXTRA_BODY_JSON` 用于服务商要求的额外请求字段，值必须是 JSON 对象。默认值为 `{"enable_thinking": false}`，用于关闭思考模式，确保服务端允许强制函数调用。未设置时不会向请求添加额外字段。
 
 函数参数先经 `json_repair.loads` 处理常见 JSON 问题，再使用同一份 JSON Schema 和任务业务规则检查。十个已实现合同见 [LLM 主备线路与 Function Calling 设计](docs/LLM主备线路与Function%20Calling设计.md)。`qa_note`、`concept_update` 尚无实际合同，因此保持禁用。
 

@@ -39,6 +39,7 @@ ONLINE_ENVIRONMENT_KEYS = {
     "timeout_seconds": "MYAGENTWIKI_LLM_TIMEOUT_SECONDS",
     "api_style": "MYAGENTWIKI_LLM_API_STYLE",
     "verify_ssl": "MYAGENTWIKI_LLM_VERIFY_SSL",
+    "extra_body_json": "MYAGENTWIKI_LLM_EXTRA_BODY_JSON",
 }
 REQUIRED_ONLINE_CONFIG_FIELDS = ("base_url", "model", "api_key")
 
@@ -46,6 +47,18 @@ REQUIRED_ONLINE_CONFIG_FIELDS = ("base_url", "model", "api_key")
 def _online_environment_value(local_values: dict[str, str], name: str, default: str = "") -> str:
     # 系统环境变量适合 CI 和临时覆盖，本地 .env 适合保存当前用户的固定配置。
     return os.environ.get(name, local_values.get(name, default)).strip()
+
+
+def _load_extra_body_json(value: str) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise LLMConfigurationError("`MYAGENTWIKI_LLM_EXTRA_BODY_JSON` must be a JSON object.") from exc
+    if not isinstance(parsed, dict):
+        raise LLMConfigurationError("`MYAGENTWIKI_LLM_EXTRA_BODY_JSON` must be a JSON object.")
+    return parsed
 
 
 def _online_configuration_guidance(*, status: str, missing_fields: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -121,6 +134,9 @@ def load_online_config(workspace: Path) -> dict[str, Any]:
         raise LLMConfigurationError("`MYAGENTWIKI_LLM_TIMEOUT_SECONDS` must be an integer >= 5.") from exc
     verify_ssl = _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["verify_ssl"], "true")
     values["verify_ssl"] = verify_ssl.lower() not in {"0", "false", "no", "off"}
+    values["extra_body"] = _load_extra_body_json(
+        _online_environment_value(local_values, ONLINE_ENVIRONMENT_KEYS["extra_body_json"])
+    )
     return values
 
 
@@ -382,15 +398,18 @@ class OnlineLLMClient:
 
     def _request_responses(self, *, spec: LLMFunctionSpec, context: dict[str, Any], image_paths: list[Path]):
         assert self._client is not None
-        return self._client.responses.create(
-            model=self.model,
-            instructions=spec.instructions,
-            input=self._responses_input(context, image_paths),
-            tools=[openai_function_tool(spec)],
-            tool_choice={"type": "function", "name": spec.function_name},
-            parallel_tool_calls=False,
-            stream=False,
-        )
+        request = {
+            "model": self.model,
+            "instructions": spec.instructions,
+            "input": self._responses_input(context, image_paths),
+            "tools": [openai_function_tool(spec)],
+            "tool_choice": {"type": "function", "name": spec.function_name},
+            "parallel_tool_calls": False,
+            "stream": False,
+        }
+        if self.config.get("extra_body"):
+            request["extra_body"] = self.config["extra_body"]
+        return self._client.responses.create(**request)
 
     def _chat_user_content(self, context: dict[str, Any], image_paths: list[Path]) -> Any:
         text = json.dumps(context, ensure_ascii=False, sort_keys=True)
@@ -409,18 +428,21 @@ class OnlineLLMClient:
 
     def _request_chat_completions(self, *, spec: LLMFunctionSpec, context: dict[str, Any], image_paths: list[Path]):
         assert self._client is not None
-        return self._client.chat.completions.create(
-            model=self.model,
-            messages=[
+        request = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": spec.instructions},
                 {"role": "user", "content": self._chat_user_content(context, image_paths)},
             ],
-            tools=[chat_completions_function_tool(spec)],
-            tool_choice={"type": "function", "function": {"name": spec.function_name}},
-            parallel_tool_calls=False,
-            temperature=0,
-            stream=False,
-        )
+            "tools": [chat_completions_function_tool(spec)],
+            "tool_choice": {"type": "function", "function": {"name": spec.function_name}},
+            "parallel_tool_calls": False,
+            "temperature": 0,
+            "stream": False,
+        }
+        if self.config.get("extra_body"):
+            request["extra_body"] = self.config["extra_body"]
+        return self._client.chat.completions.create(**request)
 
     def _extract_responses_call(self, response: Any, spec: LLMFunctionSpec) -> RawFunctionCall:
         calls = [item for item in (getattr(response, "output", None) or []) if getattr(item, "type", "") == "function_call"]
