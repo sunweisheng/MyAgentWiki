@@ -389,6 +389,16 @@ MYAGENTWIKI_LLM_EXTRA_BODY_JSON='{"enable_thinking": false}'
 
 `MYAGENTWIKI_LLM_EXTRA_BODY_JSON` 用于服务商要求的额外请求字段，值必须是 JSON 对象。默认值为 `{"enable_thinking": false}`，用于关闭思考模式，确保服务端允许强制函数调用。未设置时不会向请求添加额外字段。
 
+### 在线模型连通性测试
+
+可用仓库通用脚本检查已配置的在线模型是否能完成一次函数调用：
+
+```bash
+PYTHONPATH=src python3 scripts/online_model_probe.py --workspace <工作区路径> --probe <测试输入 JSON 路径>
+```
+
+测试输入 JSON 需要包含 `task_name` 和对应的 `payload`。脚本会输出接口类型、函数名和合同检查结果，失败时会隐藏 API Key。
+
 函数参数先经 `json_repair.loads` 处理常见 JSON 问题，再使用同一份 JSON Schema 和任务业务规则检查。十个已实现合同见 [LLM 主备线路与 Function Calling 设计](docs/LLM主备线路与Function%20Calling设计.md)。`qa_note`、`concept_update` 尚无实际合同，因此保持禁用。
 
 如需完全离线、确定性执行，可把具体任务的 `strategy` 或 `mode` 显式改为 `deterministic`。旧工作区中的任务级 `command` 不再执行；加载器会针对三个已知旧模块给出迁移建议，自定义命令必须人工选择新线路或确定性模式。
