@@ -42,6 +42,10 @@ def test_cli_uses_output_schema_and_image_argument(tmp_path: Path, monkeypatch) 
     assert ["-i", str(image_path.resolve())] == recorded["command"][
         recorded["command"].index("-i"):recorded["command"].index("-i") + 2
     ]
+    assert ["--sandbox", "read-only"] == recorded["command"][
+        recorded["command"].index("--sandbox"):recorded["command"].index("--sandbox") + 2
+    ]
+    assert "--ask-for-approval" not in recorded["command"]
     assert "--output-schema" in recorded["command"]
     assert "submit_image_description" in recorded["input"]
 

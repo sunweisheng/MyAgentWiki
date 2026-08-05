@@ -88,7 +88,7 @@ def inject_shared_alias_override(workspace_dir: Path, shared_alias: str) -> list
     return page_ids
 
 
-def configure_only_review_auto_llm(workspace_dir: Path, base_url: str) -> None:
+def configure_only_review_auto_llm(workspace_dir: Path, base_url: str, monkeypatch) -> None:  # noqa: ANN001
     config_path = workspace_dir / "config" / "project.yml"
     config_text = config_path.read_text(encoding="utf-8")
     config_text = config_text.replace('strategy: "llm_assisted"', 'strategy: "deterministic"')
@@ -100,14 +100,11 @@ def configure_only_review_auto_llm(workspace_dir: Path, base_url: str) -> None:
         config_text.replace(marker, '  review_auto:\n    strategy: "llm_assisted"\n', 1),
         encoding="utf-8",
     )
-    (workspace_dir / ".env").write_text(
-        f'MYAGENTWIKI_LLM_BASE_URL="{base_url}"\n'
-        'MYAGENTWIKI_LLM_MODEL="local-test-model"\n'
-        'MYAGENTWIKI_LLM_API_KEY="local-test-key"\n'
-        'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="20"\n'
-        'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("MYAGENTWIKI_LLM_BASE_URL", base_url)
+    monkeypatch.setenv("MYAGENTWIKI_LLM_MODEL", "local-test-model")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_API_KEY", "local-test-key")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_API_STYLE", "chat_completions")
 
 
 def create_workspace(tmp_path: Path, project_name: str, files: dict[str, str]) -> Path:
@@ -760,6 +757,7 @@ def test_review_auto_deterministic_processor_keeps_generated_image_aliases_disti
 def test_review_auto_downgrades_invalid_llm_alias_action_to_escalation(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     workspace_dir = create_workspace(
         tmp_path,
@@ -812,7 +810,7 @@ def test_review_auto_downgrades_invalid_llm_alias_action_to_escalation(
             "reason": "llm_forced_invalid_alias_assignment",
         }
 
-    configure_only_review_auto_llm(workspace_dir, function_call_server(build_result))
+    configure_only_review_auto_llm(workspace_dir, function_call_server(build_result), monkeypatch)
     result = run_cli("review-auto", "--target-dir", str(workspace_dir), llm_mode=None)
 
     assert result["summary"]["applied_count"] == 0

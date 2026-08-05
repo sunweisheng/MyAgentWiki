@@ -101,6 +101,7 @@ def configure_only_llm_task(
     section: str,
     target_name: str,
     base_url: str,
+    monkeypatch,
 ) -> None:
     config_path = workspace_dir / "config" / "project.yml"
     config_text = config_path.read_text(encoding="utf-8")
@@ -116,14 +117,11 @@ def configure_only_llm_task(
         1,
     )
     config_path.write_text(config_text, encoding="utf-8")
-    (workspace_dir / ".env").write_text(
-        f'MYAGENTWIKI_LLM_BASE_URL="{base_url}"\n'
-        'MYAGENTWIKI_LLM_MODEL="local-test-model"\n'
-        'MYAGENTWIKI_LLM_API_KEY="local-test-key"\n'
-        'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="20"\n'
-        'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("MYAGENTWIKI_LLM_BASE_URL", base_url)
+    monkeypatch.setenv("MYAGENTWIKI_LLM_MODEL", "local-test-model")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_API_KEY", "local-test-key")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("MYAGENTWIKI_LLM_API_STYLE", "chat_completions")
 
 
 def test_render_page_help_hides_internal_render_targets() -> None:
@@ -299,7 +297,7 @@ def test_legacy_online_module_config_returns_migration_guidance(tmp_path: Path) 
     result = run_cli_expect_exit("semantic-batch", "--task", "claim_role", "--target-dir", str(workspace_dir), expected_exit_code=1)
     assert result["error"] == "llm_configuration_migration_required"
     assert "online is now the primary route" in result["message"]
-    assert "local `.env`" in result["message"]
+    assert "Skill root `.env`" in result["message"]
 
 
 def test_legacy_cli_module_config_returns_migration_guidance(tmp_path: Path) -> None:
@@ -1665,6 +1663,7 @@ def test_lint_requires_single_live_page_type_per_canonical_id(tmp_path: Path) ->
 def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     # 第三阶段允许对 concept 阅读页做 LLM 辅助润色，
     # 但只应在显式开启配置后生效，而且改写内容必须仍然绑在 stable claim 上。
@@ -1714,6 +1713,7 @@ def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(
         section="rendering",
         target_name="readable_concept",
         base_url=function_call_server(build_result),
+        monkeypatch=monkeypatch,
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
@@ -1741,6 +1741,7 @@ def test_llm_assisted_readable_concept_page_uses_grounded_rewrite_when_enabled(
 def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounded(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     # 如果 LLM 输出没有绑定到允许的 claim 或内容明显跑偏，应自动回退到第二阶段的确定性模板。
     source_dir = tmp_path / "raw"
@@ -1774,6 +1775,7 @@ def test_llm_assisted_readable_concept_page_falls_back_when_rewrite_is_ungrounde
         section="rendering",
         target_name="readable_concept",
         base_url=function_call_server(build_result),
+        monkeypatch=monkeypatch,
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
@@ -1907,6 +1909,7 @@ def test_query_overview_intent_prefers_overview_page_for_macro_question(tmp_path
 def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverview")
 
@@ -1942,6 +1945,7 @@ def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(
         section="rendering",
         target_name="overview",
         base_url=function_call_server(build_result),
+        monkeypatch=monkeypatch,
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
@@ -1962,6 +1966,7 @@ def test_llm_assisted_overview_page_uses_grounded_rewrite_when_enabled(
 def test_llm_assisted_overview_page_falls_back_when_rewrite_is_ungrounded(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     workspace_dir = create_workspace_with_two_concepts(tmp_path, "LLMAssistedOverviewFallback")
 
@@ -1979,6 +1984,7 @@ def test_llm_assisted_overview_page_falls_back_when_rewrite_is_ungrounded(
         section="rendering",
         target_name="overview",
         base_url=function_call_server(build_result),
+        monkeypatch=monkeypatch,
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)
@@ -2157,6 +2163,7 @@ def test_ingest_filters_obviously_bad_concept_titles(tmp_path: Path) -> None:
 def test_gray_concept_title_can_be_renamed_by_llm_client(
     tmp_path: Path,
     function_call_server,
+    monkeypatch,
 ) -> None:
     source_dir = tmp_path / "raw"
     source_dir.mkdir()
@@ -2190,6 +2197,7 @@ def test_gray_concept_title_can_be_renamed_by_llm_client(
         section="automation",
         target_name="concept_candidate_review",
         base_url=function_call_server(build_result),
+        monkeypatch=monkeypatch,
     )
 
     run_cli("ingest", "--target-dir", str(workspace_dir), llm_mode=None)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from myagentwiki.llm.errors import LLMClientError, LLMRouteError
+from myagentwiki.llm.errors import LLMClientError, LLMConfigurationError, LLMRouteError
 from myagentwiki.llm.repair import RawFunctionCall
 from myagentwiki.llm.router import LLMRouter, LLMSettings
 
@@ -56,9 +56,10 @@ class FakeOnline:
 class FakeCLI:
     result = VALID_CALL
     calls = 0
+    init_kwargs = {}
 
     def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
-        pass
+        type(self).init_kwargs = kwargs
 
     def request(self, **kwargs):  # noqa: ANN003
         type(self).calls += 1
@@ -74,6 +75,7 @@ def configure_fakes(online_results, cli_result=VALID_CALL) -> None:  # noqa: ANN
     FakeOnline.closed = 0
     FakeCLI.result = cli_result
     FakeCLI.calls = 0
+    FakeCLI.init_kwargs = {}
 
 
 def fake_router(workspace: Path, **kwargs) -> LLMRouter:  # noqa: ANN003
@@ -116,6 +118,19 @@ def test_non_retryable_http_error_uses_cli_once(tmp_path: Path, http_status: int
     assert request(fake_router(tmp_path, settings=settings(), sleep=lambda _: None))["decision"] == "skip"
     assert FakeOnline.calls == 1
     assert FakeCLI.calls == 1
+
+
+def test_cli_fallback_keeps_its_own_timeout_floor(tmp_path: Path) -> None:
+    unavailable = LLMClientError("not configured", backend="online", kind="configuration_error", retryable=False)
+    configure_fakes([unavailable])
+    router = fake_router(tmp_path, settings=settings(), sleep=lambda _: None)
+
+    assert router.request(
+        task_name="claim_stable_promotion",
+        payload={"task": "claim_stable_promotion", "claim": {"claim_id": "c1"}},
+        timeout_seconds=5,
+    )["decision"] == "skip"
+    assert FakeCLI.init_kwargs["timeout_seconds"] == 30
 
 
 @pytest.mark.parametrize("http_status", [429, 503])
@@ -185,3 +200,21 @@ def test_both_routes_failed_raises_and_writes_sanitized_log(tmp_path: Path) -> N
     assert log_records[-1]["status"] == "failed"
     assert "run_id" not in log_records[-1]
     assert "api_key" not in json.dumps(log_records[-1])
+
+
+def test_both_routes_failed_surfaces_online_configuration_guidance(tmp_path: Path) -> None:
+    guidance = {
+        "status": "missing_env_file",
+        "required_variables": ["MYAGENTWIKI_LLM_BASE_URL"],
+        "message": "请配置 MyAgentWiki Skill 根目录的 `.env`。",
+    }
+    online_error = LLMConfigurationError("请配置 MyAgentWiki Skill 根目录的 `.env`。", guidance=guidance)
+    cli_error = LLMClientError("cli unavailable", backend="cli", kind="unavailable", retryable=False)
+    configure_fakes([online_error], cli_error)
+
+    with pytest.raises(LLMRouteError) as exc:
+        request(fake_router(tmp_path, settings=settings(), sleep=lambda _: None))
+
+    assert exc.value.payload["configuration_guidance"] == guidance
+    assert exc.value.payload["attempts"][0]["guidance"] == guidance
+    assert guidance["message"] in exc.value.message

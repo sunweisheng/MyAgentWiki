@@ -83,7 +83,7 @@ llm:
     model: ""
 ```
 
-在线地址、模型、API Key、API 风格和 TLS 校验保存在工作区本地且不入库的 `.env`。系统环境变量优先于 `.env`，适合 CI 或临时覆盖。
+在线地址、模型、API Key、API 风格和 TLS 校验保存在 MyAgentWiki Skill 根目录且不入库的 `.env`，不放在用户工作区。系统环境变量优先于 `.env`，适合 CI 或临时覆盖。
 
 ## 6. 返回处理与诊断
 
@@ -129,7 +129,7 @@ python3 scripts/debug_llm_routing.py live --workspace /path/to/workspace --task 
 
 | 旧模块 | 配置修改 |
 | --- | --- |
-| `myagentwiki.agent_online_hook` | 删除 `command`，任务设为 `llm_assisted`；在线提供方继续放在本地 `.env`，由调度器作为主线路读取 |
+| `myagentwiki.agent_online_hook` | 删除 `command`，任务设为 `llm_assisted`；在线提供方继续放在 MyAgentWiki Skill 根目录的 `.env`，由调度器作为主线路读取 |
 | `myagentwiki.agent_cli_hook` | 删除 `command`，任务设为 `llm_assisted`；CLI 由调度器自动作为备用线路使用 |
 | `myagentwiki.agent_hook` | 删除 `command`；保留旧本地行为时设为 `deterministic`，采用主备线路时设为 `llm_assisted` |
 

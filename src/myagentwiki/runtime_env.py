@@ -12,6 +12,9 @@ from pathlib import Path
 
 
 ROOT_MARKERS = ("pyproject.toml", ".git")
+SKILL_ROOT_ENVIRONMENT_VARIABLE = "MYAGENTWIKI_SKILL_ROOT"
+ONLINE_ENV_FILE_NAME = ".env"
+ONLINE_ENV_EXAMPLE_FILE_NAME = ".env.example"
 PACKAGE_IMPORT_ALIASES = {
     "python-docx": "docx",
     "python-pptx": "pptx",
@@ -32,6 +35,22 @@ def find_project_root(start: Path | None = None) -> Path:
         if (path / "pyproject.toml").exists():
             return path
     raise FileNotFoundError("Could not locate project root from current path.")
+
+
+def resolve_skill_root() -> Path:
+    # 默认从已安装的 MyAgentWiki 包反查 Skill 根目录；测试或嵌入式部署可显式指定。
+    configured_root = os.environ.get(SKILL_ROOT_ENVIRONMENT_VARIABLE, "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
+    return find_project_root(Path(__file__))
+
+
+def online_config_path() -> Path:
+    return resolve_skill_root() / ONLINE_ENV_FILE_NAME
+
+
+def online_config_example_path() -> Path:
+    return resolve_skill_root() / ONLINE_ENV_EXAMPLE_FILE_NAME
 
 
 def parse_yaml_scalar(raw: str):

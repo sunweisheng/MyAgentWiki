@@ -102,7 +102,6 @@ def run_init_service(request: InitRequest, deps: InitServiceDeps) -> dict:
         "wiki/index.md.tmpl": target_dir / "wiki" / "index.md",
         "wiki/log.md.tmpl": target_dir / "wiki" / "log.md",
         "config/project.yml.tmpl": target_dir / "config" / "project.yml",
-        ".env.example.tmpl": target_dir / ".env.example",
         "config/runtime_manifest.yml.tmpl": target_dir / "config" / "runtime_manifest.yml",
     }
 

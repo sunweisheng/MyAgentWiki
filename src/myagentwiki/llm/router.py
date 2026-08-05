@@ -10,12 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..debug_trace import current_debug_tracer, file_metadata, trace_step
-from ..runtime_env import load_simple_yaml
+from ..runtime_env import load_simple_yaml, online_config_path
 from .cli_client import CLILLMClient
 from .contracts import build_task_context, get_function_spec
 from .diagnostics import append_request_record
 from .errors import LLMClientError, LLMProjectConfigurationError, LLMRouteError
-from .online_client import ONLINE_ENV_REL_PATH, OnlineLLMClient, load_online_config
+from .online_client import OnlineLLMClient, load_online_config
 from .repair import repair_and_validate
 
 
@@ -134,7 +134,7 @@ def build_route_identity(workspace: Path, task_name: str, *, strategy: str) -> d
             api_style=str(online_config["api_style"]),
         )
     except Exception:
-        if (workspace / ONLINE_ENV_REL_PATH).exists():
+        if online_config_path().exists():
             online_identity["configured"] = "invalid"
     identity["online"] = online_identity
     identity["cli"] = {"model": settings.cli_model}
@@ -312,9 +312,10 @@ class LLMRouter:
             if debug_enabled:
                 debug_attempts.append(self._debug_failed_attempt(attempt, exc))
 
+        cli_timeout_seconds = max(timeout_seconds or 0, self.settings.cli_timeout_seconds)
         cli = self.cli_client_factory(
             self.workspace,
-            timeout_seconds=timeout_seconds or self.settings.cli_timeout_seconds,
+            timeout_seconds=cli_timeout_seconds,
             model=self.settings.cli_model,
             executable=self.settings.cli_executable,
         )
@@ -363,7 +364,17 @@ class LLMRouter:
                     self._debug_failed_attempt(attempt, exc, raw_call=raw_call)
                 )
 
+        configuration_guidance = next(
+            (
+                attempt["guidance"]
+                for attempt in attempts
+                if attempt.get("backend") == "online" and attempt.get("guidance")
+            ),
+            None,
+        )
         message = f"LLM request `{task_name}` failed on both online and CLI routes. Request ID: {request_id}."
+        if configuration_guidance:
+            message = f"{message} {configuration_guidance['message']}"
         self._write_final_record(
             request_id,
             spec,
@@ -379,6 +390,7 @@ class LLMRouter:
             request_id=request_id,
             task_name=task_name,
             attempts=attempts,
+            configuration_guidance=configuration_guidance,
         )
 
     def _success_attempt(

@@ -97,8 +97,6 @@ class CLILLMClient:
             "--ephemeral",
             "--sandbox",
             "read-only",
-            "--ask-for-approval",
-            "never",
             "--cd",
             str(self.workspace),
         ]

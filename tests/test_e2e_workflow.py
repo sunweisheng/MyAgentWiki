@@ -236,12 +236,12 @@ def test_init_enables_post_ingest_review_auto_by_default(tmp_path: Path) -> None
     config_text = (workspace_dir / "config" / "project.yml").read_text(encoding="utf-8")
     assert "post_ingest:" in config_text
     assert "review_auto: true" in config_text
-    assert (workspace_dir / ".env.example").exists()
     assert not (workspace_dir / ".env").exists()
+    assert not (workspace_dir / ".env.example").exists()
     gitignore_text = (workspace_dir / ".gitignore").read_text(encoding="utf-8")
     assert ".env" in gitignore_text
     agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
-    assert "`.env`" in agents_text
+    assert "Skill 根目录的 `.env`" in agents_text
     assert not (workspace_dir / "CLAUDE.md").exists()
 
 

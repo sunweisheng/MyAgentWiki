@@ -12,7 +12,12 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultH
 from PIL import Image
 
 from ..debug_trace import current_debug_tracer, file_metadata, make_json_safe
-from ..runtime_env import load_simple_env
+from ..runtime_env import (
+    load_simple_env,
+    online_config_example_path,
+    online_config_path,
+    resolve_skill_root,
+)
 from .contracts import (
     LLMFunctionSpec,
     chat_completions_function_tool,
@@ -22,7 +27,6 @@ from .errors import LLMClientError, LLMConfigurationError, LLMResponseError
 from .repair import RawFunctionCall
 
 
-ONLINE_ENV_REL_PATH = Path(".env")
 RESPONSES_API_STYLE = "responses"
 CHAT_COMPLETIONS_API_STYLE = "chat_completions"
 SUPPORTED_API_STYLES = {RESPONSES_API_STYLE, CHAT_COMPLETIONS_API_STYLE}
@@ -36,6 +40,7 @@ ONLINE_ENVIRONMENT_KEYS = {
     "api_style": "MYAGENTWIKI_LLM_API_STYLE",
     "verify_ssl": "MYAGENTWIKI_LLM_VERIFY_SSL",
 }
+REQUIRED_ONLINE_CONFIG_FIELDS = ("base_url", "model", "api_key")
 
 
 def _online_environment_value(local_values: dict[str, str], name: str, default: str = "") -> str:
@@ -43,12 +48,43 @@ def _online_environment_value(local_values: dict[str, str], name: str, default: 
     return os.environ.get(name, local_values.get(name, default)).strip()
 
 
+def _online_configuration_guidance(*, status: str, missing_fields: tuple[str, ...] = ()) -> dict[str, Any]:
+    skill_root = resolve_skill_root()
+    env_path = online_config_path()
+    example_path = online_config_example_path()
+    required_variables = [ONLINE_ENVIRONMENT_KEYS[field] for field in REQUIRED_ONLINE_CONFIG_FIELDS]
+    missing_variables = [ONLINE_ENVIRONMENT_KEYS[field] for field in missing_fields]
+    listed_required = "、".join(f"`{name}`" for name in required_variables)
+    listed_missing = "、".join(f"`{name}`" for name in missing_variables)
+
+    if status == "missing_env_file":
+        template_hint = "请以同目录的 `.env.example` 为模板创建 `.env`" if example_path.exists() else "请在该目录创建 `.env`"
+        message = f"未找到 MyAgentWiki Skill 根目录的 `.env`。{template_hint}，并填写：{listed_required}。"
+    elif status == "invalid_env_file":
+        message = f"MyAgentWiki Skill 根目录的 `.env` 无法读取。请按同目录 `.env.example` 的格式修正，并确认填写：{listed_required}。"
+    else:
+        message = f"在线模型配置不完整。请在 MyAgentWiki Skill 根目录的 `.env` 或当前进程环境中补充：{listed_missing}。必填项为：{listed_required}。"
+
+    return {
+        "status": status,
+        "scope": "skill_root",
+        "skill_root": str(skill_root),
+        "env_file": str(env_path),
+        "example_file": str(example_path) if example_path.exists() else None,
+        "required_variables": required_variables,
+        "missing_variables": missing_variables,
+        "message": message,
+    }
+
+
 def load_online_config(workspace: Path) -> dict[str, Any]:
-    path = workspace / ONLINE_ENV_REL_PATH
+    del workspace
+    path = online_config_path()
     try:
         local_values = load_simple_env(path)
     except Exception as exc:
-        raise LLMConfigurationError(f"Online configuration `.env` could not be parsed: {exc}") from exc
+        guidance = _online_configuration_guidance(status="invalid_env_file")
+        raise LLMConfigurationError(guidance["message"], guidance=guidance) from exc
     values = {
         "protocol": _online_environment_value(
             local_values,
@@ -64,9 +100,13 @@ def load_online_config(workspace: Path) -> dict[str, Any]:
             RESPONSES_API_STYLE,
         ) or RESPONSES_API_STYLE,
     }
-    missing = [key for key in ("protocol", "base_url", "model", "api_key") if not values[key]]
+    missing = tuple(key for key in REQUIRED_ONLINE_CONFIG_FIELDS if not values[key])
     if missing:
-        raise LLMConfigurationError(f"Online configuration in `.env` is missing: {', '.join(missing)}.")
+        guidance = _online_configuration_guidance(
+            status="missing_env_file" if not path.exists() else "incomplete_env_file",
+            missing_fields=missing,
+        )
+        raise LLMConfigurationError(guidance["message"], guidance=guidance)
     if values["protocol"] != "openai_compatible":
         raise LLMConfigurationError("Only `openai_compatible` online providers are supported.")
     if values["api_style"] not in SUPPORTED_API_STYLES:

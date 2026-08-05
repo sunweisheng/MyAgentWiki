@@ -21,12 +21,19 @@ from myagentwiki.llm.router import build_route_identity
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_cli(*args: str, cwd: Path | None = None, llm_mode: str = "deterministic") -> dict:
+def run_cli(
+    *args: str,
+    cwd: Path | None = None,
+    llm_mode: str = "deterministic",
+    extra_env: dict[str, str] | None = None,
+) -> dict:
     command = [sys.executable, "-m", "myagentwiki.cli", *args, "--json"]
+    environment = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": llm_mode}
+    environment.update(extra_env or {})
     completed = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "MYAGENTWIKI_LLM_MODE": llm_mode},
+        env=environment,
         capture_output=True,
         text=True,
         check=True,
@@ -204,7 +211,7 @@ def test_init_creates_semantic_scaffold(tmp_path: Path) -> None:
         if line.strip()
     }
     assert "state/semantic_decisions.jsonl" in tracked_files
-    assert ".env.example" in tracked_files
+    assert ".env.example" not in tracked_files
 
 
 def test_semantic_batch_help_does_not_expose_internal_page_route_task() -> None:
@@ -510,14 +517,6 @@ def test_semantic_batch_can_use_online_function_calling(tmp_path: Path) -> None:
 
     server, thread = start_test_server(_SemanticFunctionHandler)
     try:
-        (workspace_dir / ".env").write_text(
-            f'MYAGENTWIKI_LLM_BASE_URL="http://127.0.0.1:{server.server_port}"\n'
-            'MYAGENTWIKI_LLM_MODEL="test-model"\n'
-            'MYAGENTWIKI_LLM_API_KEY="test-key"\n'
-            'MYAGENTWIKI_LLM_TIMEOUT_SECONDS="30"\n'
-            'MYAGENTWIKI_LLM_API_STYLE="chat_completions"\n',
-            encoding="utf-8",
-        )
         result = run_cli(
             "semantic-batch",
             "--task",
@@ -525,6 +524,13 @@ def test_semantic_batch_can_use_online_function_calling(tmp_path: Path) -> None:
             "--target-dir",
             str(workspace_dir),
             llm_mode="llm_assisted",
+            extra_env={
+                "MYAGENTWIKI_LLM_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                "MYAGENTWIKI_LLM_MODEL": "test-model",
+                "MYAGENTWIKI_LLM_API_KEY": "test-key",
+                "MYAGENTWIKI_LLM_TIMEOUT_SECONDS": "30",
+                "MYAGENTWIKI_LLM_API_STYLE": "chat_completions",
+            },
         )
     finally:
         server.shutdown()
@@ -588,6 +594,10 @@ def test_semantic_batch_route_failure_does_not_write_decisions(tmp_path: Path) -
             "PYTHONPATH": str(REPO_ROOT / "src"),
             "MYAGENTWIKI_LLM_MODE": "llm_assisted",
             "MYAGENTWIKI_CODEX_BIN": "/definitely/not-a-codex-executable",
+            "MYAGENTWIKI_SKILL_ROOT": str(tmp_path / "empty-skill-root"),
+            "MYAGENTWIKI_LLM_BASE_URL": "",
+            "MYAGENTWIKI_LLM_MODEL": "",
+            "MYAGENTWIKI_LLM_API_KEY": "",
         },
         capture_output=True,
         text=True,

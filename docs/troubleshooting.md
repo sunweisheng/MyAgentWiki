@@ -232,7 +232,7 @@ py -3.12 -m venv .venv
 优先检查：
 
 1. 查看 `logs/llm_requests.jsonl` 中对应 `request_id` 的线路、尝试次数、错误类型和 HTTP 状态。该日志不包含 API Key、完整正文、图片内容或完整原始输出。
-2. 如在线线路报配置错误，检查工作区私有的 `.env`；不要输出或提交其中的 API Key。
+2. 如在线线路报配置错误，检查 MyAgentWiki Skill 根目录私有的 `.env`，不要在用户工作区创建它；不要输出或提交其中的 API Key。
 3. 如在线线路报 403、404 等不可重试错误，它只会请求一次并立即切到 CLI，这属于预期行为。
 4. 如在线线路报 429、5xx、超时或结果合同错误，它最多执行三次，然后切到 CLI。
 5. 检查 `codex` 是否可执行、是否已登录；必要时核对 `MYAGENTWIKI_CODEX_BIN`、`MYAGENTWIKI_CODEX_MODEL`、`MYAGENTWIKI_CODEX_TIMEOUT_SECONDS`。

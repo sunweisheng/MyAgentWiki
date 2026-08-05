@@ -25,6 +25,7 @@ from myagentwiki.llm.contracts import get_function_spec
 from myagentwiki.llm.errors import LLMClientError, LLMRouteError
 from myagentwiki.llm.repair import RawFunctionCall
 from myagentwiki.llm.router import LLMRouter, LLMSettings
+from myagentwiki.runtime_env import SKILL_ROOT_ENVIRONMENT_VARIABLE
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,16 +66,19 @@ def write_debug_config(workspace: Path, *, logs_path: str = "logs", retention_da
     )
 
 
-def test_debug_tracer_records_nested_steps_full_snapshots_and_redacts_secrets(tmp_path: Path) -> None:
+def test_debug_tracer_records_nested_steps_full_snapshots_and_redacts_secrets(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     write_debug_config(workspace)
     secret = "secret-value-12345"
     access_token = "access-token-67890"
-    (workspace / ".env").write_text(
+    skill_root = tmp_path / "skill-root"
+    skill_root.mkdir()
+    (skill_root / ".env").write_text(
         f'MYAGENTWIKI_LLM_API_KEY="{secret}"\nGITHUB_TOKEN="{access_token}"\n',
         encoding="utf-8",
     )
+    monkeypatch.setenv(SKILL_ROOT_ENVIRONMENT_VARIABLE, str(skill_root))
 
     tracer = DebugTracer(workspace, "query", {"text": "测试", "api_key": secret}).start()
     try:
@@ -371,15 +375,18 @@ def request_stable_promotion(router: LLMRouter) -> dict:
     )
 
 
-def test_debug_llm_record_covers_retry_cli_fallback_validation_and_tokens(tmp_path: Path) -> None:
+def test_debug_llm_record_covers_retry_cli_fallback_validation_and_tokens(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     write_debug_config(workspace)
     secret = "debug-api-secret"
-    (workspace / ".env").write_text(
+    skill_root = tmp_path / "skill-root"
+    skill_root.mkdir()
+    (skill_root / ".env").write_text(
         f'MYAGENTWIKI_LLM_API_KEY="{secret}"\n',
         encoding="utf-8",
     )
+    monkeypatch.setenv(SKILL_ROOT_ENVIRONMENT_VARIABLE, str(skill_root))
     invalid_call = RawFunctionCall(
         "submit_claim_promotion_decision",
         '{"decision":"unsupported","confidence":0.8,"reason":"bad"}',

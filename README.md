@@ -4,7 +4,7 @@ MyAgentWiki 是一个面向 Codex 的本地知识编译系统（local knowledge 
 
 新工作区默认启用统一 LLM 调度器：先请求在线客户端；在线配置缺失、不可用或重试仍失败时，自动改用 Codex CLI 客户端。语义批处理、审核和页面生成等直接调用线路的流程会在两条线路都失败时以非零状态结束；Markdown 内嵌图片属于单附件降级边界，图片理解失败时会保留正文、图片占位和告警。
 
-在线客户端读取当前用户单独填写的 `.env`。这份文件不应提交到 Git，仓库只提供 `.env.example`。没有在线配置时无需中断配置流程，调度器会直接尝试 CLI 客户端。完全不使用 LLM 时，必须把相关任务显式设为 `deterministic`。
+在线客户端只读取 MyAgentWiki Skill 根目录的 `.env`，不读取用户工作区里的 `.env`。这份文件不应提交到 Git，Skill 根目录提供 `.env.example` 作为模板。没有在线配置时无需中断配置流程，调度器会直接尝试 CLI 客户端。完全不使用 LLM 时，必须把相关任务显式设为 `deterministic`。
 
 当前仓库既是：
 
@@ -199,7 +199,7 @@ New-Item -ItemType Junction `
 
 如果已经在 MyAgentWiki 仓库或由 `init` 生成的用户工作区中，Codex 还会读取根目录的 `AGENTS.md`，它会把 Agent 引导到共享规则 `Agent.md` 和 CLI-first 工作流。
 
-如果 Codex 要触发脚本里的在线模型调用链路，也应先检查当前工作区是否已经配置 `.env`；未配置时应先提醒补配，而不是把 API-Key 写进仓库跟踪文件。
+如果 Codex 要触发脚本里的在线模型调用链路，也应先检查 MyAgentWiki Skill 根目录是否已经配置 `.env`；未配置时应提醒在该目录按 `.env.example` 补配，而不是把 API Key 写进仓库跟踪文件或用户工作区。
 
 ## 文档导航
 
@@ -372,7 +372,7 @@ export MYAGENTWIKI_CODEX_BIN="codex"
 export MYAGENTWIKI_CODEX_TIMEOUT_SECONDS="120"
 ```
 
-OpenAI 兼容 `.env` 示例：
+在 MyAgentWiki Skill 根目录中，以 `.env.example` 创建 `.env` 后可填写如下配置：
 
 ```dotenv
 MYAGENTWIKI_LLM_PROTOCOL="openai_compatible"

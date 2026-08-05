@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .runtime_env import load_simple_env, load_simple_yaml
+from .runtime_env import load_simple_env, load_simple_yaml, online_config_path
 
 
 DEBUG_DIR_NAME = "debug"
@@ -127,7 +127,8 @@ def resolve_debug_settings(workspace: Path) -> tuple[Path, int]:
 
 def _known_secret_values(workspace: Path) -> tuple[str, ...]:
     values: list[str] = []
-    env_path = workspace / ".env"
+    del workspace
+    env_path = online_config_path()
     if env_path.exists():
         try:
             values.extend(

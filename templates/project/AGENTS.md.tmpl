@@ -20,7 +20,7 @@
 - 必须依赖语义理解、冲突裁决、stable 提升、页面重写的步骤，再交给 Agent
 - 当 `review-auto` 已自动把 claim 提升为 `stable` 时，Agent 默认还应继续让系统自动生成或刷新可读 `concept` 页与 `overview` 页，并允许 LLM 调度器做 grounded 改写
 - 已实现的 LLM 任务先请求在线客户端，在线配置缺失或失败时自动改用 Codex CLI 客户端；两条线路都失败时当前命令失败，不使用确定性结果掩盖错误
-- 在线模型配置只保存在当前工作区的 `.env`，不应提交到 Git；没有该文件时允许直接尝试 CLI 备用线路
+- 在线模型配置只保存在 MyAgentWiki Skill 根目录的 `.env`，不应提交到 Git；当前用户工作区不保存这份配置，没有该文件时允许直接尝试 CLI 备用线路
 - 完全离线执行时，应在对应任务中显式选择 `deterministic`
 - 用户通常只需要表达目标，不需要主动描述 `reading_pack`、`state/*.jsonl`、`review-apply` 这类内部结构
 - 查询时，Agent 应自动完成“先看候选页面，再按需回读证据，有风险就明确提示不确定性”的流程

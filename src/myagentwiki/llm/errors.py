@@ -14,6 +14,7 @@ class LLMClientError(Exception):
         http_status: int | None = None,
         repaired: bool = False,
         debug_details: dict[str, Any] | None = None,
+        guidance: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -23,9 +24,10 @@ class LLMClientError(Exception):
         self.http_status = http_status
         self.repaired = repaired
         self.debug_details = debug_details or {}
+        self.guidance = guidance or {}
 
     def as_record(self) -> dict[str, Any]:
-        return {
+        record = {
             "backend": self.backend,
             "kind": self.kind,
             "retryable": self.retryable,
@@ -33,15 +35,25 @@ class LLMClientError(Exception):
             "repaired": self.repaired,
             "message": self.message,
         }
+        if self.guidance:
+            record["guidance"] = self.guidance
+        return record
 
 
 class LLMConfigurationError(LLMClientError):
-    def __init__(self, message: str, *, backend: str = "online") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend: str = "online",
+        guidance: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(
             message,
             backend=backend,
             kind="configuration_error",
             retryable=False,
+            guidance=guidance,
         )
 
 
@@ -72,6 +84,7 @@ class LLMRouteError(Exception):
         request_id: str,
         task_name: str,
         attempts: list[dict[str, Any]],
+        configuration_guidance: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -85,6 +98,8 @@ class LLMRouteError(Exception):
             "task_name": task_name,
             "attempts": attempts,
         }
+        if configuration_guidance:
+            self.payload["configuration_guidance"] = configuration_guidance
 
 
 class LLMProjectConfigurationError(Exception):
@@ -103,7 +118,7 @@ def legacy_command_migration_message(*, location: str, command: list[str]) -> st
     if "myagentwiki.agent_online_hook" in command_text:
         suggestion = (
             "Remove `command`, set the task to `llm_assisted`, and keep the user's online "
-            "provider settings in the local `.env`; online is now the primary route."
+            "provider settings in the MyAgentWiki Skill root `.env`; online is now the primary route."
         )
     elif "myagentwiki.agent_cli_hook" in command_text:
         suggestion = (
